@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only --project tsconfig.dev.json src/index.ts",
     "build": "prisma generate && tsc",
-    "start": "npx prisma db push --accept-data-loss && npm run seed && node dist/index.js",
+    "start": "npx prisma db push --accept-data-loss && node dist/seed.js && node dist/index.js",
     "prestart": "npx prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
