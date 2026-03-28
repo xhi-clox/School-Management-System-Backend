@@ -20,9 +20,8 @@ if (!process.env.JWT_SECRET) {
 }
 
 app.use(helmet());
-app.use(cors({ 
-  origin: process.env.FRONTEND_URL || "https://your-frontend.vercel.app", 
-  credentials: true 
+app.use(cors({
+  origin: "*"
 }));
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
@@ -66,7 +65,7 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
   const currentYear = new Date().getFullYear();
   const mStart = new Date(currentYear, currentMonth, 1);
   const mEnd = new Date(currentYear, currentMonth + 1, 1);
-  
+
   const ledgerIncome = await prisma.ledgerEntry.aggregate({
     _sum: { amount: true },
     where: {
@@ -302,7 +301,7 @@ app.post('/students', authMiddleware, checkRole(['Admin']), async (req: Request,
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   let { admissionNo } = parsed.data;
   if (!admissionNo) {
     const count = await prisma.student.count();
@@ -313,12 +312,12 @@ app.post('/students', authMiddleware, checkRole(['Admin']), async (req: Request,
   // Ensure uniqueness (simple retry logic or just hope for best? Better to check)
   // For now, let's assume it's unique enough or the DB will throw an error. 
   // If DB throws error, we should catch it.
-  
+
   try {
-    const data: any = { 
+    const data: any = {
       ...parsed.data,
-      admissionNo: admissionNo!, 
-      section: parsed.data.section || '', 
+      admissionNo: admissionNo!,
+      section: parsed.data.section || '',
       gender: parsed.data.gender || 'Other',
       roll: parsed.data.roll || 0,
       admissionDate: parsed.data.admissionDate || new Date(),
@@ -346,38 +345,38 @@ app.post('/students', authMiddleware, checkRole(['Admin']), async (req: Request,
     res.status(201).json(student);
   } catch (e: any) {
     if (e.code === 'P2002') {
-       // Collision, try one more time with random suffix
-       const suffix = Math.floor(Math.random() * 1000);
-       const newAdm = `${admissionNo}-${suffix}`;
-       const retryData: any = { 
-         ...parsed.data,
-         admissionNo: newAdm,
-         section: parsed.data.section || '', 
-         gender: parsed.data.gender || 'Other',
-         roll: parsed.data.roll || 0,
-         admissionDate: parsed.data.admissionDate || new Date(),
-         bloodGroup: parsed.data.bloodGroup || '',
-         religion: parsed.data.religion || '',
-         banglaName: parsed.data.banglaName || '',
-         guardianPhone: parsed.data.guardianPhone || '',
-         guardianEmail: parsed.data.guardianEmail || '',
-         fatherName: parsed.data.fatherName || '',
-         motherName: parsed.data.motherName || '',
-         phone: parsed.data.phone || '',
-         email: parsed.data.email || '',
-         nationality: parsed.data.nationality || '',
-         medicalNote: parsed.data.medicalNote || '',
-         additionalNote: parsed.data.additionalNote || '',
-         birthCertNo: parsed.data.birthCertNo || '',
-         siblingsCount: parsed.data.siblingsCount ?? 0,
-         address: parsed.data.address || '',
-         academicYear: parsed.data.academicYear || '',
-         shift: parsed.data.shift || '',
-         avatar: parsed.data.avatar || '',
-         status: parsed.data.status || 'Active'
-       };
-       const student = await prisma.student.create({ data: retryData });
-       return res.status(201).json(student);
+      // Collision, try one more time with random suffix
+      const suffix = Math.floor(Math.random() * 1000);
+      const newAdm = `${admissionNo}-${suffix}`;
+      const retryData: any = {
+        ...parsed.data,
+        admissionNo: newAdm,
+        section: parsed.data.section || '',
+        gender: parsed.data.gender || 'Other',
+        roll: parsed.data.roll || 0,
+        admissionDate: parsed.data.admissionDate || new Date(),
+        bloodGroup: parsed.data.bloodGroup || '',
+        religion: parsed.data.religion || '',
+        banglaName: parsed.data.banglaName || '',
+        guardianPhone: parsed.data.guardianPhone || '',
+        guardianEmail: parsed.data.guardianEmail || '',
+        fatherName: parsed.data.fatherName || '',
+        motherName: parsed.data.motherName || '',
+        phone: parsed.data.phone || '',
+        email: parsed.data.email || '',
+        nationality: parsed.data.nationality || '',
+        medicalNote: parsed.data.medicalNote || '',
+        additionalNote: parsed.data.additionalNote || '',
+        birthCertNo: parsed.data.birthCertNo || '',
+        siblingsCount: parsed.data.siblingsCount ?? 0,
+        address: parsed.data.address || '',
+        academicYear: parsed.data.academicYear || '',
+        shift: parsed.data.shift || '',
+        avatar: parsed.data.avatar || '',
+        status: parsed.data.status || 'Active'
+      };
+      const student = await prisma.student.create({ data: retryData });
+      return res.status(201).json(student);
     }
     throw e;
   }
@@ -583,9 +582,9 @@ app.delete('/exam-types/:id', async (req: Request, res: Response) => {
 
 // Exams
 app.get('/exams', async (_req: Request, res: Response) => {
-  const exams = await prisma.exam.findMany({ 
+  const exams = await prisma.exam.findMany({
     include: { type: true },
-    orderBy: { startDate: 'desc' } 
+    orderBy: { startDate: 'desc' }
   });
   res.json(exams);
 });
@@ -618,13 +617,13 @@ app.post('/exams', async (req: Request, res: Response) => {
 app.get('/results', async (req: Request, res: Response) => {
   const { examId, subjectId, studentIds } = req.query as any;
   if (!examId) return res.status(400).json({ error: 'examId is required' });
-  
+
   const where: any = { examId };
   if (subjectId) where.subjectId = subjectId;
   if (studentIds) {
     where.studentId = { in: studentIds.split(',') };
   }
-  
+
   const results = await prisma.result.findMany({ where });
   res.json(results);
 });
@@ -660,9 +659,9 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
   // Fetch grading for this exam type
-  const grading = await prisma.gradingSystem.findMany({ 
+  const grading = await prisma.gradingSystem.findMany({
     where: { examTypeId: exam.typeId },
-    orderBy: { minPercent: 'desc' } 
+    orderBy: { minPercent: 'desc' }
   });
 
   const studentMap = new Map(students.map(s => [s.id, s.class]));
@@ -686,7 +685,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   await prisma.$transaction(
     marks.map(m => {
       const totalMarks = m.written + m.mcq + m.practical;
-      
+
       // Pass/Fail Logic
       // Written is mandatory, MCQ is optional (only fails if provided and below threshold)
       let isFail = false;
@@ -698,9 +697,9 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       const studentClass = studentMap.get(m.studentId);
       const scheduleForClass = schedules.find(s => s.class?.name === studentClass);
       const fullMarks = scheduleForClass?.fullMarks || (schedules.length > 0 ? schedules[0].fullMarks : 100) || 100;
-      
+
       const percent = (totalMarks / fullMarks) * 100;
-      
+
       let gradeInfo;
       if (isFail) {
         gradeInfo = grading.find(g => g.status === 'FAIL') || { grade: 'F', gp: 0 };
@@ -716,7 +715,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
             subjectId
           }
         },
-        update: { 
+        update: {
           ct: 0,
           cwhw: 0,
           dgc: 0,
@@ -728,10 +727,10 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
           gp: gradeInfo?.gp || 0,
           highestMarks // Store the calculated highest marks
         },
-        create: { 
-          studentId: m.studentId, 
-          examId, 
-          subjectId, 
+        create: {
+          studentId: m.studentId,
+          examId,
+          subjectId,
           ct: 0,
           cwhw: 0,
           dgc: 0,
@@ -753,7 +752,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
     where: { examId, subjectId },
     data: { highestMarks }
   });
-  
+
   res.json({ success: true, highestMarks });
 });
 
@@ -765,7 +764,7 @@ app.get('/schedules', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { examId } = parsed.data;
-  
+
   const schedules = await prisma.examSchedule.findMany({
     where: { examId },
     include: { subject: true },
@@ -788,17 +787,17 @@ app.post('/schedules', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks } = parsed.data;
-  
+
   // Note: Using examId_subjectId_classId unique constraint if classId is provided, else examId_subjectId
   // But Prisma update/upsert requires a unique key.
   // The schema defines @@unique([examId, subjectId, classId])
   // If classId is null, unique constraint might treat it differently depending on DB.
   // For now, let's just use create or findFirst+update logic if upsert is tricky with nullable fields in composite key.
   // Or just create new schedule.
-  
+
   // Actually, upsert with composite unique key where one part is nullable is tricky.
   // Let's use simple findFirst -> update or create logic.
-  
+
   const existing = await prisma.examSchedule.findFirst({
     where: { examId, subjectId, classId: classId || null }
   });
@@ -812,12 +811,12 @@ app.post('/schedules', async (req: Request, res: Response) => {
   }
 
   const schedule = await prisma.examSchedule.create({
-    data: { 
-      examId, 
+    data: {
+      examId,
       classId,
-      subjectId, 
-      date: new Date(date), 
-      startTime, 
+      subjectId,
+      date: new Date(date),
+      startTime,
       endTime,
       fullMarks,
       passMarks
@@ -1048,7 +1047,7 @@ app.post('/expenses', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   const result = await prisma.$transaction(async (tx) => {
     const expense = await tx.schoolExpense.create({ data: parsed.data });
     await tx.ledgerEntry.create({
@@ -1372,7 +1371,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
 
     // Determine Tuition Amount
     let tuitionAmount = 0;
-    
+
     // Priority 1: Student-specific tuition assignment
     const studentAssignment = assignments.find((a: any) => {
       const startsBeforeOrEqual = a.startYear < year || (a.startYear === year && a.startMonth <= month);
@@ -1385,7 +1384,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
       if (studentAssignment.discountPercent > 0) {
         tuitionAmount = tuitionAmount - (tuitionAmount * (studentAssignment.discountPercent / 100));
       }
-    } 
+    }
     // Priority 2: Class tuition fee from admission package
     else {
       const studentClass = await prisma.schoolClass.findFirst({
@@ -1553,13 +1552,13 @@ app.get('/attendance/teachers', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { date } = parsed.data;
   const day = new Date(String(date));
-  
+
   const teachers = await prisma.teacher.findMany({ orderBy: { name: 'asc' } });
   const records = await prisma.teacherAttendance.findMany({
     where: { teacherId: { in: teachers.map((t) => t.id) }, date: day },
   });
   const map = new Map(records.map((r) => [r.teacherId, r.status]));
-  
+
   const result = teachers.map((t) => ({
     teacherId: t.id,
     teacherName: t.name,
@@ -1766,11 +1765,11 @@ app.post('/attendance/teachers/save', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { date, records } = parsed.data;
   const day = new Date(String(date));
-  
+
   const teachers = await prisma.teacher.findMany();
   const ids = new Set(teachers.map((t) => t.id));
   const toSave = records.filter((r) => ids.has(r.teacherId));
-  
+
   await prisma.$transaction(
     toSave.map((r) =>
       prisma.teacherAttendance.upsert({
@@ -1815,7 +1814,7 @@ app.get('/admission-packages', async (req: Request, res: Response) => {
   const where: any = { isActive: true };
   if (classId) where.classId = String(classId);
   if (session) where.session = String(session);
-  
+
   const packages = await prisma.admissionPackage.findMany({
     where,
     include: { feeItems: true, class: true },
@@ -1836,12 +1835,12 @@ app.post('/admission-packages', async (req: Request, res: Response) => {
       isMandatory: z.boolean().default(true)
     }))
   });
-  
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   const { name, session, classId, description, feeItems } = parsed.data;
-  
+
   const pkg = await prisma.admissionPackage.create({
     data: {
       name,
@@ -1895,13 +1894,13 @@ app.put('/admission-packages/:id', async (req: Request, res: Response) => {
           }))
         });
       }
-      
+
       return await tx.admissionPackage.findUnique({
         where: { id },
         include: { feeItems: true, class: true }
       });
     });
-    
+
     res.json(result);
   } catch (error) {
     console.error(error);
@@ -1980,7 +1979,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       // 1. Create Student
       // Need to resolve class name from classId if not provided or just use pkg.class.name
       const className = pkg.class.name;
-      
+
       const studentData: any = {
         name: student.name,
         banglaName: student.banglaName,
@@ -2046,7 +2045,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
 
       // 3. Create Invoice
       const totalAmount = pkg.feeItems.reduce((sum, item) => sum + item.amount, 0);
-      
+
       const invoice = await tx.invoice.create({
         data: {
           studentId: newStudent.id,
@@ -2148,7 +2147,7 @@ app.get('/invoices', async (req: Request, res: Response) => {
   const { studentId } = req.query;
   const where: any = {};
   if (studentId) where.studentId = String(studentId);
-  
+
   const invoices = await prisma.invoice.findMany({
     where,
     include: { items: true, payments: true },
@@ -2162,21 +2161,21 @@ app.post('/invoices/from-package', async (req: Request, res: Response) => {
     studentId: z.string(),
     packageId: z.string()
   });
-  
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   const { studentId, packageId } = parsed.data;
-  
+
   const pkg = await prisma.admissionPackage.findUnique({
     where: { id: packageId },
     include: { feeItems: true }
   });
-  
+
   if (!pkg) return res.status(404).json({ error: 'Package not found' });
-  
+
   const totalAmount = pkg.feeItems.reduce((sum, item) => sum + item.amount, 0);
-  
+
   const invoice = await prisma.invoice.create({
     data: {
       studentId,
@@ -2192,7 +2191,7 @@ app.post('/invoices/from-package', async (req: Request, res: Response) => {
     },
     include: { items: true }
   });
-  
+
   res.json(invoice);
 });
 
@@ -2371,7 +2370,7 @@ app.get('/finance/transactions', async (req: Request, res: Response) => {
   const where: any = {};
   if (type) where.type = String(type);
   if (category) where.category = String(category);
-  
+
   const entries = await prisma.ledgerEntry.findMany({
     where,
     orderBy: { createdAt: 'desc' }
@@ -2463,7 +2462,7 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
   }));
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   const incoming = parsed.data;
   const typeIds = [...new Set(incoming.map(i => i.examTypeId))];
 
@@ -2471,7 +2470,7 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
     await tx.gradingSystem.deleteMany({
       where: { examTypeId: { in: typeIds } }
     });
-    await tx.gradingSystem.createMany({ 
+    await tx.gradingSystem.createMany({
       data: incoming.map(i => ({
         grade: i.grade,
         minPercent: i.minPercent,
@@ -2482,10 +2481,10 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
         writtenPass: i.writtenPass,
         mcqPass: i.mcqPass,
         totalPass: i.totalPass
-      })) 
+      }))
     });
   });
-  
+
   res.json({ success: true });
 });
 
@@ -2494,7 +2493,7 @@ app.get('/fee-particulars', async (req: Request, res: Response) => {
   const { target } = req.query;
   const where: any = {};
   if (target) where.target = String(target);
-  
+
   const particulars = await prisma.feeParticular.findMany({
     where,
     orderBy: { createdAt: 'asc' }
@@ -2514,9 +2513,9 @@ app.post('/fee-particulars/bulk', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  
+
   const { target, particulars } = parsed.data;
-  
+
   await prisma.$transaction([
     prisma.feeParticular.deleteMany({ where: { target } }),
     prisma.feeParticular.createMany({
@@ -2528,7 +2527,7 @@ app.post('/fee-particulars/bulk', async (req: Request, res: Response) => {
       }))
     })
   ]);
-  
+
   res.json({ success: true });
 });
 
@@ -2548,7 +2547,7 @@ app.get('/teachers/logins', authMiddleware, checkRole(['Admin']), async (_req: R
 app.post('/teachers/logins', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { teacherId, username, password, role, status } = req.body;
-    
+
     // For now, just return success (in real implementation, save to TeacherLogin table)
     const login = {
       id: Math.random().toString(36).substr(2, 9),
@@ -2560,7 +2559,7 @@ app.post('/teachers/logins', authMiddleware, checkRole(['Admin']), async (req: R
       createdAt: new Date(),
       lastLogin: null
     };
-    
+
     res.status(201).json(login);
   } catch (error) {
     console.error('Error creating teacher login:', error);
@@ -2572,7 +2571,7 @@ app.put('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req
   try {
     const { id } = req.params;
     const { password, status } = req.body;
-    
+
     // For now, just return success (in real implementation, update TeacherLogin table)
     const login = {
       id,
@@ -2580,7 +2579,7 @@ app.put('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req
       status,
       updatedAt: new Date()
     };
-    
+
     res.json(login);
   } catch (error) {
     console.error('Error updating teacher login:', error);
@@ -2591,7 +2590,7 @@ app.put('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req
 app.delete('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     // For now, just return success (in real implementation, delete from TeacherLogin table)
     res.status(204).send();
   } catch (error) {
@@ -2622,7 +2621,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
           ]
         }
       });
-      
+
       // For admin, check password (simplified - in production use proper hashing)
       if (user && user.email === email && password === 'fresh_password_2026') {
         // Admin found
@@ -2632,7 +2631,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
     } else if (role.toLowerCase() === 'teacher') {
       // Look for teacher in the teachers table
       console.log('Teacher login attempt:', { email, password, role });
-      
+
       const teacher = await prisma.teacher.findFirst({
         where: {
           OR: [
@@ -2642,18 +2641,18 @@ app.post('/auth/login', async (req: Request, res: Response) => {
           ]
         }
       });
-      
+
       console.log('Teacher found:', teacher ? 'YES' : 'NO');
       if (teacher) {
         console.log('Teacher details:', { id: teacher.id, name: teacher.name, email: teacher.email, employeeId: teacher.employeeId });
-        
+
         // For teachers, check if password matches teacher's employeeId or email
         // This is a simplified approach - in production, use the TeacherLogin table
-        if (password === teacher.employeeId || 
-            password === teacher.email.split('@')[0] || 
-            password === 'password' ||
-            password === 'test' ||
-            password === '123456') { // Added common test password
+        if (password === teacher.employeeId ||
+          password === teacher.email.split('@')[0] ||
+          password === 'password' ||
+          password === 'test' ||
+          password === '123456') { // Added common test password
           user = {
             id: teacher.id,
             email: teacher.email,
@@ -2689,7 +2688,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
           ]
         }
       });
-      
+
       if (student) {
         // For students, accept any password for now (simplified)
         user = {
@@ -2727,7 +2726,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
 app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
@@ -2815,7 +2814,7 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
 app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
@@ -2856,7 +2855,7 @@ app.get('/teacher/classes/:id/students', authMiddleware, checkRole(['Teacher']),
   try {
     const user = (req as any).user;
     const { id: classId } = req.params;
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
@@ -2876,12 +2875,12 @@ app.get('/teacher/classes/:id/students', authMiddleware, checkRole(['Teacher']),
     }
 
     const classInfo = teacher.classes[0];
-    
+
     // Get students for this class using Student model
     const students = await prisma.student.findMany({
-      where: { 
+      where: {
         class: classInfo.name,
-        section: classInfo.section 
+        section: classInfo.section
       },
       select: {
         id: true,
@@ -2904,7 +2903,7 @@ app.get('/teacher/classes/:id/students', authMiddleware, checkRole(['Teacher']),
 app.get('/teacher/subjects', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email }
@@ -2930,11 +2929,11 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
   try {
     const user = (req as any).user;
     const { classId, date } = req.query;
-    
+
     if (!classId || !date) {
       return res.status(400).json({ error: 'Class ID and date are required' });
     }
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
@@ -2954,12 +2953,12 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
     }
 
     const classInfo = teacher.classes[0];
-    
+
     // Get students for this class using Student model
     const students = await prisma.student.findMany({
-      where: { 
+      where: {
         class: classInfo.name,
-        section: classInfo.section 
+        section: classInfo.section
       },
       select: {
         id: true,
@@ -2987,11 +2986,11 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
   try {
     const user = (req as any).user;
     const { classId, date, records } = req.body;
-    
+
     if (!classId || !date || !records) {
       return res.status(400).json({ error: 'Class ID, date, and records are required' });
     }
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
@@ -3021,7 +3020,7 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
 app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    
+
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email }
@@ -3062,7 +3061,7 @@ app.get('/api/class-routine/classes', async (_req: Request, res: Response) => {
         section: true
       }
     });
-    
+
     // Group classes by name and collect sections
     const groupedClasses = classes.reduce((acc, cls) => {
       const existingClass = acc.find(c => c.name === cls.name);
@@ -3077,7 +3076,7 @@ app.get('/api/class-routine/classes', async (_req: Request, res: Response) => {
       }
       return acc;
     }, [] as any[]);
-    
+
     res.json(groupedClasses);
   } catch (error) {
     console.error('Error fetching classes:', error);
@@ -3097,7 +3096,7 @@ app.get('/api/class-routine/teachers', async (_req: Request, res: Response) => {
       },
       orderBy: { name: 'asc' }
     });
-    
+
     res.json(teachers);
   } catch (error) {
     console.error('Error fetching teachers:', error);
@@ -3116,7 +3115,7 @@ app.get('/api/class-routine/subjects', async (_req: Request, res: Response) => {
       },
       orderBy: { name: 'asc' }
     });
-    
+
     res.json(subjects);
   } catch (error) {
     console.error('Error fetching subjects:', error);
@@ -3140,7 +3139,7 @@ app.get('/api/class-routine/rooms', async (_req: Request, res: Response) => {
       { id: 'Lab-1', name: 'Computer Lab 1', capacity: 20 },
       { id: 'Lab-2', name: 'Science Lab 2', capacity: 20 }
     ];
-    
+
     res.json(rooms);
   } catch (error) {
     console.error('Error fetching rooms:', error);
@@ -3161,7 +3160,7 @@ app.get('/api/class-routine/time-slots', async (_req: Request, res: Response) =>
       { id: '6', period: 'Period 6', timeRange: '11:40 - 12:20', isBreak: false },
       { id: '7', period: 'Period 7', timeRange: '12:20 - 01:00', isBreak: false },
     ];
-    
+
     res.json(timeSlots);
   } catch (error) {
     console.error('Error fetching time slots:', error);
@@ -3172,31 +3171,31 @@ app.get('/api/class-routine/time-slots', async (_req: Request, res: Response) =>
 app.get('/api/class-routine/timetable', async (req: Request, res: Response) => {
   try {
     const { classId, section } = req.query;
-    
+
     if (!classId || !section) {
       return res.status(400).json({ error: 'Class ID and section are required' });
     }
-    
+
     // Get class information
     const classInfo = await prisma.schoolClass.findUnique({
       where: { id: classId as string }
     });
-    
+
     if (!classInfo || classInfo.section !== section) {
       return res.status(404).json({ error: 'Class not found' });
     }
-    
+
     // For now, return empty timetable since we don't have a routine table in the database
     // In a real implementation, you would have a RoutineEntry model and query like:
     // const routines = await prisma.routineEntry.findMany({
     //   where: { classId, section },
     //   include: { subject: true, teacher: true, room: true }
     // });
-    
+
     const emptyTimetable = {
       [`${classId}-${section}`]: {}
     };
-    
+
     res.json(emptyTimetable);
   } catch (error) {
     console.error('Error fetching timetable:', error);
@@ -3207,7 +3206,7 @@ app.get('/api/class-routine/timetable', async (req: Request, res: Response) => {
 app.post('/api/class-routine/update-entry', async (req: Request, res: Response) => {
   try {
     const { classId, section, day, period, subject, teacher, room } = req.body;
-    
+
     // Validation
     const schema = z.object({
       classId: z.string(),
@@ -3218,12 +3217,12 @@ app.post('/api/class-routine/update-entry', async (req: Request, res: Response) 
       teacher: z.string(),
       room: z.string()
     });
-    
+
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: parsed.error.flatten() });
     }
-    
+
     // For now, just return success since we don't have a routine table
     // In a real implementation, you would update the RoutineEntry table
     res.json({ success: true, message: 'Entry updated successfully' });
