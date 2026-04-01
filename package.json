@@ -11,7 +11,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "seed": "ts-node-dev --respawn --transpile-only --project tsconfig.dev.json src/seed.ts",
-    "seed:minimal": "npx ts-node minimal-seed.ts"
+    "seed:minimal": "npx ts-node src/seed-admin.ts"
   },
   "engines": {
     "node": ">=20.0.0"
