@@ -45,6 +45,10 @@ app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
 
+app.get('/', (_req: Request, res: Response) => {
+  res.json({ message: 'Academify School Management System API', status: 'running' });
+});
+
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ ok: true });
 });
