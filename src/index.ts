@@ -3440,10 +3440,10 @@ app.post('/api/class-routine/update-entry', async (req: Request, res: Response) 
 app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { examId, classId, marks } = req.body;
+    const { examId, classId, subjectId, marks } = req.body;
 
-    if (!examId || !classId || !marks || !Array.isArray(marks)) {
-      return res.status(400).json({ error: 'Exam ID, Class ID, and marks are required' });
+    if (!examId || !classId || !subjectId || !marks || !Array.isArray(marks)) {
+      return res.status(400).json({ error: 'Exam ID, Class ID, Subject ID, and marks are required' });
     }
 
     // Get teacher information
@@ -3469,9 +3469,10 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
       marks.map((mark: any) => 
         prisma.result.upsert({
           where: {
-            studentId_examId: {
+            studentId_examId_subjectId: {
               studentId: mark.studentId,
-              examId: examId
+              examId: examId,
+              subjectId: subjectId
             }
           },
           update: {
@@ -3485,6 +3486,7 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
           create: {
             studentId: mark.studentId,
             examId: examId,
+            subjectId: subjectId,
             written: parseFloat(mark.written) || 0,
             mcq: parseFloat(mark.mcq) || 0,
             practical: parseFloat(mark.practical) || 0,
