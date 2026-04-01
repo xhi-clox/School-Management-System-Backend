@@ -7,8 +7,7 @@ import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { addMonths } from 'date-fns';
 import jwt from 'jsonwebtoken';
-
-
+import bcrypt from 'bcryptjs';
 
 
 const prisma = new PrismaClient();
@@ -21,7 +20,8 @@ if (!process.env.JWT_SECRET) {
 
 app.use(helmet());
 app.use(cors({
-  origin: "*"
+  origin: true,
+  credentials: true
 }));
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
@@ -31,14 +31,37 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+app.get('/test-db', async (_req: Request, res: Response) => {
+  try {
+    const count = await prisma.user.count();
+    res.json({ ok: true, userCount: count });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/notifications', (_req: Request, res: Response) => {
+  res.json([
+    { id: '1', message: 'Welcome to the School Management System!', createdAt: new Date() },
+    { id: '2', message: 'New academic year setup is available.', createdAt: new Date() }
+  ]);
+});
+
 // Dashboard Stats
 app.get('/dashboard/stats', async (_req: Request, res: Response) => {
+  const now = new Date();
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(todayStart);
+  todayEnd.setDate(todayEnd.getDate() + 1);
+
   const [
     totalStudents,
     activeStudents,
     teachersCount,
     classesCount,
     staffCount,
+    todayAttendanceRaw,
     recentActivity,
     upcomingExams
   ] = await Promise.all([
@@ -47,6 +70,10 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     prisma.teacher.count(),
     prisma.schoolClass.count(),
     prisma.staff.count(),
+    prisma.attendance.findMany({
+      where: { date: { gte: todayStart, lt: todayEnd } },
+      select: { status: true }
+    }),
     prisma.student.findMany({
       take: 5,
       orderBy: { createdAt: 'desc' },
@@ -99,6 +126,16 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
   const expenseTotal = allTimeExpense._sum.amount || 0;
   const totalBalance = incomeTotal - expenseTotal;
 
+  const normalizedStatuses = todayAttendanceRaw.map((r) => String(r.status || '').trim().toLowerCase());
+  const absent = normalizedStatuses.filter((s) => s === 'absent' || s === 'a').length;
+  const late = normalizedStatuses.filter((s) => s === 'late' || s === 'l').length;
+  const onLeave = normalizedStatuses.filter((s) => s === 'leave' || s === 'lv' || s === 'on leave' || s === 'on-leave' || s === 'half-day' || s === 'h').length;
+  const explicitPresent = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
+  const tracked = explicitPresent + absent + late + onLeave;
+  const totalForToday = activeStudents || totalStudents;
+  const inferredPresent = Math.max(totalForToday - tracked, 0);
+  const present = explicitPresent + inferredPresent;
+
   // Build 6-month history for chart
   const historyIncome: Array<{ date: Date; amount: number }> = [];
   const historyExpense: Array<{ date: Date; amount: number }> = [];
@@ -135,6 +172,13 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
         income: historyIncome.map(h => ({ date: h.date, amount: h.amount })),
         expense: historyExpense.map(h => ({ date: h.date, amount: h.amount }))
       }
+    },
+    todayAttendance: {
+      total: totalForToday,
+      present,
+      absent,
+      late,
+      onLeave
     },
     upcomingExams: upcomingExams.map(ex => ({
       id: ex.id,
@@ -255,6 +299,21 @@ app.get('/students', authMiddleware, async (req: Request, res: Response) => {
 
   const students = await prisma.student.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(students);
+});
+
+app.get('/students/:id', authMiddleware, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const student = await prisma.student.findUnique({
+      where: { id },
+      include: { guardian: true, login: true, parent: true }
+    });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    res.json(student);
+  } catch (error) {
+    console.error('Error fetching student:', error);
+    res.status(500).json({ error: 'Failed to fetch student' });
+  }
 });
 
 app.post('/students', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
@@ -418,8 +477,8 @@ app.delete('/students/:id', authMiddleware, checkRole(['Admin']), async (req: Re
       prisma.attendance.deleteMany({ where: { studentId: id } }),
       prisma.result.deleteMany({ where: { studentId: id } }),
       prisma.studentFee.deleteMany({ where: { studentId: id } }),
-      (prisma as any).studentLogin.deleteMany({ where: { studentId: id } }),
-      (prisma as any).studentFeeAssignment.deleteMany({ where: { studentId: id } }),
+      prisma.studentLogin.deleteMany({ where: { studentId: id } }),
+      prisma.studentFeeAssignment.deleteMany({ where: { studentId: id } }),
       prisma.student.delete({ where: { id } }),
     ]);
     res.status(204).send();
@@ -459,7 +518,7 @@ app.post('/students/promote', async (req: Request, res: Response) => {
 
 // Student Logins
 app.get('/students/logins', async (_req: Request, res: Response) => {
-  const logins = await (prisma as any).studentLogin.findMany({
+  const logins = await prisma.studentLogin.findMany({
     include: { student: true },
     orderBy: { createdAt: 'desc' }
   });
@@ -491,7 +550,7 @@ app.post('/students/logins', async (req: Request, res: Response) => {
   const { studentId, username, password, role, status } = parsed.data;
 
   try {
-    const login = await (prisma as any).studentLogin.create({
+    const login = await prisma.studentLogin.create({
       data: {
         studentId,
         username,
@@ -522,7 +581,7 @@ app.put('/students/logins/:id', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   try {
-    const login = await (prisma as any).studentLogin.update({
+    const login = await prisma.studentLogin.update({
       where: { id },
       data: parsed.data,
     });
@@ -536,7 +595,7 @@ app.put('/students/logins/:id', async (req: Request, res: Response) => {
 app.delete('/students/logins/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
-    await (prisma as any).studentLogin.delete({ where: { id } });
+    await prisma.studentLogin.delete({ where: { id } });
     res.status(204).send();
   } catch (error: any) {
     if (error.code === 'P2025') {
@@ -549,16 +608,26 @@ app.delete('/students/logins/:id', async (req: Request, res: Response) => {
 
 // Exam Types
 app.get('/exam-types', async (_req: Request, res: Response) => {
-  const types = await prisma.examType.findMany({ orderBy: { name: 'asc' } });
-  res.json(types);
+  try {
+    const types = await prisma.examType.findMany({ orderBy: { name: 'asc' } });
+    res.json(types);
+  } catch (error: any) {
+    console.error('Error fetching exam types:', error);
+    res.status(500).json({ error: 'Failed to fetch exam types', details: error.message });
+  }
 });
 
 app.post('/exam-types', async (req: Request, res: Response) => {
-  const schema = z.object({ name: z.string().min(1) });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const type = await prisma.examType.create({ data: { name: parsed.data.name } });
-  res.status(201).json(type);
+  try {
+    const schema = z.object({ name: z.string().min(1) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const type = await prisma.examType.create({ data: { name: parsed.data.name } });
+    res.status(201).json(type);
+  } catch (error: any) {
+    console.error('Error creating exam type:', error);
+    res.status(500).json({ error: 'Failed to create exam type', details: error.message });
+  }
 });
 
 app.delete('/exam-types/:id', async (req: Request, res: Response) => {
@@ -759,14 +828,17 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 // Exam Schedules (Routine)
 app.get('/schedules', async (req: Request, res: Response) => {
   const schema = z.object({
-    examId: z.string().min(1),
+    examId: z.string().optional(),
   });
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { examId } = parsed.data;
 
+  const where: any = {};
+  if (examId) where.examId = examId;
+
   const schedules = await prisma.examSchedule.findMany({
-    where: { examId },
+    where,
     include: { subject: true },
     orderBy: { date: 'asc' }
   });
@@ -839,6 +911,68 @@ app.delete('/schedules/:id', async (req: Request, res: Response) => {
   }
 });
 
+// Institute Profile
+app.get('/institute', async (req: Request, res: Response) => {
+  const { email } = req.query as any;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+
+  try {
+    let institute = await prisma.institute.findUnique({ where: { email } });
+    if (!institute) {
+      // Create default if not exists
+      institute = await prisma.institute.create({
+        data: {
+          email,
+          name: 'NexGrad Institute',
+          targetLine: 'Excellence in Education',
+          currency: 'USD'
+        }
+      });
+    }
+    res.json(institute);
+  } catch (error) {
+    console.error('Error fetching institute profile:', error);
+    res.status(500).json({ error: 'Failed to fetch institute profile' });
+  }
+});
+
+app.post('/institute', async (req: Request, res: Response) => {
+  const { email } = req.query as any;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+
+  const schema = z.object({
+    name: z.string().optional(),
+    logo: z.string().optional(),
+    targetLine: z.string().optional(),
+    phone: z.string().optional(),
+    website: z.string().optional(),
+    address: z.string().optional(),
+    country: z.string().optional(),
+    currency: z.string().optional()
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const institute = await prisma.institute.upsert({
+      where: { email },
+      update: parsed.data,
+      create: { ...parsed.data, email }
+    });
+    res.json(institute);
+  } catch (error) {
+    console.error('Error updating institute profile:', error);
+    res.status(500).json({ error: 'Failed to update institute profile' });
+  }
+});
+
+// Users
+app.get('/users', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
+  const users = await prisma.user.findMany({ orderBy: { createdAt: 'desc' } });
+  res.json(users);
+});
+
 // Teachers
 app.get('/teachers', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const teachers = await prisma.teacher.findMany({ orderBy: { createdAt: 'desc' } });
@@ -856,7 +990,13 @@ app.post('/teachers', authMiddleware, checkRole(['Admin']), async (req: Request,
       (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
       z.string().optional()
     ),
-    status: z.string().optional()
+    status: z.string().optional(),
+    designation: z.string().optional(),
+    joiningDate: z.preprocess(
+      (v) => (typeof v === 'string' ? new Date(v) : undefined),
+      z.date().optional()
+    ),
+    salary: z.number().optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -874,6 +1014,12 @@ app.put('/teachers/:id', authMiddleware, checkRole(['Admin']), async (req: Reque
     phone: z.string().optional(),
     avatar: z.string().optional().nullable(),
     status: z.string().optional(),
+    designation: z.string().optional(),
+    joiningDate: z.preprocess(
+      (v) => (typeof v === 'string' ? new Date(v) : undefined),
+      z.date().optional()
+    ),
+    salary: z.number().optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -941,7 +1087,7 @@ app.post('/fees/:id/pay', async (req: Request, res: Response) => {
     await tx.ledgerEntry.create({
       data: {
         type: 'income',
-        category: fee.feeType.toLowerCase() + '_fee',
+        category: (fee.feeType && fee.feeType.toLowerCase()) + '_fee',
         amount: fee.amount - fee.discount,
         referenceInvoice: fee.id
       }
@@ -1053,7 +1199,7 @@ app.post('/expenses', async (req: Request, res: Response) => {
     await tx.ledgerEntry.create({
       data: {
         type: 'expense',
-        category: expense.category.toLowerCase().replace(/\s+/g, '_'),
+        category: (expense.category && expense.category.toLowerCase().replace(/\s+/g, '_')) || '',
         amount: expense.amount,
         referenceInvoice: expense.id,
         createdAt: expense.date
@@ -1129,7 +1275,7 @@ app.delete('/classes/:id', async (req: Request, res: Response) => {
     await prisma.$transaction([
       prisma.admissionPackage.deleteMany({ where: { classId: id } }),
       prisma.examSchedule.deleteMany({ where: { classId: id } }),
-      (prisma as any).feeStructure.deleteMany({ where: { classId: id } }),
+      prisma.feeStructure.deleteMany({ where: { classId: id } }),
       prisma.schoolClass.delete({ where: { id } }),
     ]);
     res.status(204).send();
@@ -1217,7 +1363,7 @@ app.get('/attendance', async (req: Request, res: Response) => {
 
 // Tuition Fee Structures
 app.get('/tuition/structures', async (_req: Request, res: Response) => {
-  const items = await (prisma as any).feeStructure.findMany({ where: { isActive: true }, include: { class: true } });
+  const items = await prisma.feeStructure.findMany({ where: { isActive: true }, include: { class: true } });
   res.json(items);
 });
 
@@ -1231,7 +1377,7 @@ app.post('/tuition/structures', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const item = await (prisma as any).feeStructure.create({ data: parsed.data });
+  const item = await prisma.feeStructure.create({ data: parsed.data });
   res.status(201).json(item);
 });
 
@@ -1246,7 +1392,7 @@ app.put('/tuition/structures/:id', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const item = await (prisma as any).feeStructure.update({ where: { id }, data: parsed.data });
+  const item = await prisma.feeStructure.update({ where: { id }, data: parsed.data });
   res.json(item);
 });
 
@@ -1254,8 +1400,8 @@ app.delete('/tuition/structures/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.$transaction([
-      (prisma as any).studentFeeAssignment.deleteMany({ where: { feeStructureId: id } }),
-      (prisma as any).feeStructure.delete({ where: { id } }),
+      prisma.studentFeeAssignment.deleteMany({ where: { feeStructureId: id } }),
+      prisma.feeStructure.delete({ where: { id } }),
     ]);
     res.status(204).send();
   } catch (error: any) {
@@ -1272,7 +1418,7 @@ app.get('/tuition/assignments', async (req: Request, res: Response) => {
   const { studentId } = req.query as any;
   const where: any = {};
   if (studentId) where.studentId = String(studentId);
-  const assignments = await (prisma as any).studentFeeAssignment.findMany({ where, include: { student: true, feeStructure: true } });
+  const assignments = await prisma.studentFeeAssignment.findMany({ where, include: { student: true, feeStructure: true } });
   res.json(assignments);
 });
 
@@ -1290,7 +1436,7 @@ app.post('/tuition/assignments', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const assignment = await (prisma as any).studentFeeAssignment.create({ data: parsed.data });
+  const assignment = await prisma.studentFeeAssignment.create({ data: parsed.data });
   res.status(201).json(assignment);
 });
 
@@ -1307,13 +1453,13 @@ app.put('/tuition/assignments/:id', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const updated = await (prisma as any).studentFeeAssignment.update({ where: { id }, data: parsed.data as any });
+  const updated = await prisma.studentFeeAssignment.update({ where: { id }, data: parsed.data as any });
   res.json(updated);
 });
 
 app.delete('/tuition/assignments/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  await (prisma as any).studentFeeAssignment.delete({ where: { id } });
+  await prisma.studentFeeAssignment.delete({ where: { id } });
   res.status(204).send();
 });
 
@@ -1338,7 +1484,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
   });
 
   // 2. Get all fee assignments for these students
-  const assignments = await (prisma as any).studentFeeAssignment.findMany({
+  const assignments = await prisma.studentFeeAssignment.findMany({
     where: {
       isActive: true,
       studentId: { in: activeStudents.map(s => s.id) }
@@ -1392,7 +1538,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
       });
       if (studentClass) {
         const pkg = admissionPackages.find(p => p.classId === studentClass.id);
-        const tuitionItem = pkg?.feeItems.find(fi => fi.name.toLowerCase().includes('tuition'));
+        const tuitionItem = pkg?.feeItems.find(fi => fi.name && fi.name.toLowerCase().includes('tuition'));
         if (tuitionItem) {
           tuitionAmount = tuitionItem.amount;
         }
@@ -1455,14 +1601,24 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
   // Resolve class + section
   let className = classNameParam as string | undefined;
   let section = sectionParam as string | undefined;
-  if (classId) {
+
+  if (studentId && (!className || !section)) {
+    const student = await prisma.student.findUnique({ where: { id: studentId } });
+    if (student) {
+      className = student.class;
+      section = student.section;
+    }
+  }
+
+  if (classId && (!className || !section)) {
     const cls = await prisma.schoolClass.findUnique({ where: { id: classId } });
     if (!cls) return res.status(404).json({ error: 'Class not found' });
     className = cls.name;
     section = section ?? cls.section;
   }
+
   if (!className || !section) {
-    return res.status(400).json({ error: 'class/section is required (or provide classId)' });
+    return res.status(400).json({ error: 'class/section is required (or provide classId or studentId)' });
   }
 
   const students = await prisma.student.findMany({
@@ -1486,7 +1642,7 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
 
   // Map to studentId -> day -> status letter
   const toLetter = (s: string) => {
-    const v = s.toLowerCase();
+    const v = s ? s.toLowerCase() : '';
     if (v.startsWith('pres')) return 'P';
     if (v.startsWith('abs')) return 'A';
     if (v.startsWith('lat')) return 'L';
@@ -1961,7 +2117,10 @@ app.post('/students/admission', async (req: Request, res: Response) => {
   });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  if (!parsed.success) {
+    console.error('Admission validation error:', parsed.error.flatten());
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
 
   const { student, guardian, packageId } = parsed.data;
 
@@ -1971,7 +2130,10 @@ app.post('/students/admission', async (req: Request, res: Response) => {
     include: { feeItems: true, class: true }
   });
 
-  if (!pkg) return res.status(404).json({ error: 'Admission package not found' });
+  if (!pkg) {
+    console.error('Package not found:', packageId);
+    return res.status(404).json({ error: 'Admission package not found', packageId });
+  }
 
   // Start Transaction
   try {
@@ -2065,10 +2227,16 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       return { student: newStudent, invoice };
     });
 
+    console.log(`[POST /students/admission] Generated Invoice ID: ${result.invoice.id}`);
     res.json(result);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to process admission' });
+  } catch (error: any) {
+    console.error('[POST /students/admission] Error:', error);
+    res.status(500).json({ 
+      error: 'Failed to process admission',
+      details: error?.message || 'Unknown error',
+      code: error?.code,
+      meta: error?.meta
+    });
   }
 });
 
@@ -2150,7 +2318,7 @@ app.get('/invoices', async (req: Request, res: Response) => {
 
   const invoices = await prisma.invoice.findMany({
     where,
-    include: { items: true, payments: true },
+    include: { items: true, payments: true, student: true },
     orderBy: { createdAt: 'desc' }
   });
   res.json(invoices);
@@ -2263,10 +2431,13 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
 
 app.get('/invoices/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
+  console.log(`[GET /invoices/:id] Fetching invoice with id: ${id}`);
   const invoice = await prisma.invoice.findUnique({
     where: { id },
     include: { items: true, payments: true, student: true }
   });
+  console.log(`[GET /invoices/:id] Result:`, invoice ? 'Found' : 'NULL');
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   res.json(invoice);
 });
 
@@ -2307,7 +2478,7 @@ app.delete('/staff/:id', async (req: Request, res: Response) => {
 
 // Staff Salaries
 app.get('/salaries/staff', async (_req: Request, res: Response) => {
-  const salaries = await (prisma as any).staffSalary.findMany({
+  const salaries = await prisma.staffSalary.findMany({
     include: { staff: true },
     orderBy: { paymentDate: 'desc' }
   });
@@ -2333,7 +2504,7 @@ app.post('/salaries/staff/process', async (req: Request, res: Response) => {
   const results = [];
 
   for (const s of staff) {
-    const salary = await (prisma as any).staffSalary.create({
+    const salary = await prisma.staffSalary.create({
       data: {
         staffId: s.id,
         baseSalary: 1000, // Default or fetch from staff profile if added
@@ -2350,7 +2521,7 @@ app.post('/salaries/staff/process', async (req: Request, res: Response) => {
 app.post('/salaries/staff/:id/pay', async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
-    const salary = await (tx as any).staffSalary.update({ where: { id }, data: { status: 'Paid' } });
+    const salary = await tx.staffSalary.update({ where: { id }, data: { status: 'Paid' } });
     await tx.ledgerEntry.create({
       data: {
         type: 'expense',
@@ -2436,15 +2607,23 @@ app.get('/finance/reports/fees', async (req: Request, res: Response) => {
 
 // Grading System
 app.get('/grading', async (req: Request, res: Response) => {
-  const { typeId } = req.query as any;
-  const where: any = {};
-  if (typeId) where.examTypeId = typeId;
-  const systems = await prisma.gradingSystem.findMany({
-    where,
-    include: { examType: true },
-    orderBy: { minPercent: 'desc' }
-  });
-  res.json(systems);
+  try {
+    const { typeId } = req.query as any;
+    const where: any = {};
+    if (typeId) where.examTypeId = typeId;
+    const systems = await prisma.gradingSystem.findMany({
+      where,
+      include: { examType: true },
+      orderBy: { minPercent: 'desc' }
+    });
+    res.json(systems.map(s => ({
+      ...s,
+      examType: s.examType || { id: s.examTypeId, name: 'Unknown' }
+    })));
+  } catch (error: any) {
+    console.error('Error fetching grading system:', error);
+    res.status(500).json({ error: 'Failed to fetch grading system', details: error.message });
+  }
 });
 
 app.post('/grading/bulk', async (req: Request, res: Response) => {
@@ -2534,9 +2713,10 @@ app.post('/fee-particulars/bulk', async (req: Request, res: Response) => {
 // Teacher Login Management
 app.get('/teachers/logins', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   try {
-    // For now, return empty array since we don't have a TeacherLogin table
-    // In a real implementation, you would have a TeacherLogin model
-    const logins: any[] = [];
+    const logins = await prisma.teacherLogin.findMany({
+      include: { teacher: true },
+      orderBy: { createdAt: 'desc' }
+    });
     res.json(logins);
   } catch (error) {
     console.error('Error fetching teacher logins:', error);
@@ -2548,17 +2728,15 @@ app.post('/teachers/logins', authMiddleware, checkRole(['Admin']), async (req: R
   try {
     const { teacherId, username, password, role, status } = req.body;
 
-    // For now, just return success (in real implementation, save to TeacherLogin table)
-    const login = {
-      id: Math.random().toString(36).substr(2, 9),
-      teacherId,
-      username,
-      password,
-      role: role || 'Teacher',
-      status: status || 'Active',
-      createdAt: new Date(),
-      lastLogin: null
-    };
+    const login = await prisma.teacherLogin.create({
+      data: {
+        teacherId,
+        username,
+        password,
+        role: role || 'Teacher',
+        status: status || 'Active',
+      },
+    });
 
     res.status(201).json(login);
   } catch (error) {
@@ -2572,13 +2750,13 @@ app.put('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req
     const { id } = req.params;
     const { password, status } = req.body;
 
-    // For now, just return success (in real implementation, update TeacherLogin table)
-    const login = {
-      id,
-      password,
-      status,
-      updatedAt: new Date()
-    };
+    const login = await prisma.teacherLogin.update({
+      where: { id },
+      data: {
+        ...(password && { password }),
+        ...(status && { status }),
+      },
+    });
 
     res.json(login);
   } catch (error) {
@@ -2590,8 +2768,7 @@ app.put('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req
 app.delete('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
-    // For now, just return success (in real implementation, delete from TeacherLogin table)
+    await prisma.teacherLogin.delete({ where: { id } });
     res.status(204).send();
   } catch (error) {
     console.error('Error deleting teacher login:', error);
@@ -2611,7 +2788,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
     let user = null;
 
     // Check different user types based on role
-    if (role.toLowerCase() === 'admin') {
+    if (role && role.toLowerCase() === 'admin') {
       // Look for admin user in the users table
       user = await prisma.user.findFirst({
         where: {
@@ -2623,12 +2800,12 @@ app.post('/auth/login', async (req: Request, res: Response) => {
       });
 
       // For admin, check password (simplified - in production use proper hashing)
-      if (user && user.email === email && password === 'fresh_password_2026') {
+      if (user && user.email === email && (password === 'fresh_password_2026' || await bcrypt.compare(password, user.password))) {
         // Admin found
       } else {
         user = null;
       }
-    } else if (role.toLowerCase() === 'teacher') {
+    } else if (role && role.toLowerCase() === 'teacher') {
       // Look for teacher in the teachers table
       console.log('Teacher login attempt:', { email, password, role });
 
@@ -2678,26 +2855,53 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         });
         console.log('Available teachers:', allTeachers);
       }
-    } else if (role.toLowerCase() === 'student') {
-      // Look for student in the students table
-      const student = await prisma.student.findFirst({
+    } else if (role && role.toLowerCase() === 'student') {
+      // First, try to find a StudentLogin with the provided credentials
+      const studentLogin = await prisma.studentLogin.findFirst({
         where: {
           OR: [
-            { email: email },
-            { admissionNo: email }
-          ]
-        }
+            { username: email },
+            { student: { email: email } },
+            { student: { admissionNo: email } }
+          ],
+          status: 'Active'
+        },
+        include: { student: true }
       });
 
-      if (student) {
-        // For students, accept any password for now (simplified)
-        user = {
-          id: student.id,
-          email: student.email,
-          role: 'Student',
-          name: student.name,
-          admissionNo: student.admissionNo
-        };
+      if (studentLogin) {
+        // Validate password from StudentLogin
+        // Note: In production, use bcrypt.compare for hashed passwords
+        if (studentLogin.password === password) {
+          user = {
+            id: studentLogin.student.id,
+            email: studentLogin.student.email,
+            role: 'Student',
+            name: studentLogin.student.name,
+            admissionNo: studentLogin.student.admissionNo
+          };
+        }
+      } else {
+        // Fallback: Look for student in the students table (simplified auth)
+        const student = await prisma.student.findFirst({
+          where: {
+            OR: [
+              { email: email },
+              { admissionNo: email }
+            ]
+          }
+        });
+
+        if (student) {
+          // For students without login records, accept any password (simplified)
+          user = {
+            id: student.id,
+            email: student.email,
+            role: 'Student',
+            name: student.name,
+            admissionNo: student.admissionNo
+          };
+        }
       }
     }
 
@@ -3232,8 +3436,344 @@ app.post('/api/class-routine/update-entry', async (req: Request, res: Response) 
   }
 });
 
-const port = process.env.PORT || 4000;
-app.listen(port, () => {
-  console.log(`Academify API listening on http://localhost:${port}`);
+// Teacher Marks Entry
+app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const { examId, classId, marks } = req.body;
+
+    if (!examId || !classId || !marks || !Array.isArray(marks)) {
+      return res.status(400).json({ error: 'Exam ID, Class ID, and marks are required' });
+    }
+
+    // Get teacher information
+    const teacher = await prisma.teacher.findFirst({
+      where: { email: user.email },
+      include: {
+        classes: {
+          where: { id: classId }
+        }
+      }
+    });
+
+    if (!teacher) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+
+    if (teacher.classes.length === 0) {
+      return res.status(403).json({ error: 'You are not assigned to this class' });
+    }
+
+    // Save marks for each student
+    const savedMarks = await prisma.$transaction(
+      marks.map((mark: any) => 
+        prisma.result.upsert({
+          where: {
+            studentId_examId: {
+              studentId: mark.studentId,
+              examId: examId
+            }
+          },
+          update: {
+            written: parseFloat(mark.written) || 0,
+            mcq: parseFloat(mark.mcq) || 0,
+            practical: parseFloat(mark.practical) || 0,
+            totalMarks: mark.total,
+            grade: mark.grade,
+            gp: mark.gp
+          },
+          create: {
+            studentId: mark.studentId,
+            examId: examId,
+            written: parseFloat(mark.written) || 0,
+            mcq: parseFloat(mark.mcq) || 0,
+            practical: parseFloat(mark.practical) || 0,
+            totalMarks: mark.total,
+            grade: mark.grade,
+            gp: mark.gp
+          }
+        })
+      )
+    );
+
+    res.json({ 
+      success: true, 
+      message: 'Marks saved successfully',
+      count: savedMarks.length 
+    });
+  } catch (error) {
+    console.error('Error saving marks:', error);
+    res.status(500).json({ error: 'Failed to save marks' });
+  }
+});
+
+// Student Portal Endpoints
+app.get('/api/student/dashboard', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId } = req.query;
+    
+    // Find student
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Mock data for student dashboard
+    const dashboardData = {
+      student: {
+        id: student.id,
+        name: student.name,
+        email: student.email,
+        class: student.class,
+        section: student.section,
+        roll: student.roll
+      },
+      attendance: {
+        present: 85,
+        absent: 5,
+        late: 2,
+        total: 92
+      },
+      upcomingExams: [
+        { date: '2024-01-15', subject: 'Mathematics', type: 'Mid Term' },
+        { date: '2024-01-20', subject: 'Science', type: 'Mid Term' }
+      ],
+      recentResults: [
+        { subject: 'Mathematics', marks: 85, grade: 'A', exam: 'Quiz 1' },
+        { subject: 'Science', marks: 78, grade: 'B', exam: 'Quiz 1' }
+      ],
+      notices: [
+        { id: '1', title: 'School Holiday', date: '2024-01-10', priority: 'normal' },
+        { id: '2', title: 'Exam Schedule Released', date: '2024-01-08', priority: 'high' }
+      ],
+      assignments: [
+        { id: '1', title: 'Math Homework', subject: 'Mathematics', dueDate: '2024-01-12', status: 'pending' },
+        { id: '2', title: 'Science Project', subject: 'Science', dueDate: '2024-01-15', status: 'submitted' }
+      ]
+    };
+
+    res.json(dashboardData);
+  } catch (error) {
+    console.error('Error fetching student dashboard:', error);
+    res.status(500).json({ error: 'Failed to fetch dashboard data' });
+  }
+});
+
+app.get('/api/student/profile', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId } = req.query;
+    
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    res.json(student);
+  } catch (error) {
+    console.error('Error fetching student profile:', error);
+    res.status(500).json({ error: 'Failed to fetch profile data' });
+  }
+});
+
+app.get('/api/student/results', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId, examType } = req.query;
+    
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      },
+      include: {
+        results: {
+          include: {
+            exam: true
+          }
+        }
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    res.json(student.results || []);
+  } catch (error) {
+    console.error('Error fetching student results:', error);
+    res.status(500).json({ error: 'Failed to fetch results data' });
+  }
+});
+
+app.get('/api/student/fees', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId } = req.query;
+    
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      },
+      include: {
+        fees: true
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    res.json(student.fees || []);
+  } catch (error) {
+    console.error('Error fetching student fees:', error);
+    res.status(500).json({ error: 'Failed to fetch fees data' });
+  }
+});
+
+app.get('/api/student/attendance', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId } = req.query;
+    
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      },
+      include: {
+        attendance: {
+          orderBy: { date: 'desc' },
+          take: 30
+        }
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    res.json(student.attendance || []);
+  } catch (error) {
+    console.error('Error fetching student attendance:', error);
+    res.status(500).json({ error: 'Failed to fetch attendance data' });
+  }
+});
+
+app.get('/api/student/exam-schedule', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId } = req.query;
+    
+    const student = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { email: email as string },
+          { id: studentId as string },
+          { admissionNo: email as string }
+        ]
+      }
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Get exam schedules for student's class
+    const schedules = await prisma.examSchedule.findMany({
+      where: {
+        class: {
+          name: student.class,
+          section: student.section
+        }
+      },
+      include: {
+        exam: true,
+        subject: true
+      },
+      orderBy: { date: 'asc' }
+    });
+
+    res.json(schedules);
+  } catch (error) {
+    console.error('Error fetching exam schedule:', error);
+    res.status(500).json({ error: 'Failed to fetch exam schedule' });
+  }
+});
+
+app.get('/api/student/notices', async (_req: Request, res: Response) => {
+  try {
+    // Return mock notices - in production, this would come from a Notice table
+    const notices = [
+      { id: '1', title: 'School Holiday', content: 'School will be closed on Friday', date: '2024-01-10', priority: 'normal', category: 'general' },
+      { id: '2', title: 'Exam Schedule Released', content: 'Mid-term exams start from Jan 15', date: '2024-01-08', priority: 'high', category: 'exam' },
+      { id: '3', title: 'Parent Meeting', content: 'Annual parent-teacher meeting on Jan 20', date: '2024-01-05', priority: 'normal', category: 'event' }
+    ];
+
+    res.json(notices);
+  } catch (error) {
+    console.error('Error fetching notices:', error);
+    res.status(500).json({ error: 'Failed to fetch notices' });
+  }
+});
+
+app.get('/api/student/messages', async (_req: Request, res: Response) => {
+  try {
+    // Return mock messages - in production, this would come from a Message table
+    const messages = [
+      { id: '1', from: 'Mr. John Doe', subject: 'Math Assignment', content: 'Please submit your homework by Friday', date: '2024-01-10', read: false },
+      { id: '2', from: 'Admin', subject: 'Fee Reminder', content: 'Your fee is due for this month', date: '2024-01-08', read: true },
+      { id: '3', from: 'Ms. Jane Smith', subject: 'Project Update', content: 'Your science project looks good', date: '2024-01-05', read: true }
+    ];
+
+    res.json(messages);
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+app.get('/api/student/assignments', async (_req: Request, res: Response) => {
+  try {
+    // Return mock assignments - in production, this would come from an Assignment table
+    const assignments = [
+      { id: '1', title: 'Math Homework', subject: 'Mathematics', description: 'Solve problems from chapter 5', dueDate: '2024-01-12', status: 'pending', priority: 'high' },
+      { id: '2', title: 'Science Project', subject: 'Science', description: 'Create a model of solar system', dueDate: '2024-01-15', status: 'submitted', priority: 'medium' },
+      { id: '3', title: 'English Essay', subject: 'English', description: 'Write an essay on your favorite book', dueDate: '2024-01-18', status: 'pending', priority: 'low' }
+    ];
+
+    res.json(assignments);
+  } catch (error) {
+    console.error('Error fetching assignments:', error);
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+const port = Number(process.env.PORT) || 4000;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Academify API listening on http://0.0.0.0:${port}`);
 });
 

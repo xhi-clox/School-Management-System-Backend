@@ -5,18 +5,19 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only --project tsconfig.dev.json src/index.ts",
     "build": "prisma generate && tsc",
-    "start": "npx prisma db push --accept-data-loss && node dist/seed.js && node dist/index.js",
+    "start": "node dist/index.js",
     "prestart": "npx prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "seed": "ts-node-dev --respawn --transpile-only --project tsconfig.dev.json src/seed.ts"
+    "seed": "ts-node-dev --respawn --transpile-only --project tsconfig.dev.json src/seed.ts",
+    "seed:minimal": "npx ts-node minimal-seed.ts"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@prisma/client": "^6.2.1",
+    "@prisma/client": "^6.19.2",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",

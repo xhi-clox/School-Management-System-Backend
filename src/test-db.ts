@@ -8,7 +8,7 @@ async function test() {
     console.log('Connected.');
     
     console.log('Checking Product model...');
-    const count = await (prisma as any).product.count();
+    const count = await prisma.product.count();
     console.log('Product count:', count);
     
     console.log('Success.');

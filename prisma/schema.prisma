@@ -103,6 +103,20 @@ model StudentLogin {
   student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
 }
 
+model TeacherLogin {
+  id        String   @id @default(cuid())
+  teacherId String   @unique
+  username  String   @unique
+  password  String
+  role      String   @default("Teacher")
+  status    String   @default("Active")
+  lastLogin DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacher   Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+}
+
 model AdmissionPackage {
   id          String   @id @default(cuid())
   name        String
@@ -260,11 +274,15 @@ model Teacher {
   phone      String
   avatar     String?
   status     String   @default("Active")
+  designation String  @default("Teacher")
+  joiningDate DateTime?
+  salary      Float?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   salaries   TeacherSalary[]
   attendance TeacherAttendance[]
   classes    SchoolClass[]
+  login      TeacherLogin?
 }
 
 model Staff {
@@ -473,6 +491,7 @@ model ExamSchedule {
   endTime   String
   fullMarks Int?
   passMarks Int?
+  roomNo    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   exam      Exam     @relation(fields: [examId], references: [id])
@@ -499,6 +518,21 @@ model GradingSystem {
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+model Institute {
+  id          String   @id @default(cuid())
+  name        String   @default("NexGrad Institute")
+  logo        String?
+  targetLine  String?  @default("Excellence in Education")
+  phone       String?
+  website     String?
+  address     String?
+  country     String?
+  email       String   @unique
+  currency    String   @default("USD")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model FeeParticular {
