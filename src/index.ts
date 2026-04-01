@@ -13,16 +13,34 @@ import bcrypt from 'bcryptjs';
 const prisma = new PrismaClient();
 const app = express();
 
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGINS ||
+    'https://school-management-system-vkqo.vercel.app,http://localhost:3000,http://127.0.0.1:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser clients (no Origin header)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Data'],
+};
+
 // Set fallback JWT_SECRET if not in environment
 if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'fallback-jwt-secret-for-development';
 }
 
 app.use(helmet());
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
