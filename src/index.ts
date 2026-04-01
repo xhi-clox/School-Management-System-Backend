@@ -3440,7 +3440,7 @@ app.post('/api/class-routine/update-entry', async (req: Request, res: Response) 
 app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { examId, classId, marks } = req.body;
+    const { examId, classId, marks, subjectId: requestedSubjectId } = req.body;
 
     if (!examId || !classId || !marks || !Array.isArray(marks)) {
       return res.status(400).json({ error: 'Exam ID, Class ID, and marks are required' });
@@ -3464,14 +3464,35 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
+    // Resolve subject for this marks submission.
+    // Prefer explicit subjectId from request, then per-mark subjectId,
+    // then teacher's assigned subject mapped by name.
+    let fallbackSubjectId: string | undefined = requestedSubjectId;
+    if (!fallbackSubjectId) {
+      const teacherSubjectName = String((teacher as any).subject || '').trim();
+      if (teacherSubjectName) {
+        const subject = await prisma.subject.findFirst({
+          where: { name: teacherSubjectName },
+          select: { id: true }
+        });
+        fallbackSubjectId = subject?.id;
+      }
+    }
+
     // Save marks for each student
     const savedMarks = await prisma.$transaction(
-      marks.map((mark: any) => 
-        prisma.result.upsert({
+      marks.map((mark: any) => {
+        const resolvedSubjectId = mark.subjectId || fallbackSubjectId;
+        if (!resolvedSubjectId) {
+          throw new Error('subjectId is required to save marks');
+        }
+
+        return prisma.result.upsert({
           where: {
-            studentId_examId: {
+            studentId_examId_subjectId: {
               studentId: mark.studentId,
-              examId: examId
+              examId: examId,
+              subjectId: resolvedSubjectId
             }
           },
           update: {
@@ -3485,6 +3506,7 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
           create: {
             studentId: mark.studentId,
             examId: examId,
+            subjectId: resolvedSubjectId,
             written: parseFloat(mark.written) || 0,
             mcq: parseFloat(mark.mcq) || 0,
             practical: parseFloat(mark.practical) || 0,
@@ -3493,7 +3515,7 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
             gp: mark.gp
           }
         })
-      )
+      })
     );
 
     res.json({ 
