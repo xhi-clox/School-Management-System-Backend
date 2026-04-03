@@ -13,24 +13,37 @@ import bcrypt from 'bcryptjs';
 const prisma = new PrismaClient();
 const app = express();
 
-const allowedOrigins = new Set(
-  (process.env.CORS_ORIGINS ||
-    'https://school-management-system-vkqo.vercel.app,http://localhost:3000,http://127.0.0.1:3000')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean)
-);
+/** Always merged with CORS_ORIGINS so Railway env cannot accidentally drop the production frontend. */
+const DEFAULT_CORS_ORIGINS = [
+  'https://school-management-system-vkqo.vercel.app',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
+
+const extraOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const allowedOrigins = new Set([...DEFAULT_CORS_ORIGINS, ...extraOrigins]);
+
+const isVercelPreviewOrigin = (origin: string) =>
+  /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
 
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    // Allow non-browser clients (no Origin header)
+    // Non-browser clients (curl, server-to-server) — no Origin header
     if (!origin) return callback(null, true);
     if (allowedOrigins.has(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    // Vercel preview deployments (random subdomain)
+    if (isVercelPreviewOrigin(origin)) return callback(null, true);
+    // Do not throw: throwing breaks preflight responses and strips CORS headers
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Data'],
+  optionsSuccessStatus: 204,
 };
 
 // Set fallback JWT_SECRET if not in environment
@@ -38,7 +51,11 @@ if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'fallback-jwt-secret-for-development';
 }
 
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '15mb' }));
@@ -46,7 +63,12 @@ app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
 
 app.get('/', (_req: Request, res: Response) => {
-  res.json({ message: 'Academify School Management System API', status: 'running' });
+  res.json({
+    ok: true,
+    service: 'Academify School Management System API',
+    status: 'running',
+    message: 'API is running',
+  });
 });
 
 app.get('/health', (_req: Request, res: Response) => {
