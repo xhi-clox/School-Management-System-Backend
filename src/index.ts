@@ -37,8 +37,7 @@ const corsOptions: cors.CorsOptions = {
     if (allowedOrigins.has(origin)) return callback(null, true);
     // Vercel preview deployments (random subdomain)
     if (isVercelPreviewOrigin(origin)) return callback(null, true);
-    // Do not throw: throwing breaks preflight responses and strips CORS headers
-    return callback(null, false);
+    return callback(new Error('CORS not allowed'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
