@@ -27,19 +27,32 @@ const extraOrigins = (process.env.CORS_ORIGINS || '')
 
 const allowedOrigins = new Set([...DEFAULT_CORS_ORIGINS, ...extraOrigins]);
 
+// ✅ Better Vercel matcher (handles ALL preview URLs)
 const isVercelPreviewOrigin = (origin: string) =>
-  /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
+  /^https:\/\/.*\.vercel\.app$/i.test(origin);
 
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    // Non-browser clients (curl, server-to-server) — no Origin header
+    console.log('Incoming Origin:', origin); // 🔍 debug
+
+    // Allow non-browser requests
     if (!origin) return callback(null, true);
-    if (allowedOrigins.has(origin)) return callback(null, true);
-    // Vercel preview deployments (random subdomain)
-    if (isVercelPreviewOrigin(origin)) return callback(null, true);
-    // Do not throw: throwing breaks preflight responses and strips CORS headers
-    return callback(null, false);
+
+    // Allow exact matches
+    if (allowedOrigins.has(origin)) {
+      return callback(null, origin); // ✅ IMPORTANT
+    }
+
+    // Allow all Vercel previews
+    if (isVercelPreviewOrigin(origin)) {
+      return callback(null, origin); // ✅ IMPORTANT
+    }
+
+    // ❗ Instead of false → send error (so headers still handled properly)
+    console.log('Blocked by CORS:', origin);
+    return callback(new Error('Not allowed by CORS'));
   },
+
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Data'],
@@ -58,6 +71,17 @@ app.use(
 );
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+app.use((req: Request, res: Response, next: Function) => {
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Data');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    return res.sendStatus(204);
+  }
+  next();
+});
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
