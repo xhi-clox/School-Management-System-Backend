@@ -13,6 +13,20 @@ import bcrypt from 'bcryptjs';
 const prisma = new PrismaClient();
 const app = express();
 
+// Before helmet/cors/body parsers so platform health probes always get a fast 200
+app.get('/health', (_req: Request, res: Response) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+app.get('/', (_req: Request, res: Response) => {
+  res.status(200).json({
+    ok: true,
+    service: 'Academify School Management System API',
+    status: 'running',
+    message: 'API is running',
+  });
+});
+
 /** Always merged with CORS_ORIGINS so Railway env cannot accidentally drop the production frontend. */
 const DEFAULT_CORS_ORIGINS = [
   'https://school-management-system-vkqo.vercel.app',
@@ -33,29 +47,26 @@ const isVercelPreviewOrigin = (origin: string) =>
 
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    console.log('Incoming Origin:', origin); // 🔍 debug
-
-    // Allow non-browser requests
+    // Allow non-browser requests (curl, server-to-server, some health checks)
     if (!origin) return callback(null, true);
 
-    // Allow exact matches
-    if (allowedOrigins.has(origin)) {
-      return callback(null, origin); // ✅ IMPORTANT
+    const trimmed = origin.trim();
+    if (allowedOrigins.has(trimmed)) {
+      return callback(null, trimmed);
     }
 
-    // Allow all Vercel previews
-    if (isVercelPreviewOrigin(origin)) {
-      return callback(null, origin); // ✅ IMPORTANT
+    if (isVercelPreviewOrigin(trimmed)) {
+      return callback(null, trimmed);
     }
 
-    // ❗ Instead of false → send error (so headers still handled properly)
-    console.log('Blocked by CORS:', origin);
-    return callback(new Error('Not allowed by CORS'));
+    console.warn('Blocked by CORS:', trimmed);
+    return callback(null, false);
   },
 
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Data'],
+  // Omit allowedHeaders so Access-Control-Request-Headers is echoed; a fixed
+  // list breaks preflight when the browser asks for extra headers (casing, tooling).
   optionsSuccessStatus: 204,
 };
 
@@ -64,40 +75,18 @@ if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'fallback-jwt-secret-for-development';
 }
 
+// CORS before helmet so OPTIONS preflight always gets ACAO / ACAH / ACAM
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
   })
 );
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
-app.use((req: Request, res: Response, next: Function) => {
-  if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Data');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    return res.sendStatus(204);
-  }
-  next();
-});
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
-
-app.get('/', (_req: Request, res: Response) => {
-  res.json({
-    ok: true,
-    service: 'Academify School Management System API',
-    status: 'running',
-    message: 'API is running',
-  });
-});
-
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ ok: true });
-});
 
 app.get('/test-db', async (_req: Request, res: Response) => {
   try {
