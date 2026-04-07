@@ -46,27 +46,10 @@ const isVercelPreviewOrigin = (origin: string) =>
   /^https:\/\/.*\.vercel\.app$/i.test(origin);
 
 const corsOptions: cors.CorsOptions = {
-  origin: (origin, callback) => {
-    // Allow non-browser requests (curl, server-to-server, some health checks)
-    if (!origin) return callback(null, true);
-
-    const trimmed = origin.trim();
-    if (allowedOrigins.has(trimmed)) {
-      return callback(null, trimmed);
-    }
-
-    if (isVercelPreviewOrigin(trimmed)) {
-      return callback(null, trimmed);
-    }
-
-    return callback(new Error('CORS not allowed'));
-  },
-
+  origin: true, // Allow all origins
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  // Omit allowedHeaders so Access-Control-Request-Headers is echoed; a fixed
-  // list breaks preflight when the browser asks for extra headers (casing, tooling).
-  optionsSuccessStatus: 204,
+  optionsSuccessStatus: 200,
 };
 
 // Set fallback JWT_SECRET if not in environment
