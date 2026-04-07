@@ -59,7 +59,7 @@ const corsOptions: cors.CorsOptions = {
       return callback(null, trimmed);
     }
 
-    return callback(new Error('CORS not allowed'));
+    return callback(null, false);
   },
 
   credentials: true,
