@@ -2113,8 +2113,7 @@ app.delete('/admission-packages/:id', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to delete package' });
   }
 });
-
-// Create Student with Admission Package (Transaction)
+// Replace your existing app.post('/students/admission', ...) with this:
 app.post('/students/admission', async (req: Request, res: Response) => {
   const schema = z.object({
     student: z.object({
@@ -2131,11 +2130,11 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       medicalNote: z.string().optional(),
       additionalNote: z.string().optional(),
       birthCertNo: z.string().optional(),
-      siblingsCount: z.number().int().optional(),
+      siblingsCount: z.coerce.number().int().optional(), // Change: added z.coerce.number()
       classId: z.string(), // This is SchoolClass ID
       section: z.string().optional(),
       shift: z.string().optional(),
-      roll: z.number().optional(),
+      roll: z.coerce.number().optional(), // Change: added z.coerce.number()
       academicYear: z.string().optional(),
     }),
     guardian: z.object({
@@ -2178,7 +2177,6 @@ app.post('/students/admission', async (req: Request, res: Response) => {
   try {
     const result = await prisma.$transaction(async (tx) => {
       // 1. Create Student
-      // Need to resolve class name from classId if not provided or just use pkg.class.name
       const className = pkg.class.name;
 
       const studentData: any = {
@@ -2197,16 +2195,16 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         birthCertNo: student.birthCertNo,
         siblingsCount: student.siblingsCount ?? 0,
         class: className,
-        section: student.section || pkg.class.section, // Default to class section if not provided
+        section: student.section || pkg.class.section,
         shift: student.shift,
-        roll: student.roll || 0, // Should be auto-generated or handled
+        roll: student.roll || 0,
         academicYear: student.academicYear || pkg.session,
         fatherName: guardian.fatherName,
         motherName: guardian.motherName,
         guardianPhone: guardian.guardianPhone,
         guardianEmail: guardian.guardianEmail,
         address: guardian.address || guardian.guardianAddress,
-        admissionNo: `ADM-${Date.now()}`, // Simple auto-gen
+        admissionNo: `ADM-${Date.now()}`,
         status: 'pending_payment'
       };
 
@@ -2214,7 +2212,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         data: studentData
       });
 
-      // 2. Create or update Guardian record with normalized fields
+      // 2. Create or update Guardian record
       await (tx as any).guardian.upsert({
         where: { studentId: newStudent.id },
         update: {
@@ -2266,15 +2264,12 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       return { student: newStudent, invoice };
     });
 
-    console.log(`[POST /students/admission] Generated Invoice ID: ${result.invoice.id}`);
     res.json(result);
   } catch (error: any) {
     console.error('[POST /students/admission] Error:', error);
     res.status(500).json({ 
       error: 'Failed to process admission',
-      details: error?.message || 'Unknown error',
-      code: error?.code,
-      meta: error?.meta
+      details: error?.message || 'Unknown error'
     });
   }
 });
