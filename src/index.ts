@@ -88,6 +88,7 @@ app.get('/notifications', (_req: Request, res: Response) => {
 
 // Dashboard Stats
 app.get('/dashboard/stats', async (_req: Request, res: Response) => {
+  try {
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
@@ -233,6 +234,10 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
       date: a.createdAt
     }))
   });
+  } catch (error: any) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: 'Failed to load dashboard stats' });
+  }
 });
 
 // Admin - Reset Data
