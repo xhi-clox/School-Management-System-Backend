@@ -53,7 +53,7 @@ async function main() {
   
   console.log('\n📦 Available Admission Packages:');
   packages.forEach(pkg => {
-    const total = pkg.feeItems.reduce((sum, item) => sum + item.amount, 0);
+    const total = pkg.feeItems.reduce((sum, item) => sum + Number(item.amount), 0);
     console.log(`- ${pkg.name} (${pkg.class?.name}): $${total}`);
   });
 }

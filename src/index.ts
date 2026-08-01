@@ -3,7 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { addMonths } from 'date-fns';
 import jwt from 'jsonwebtoken';
@@ -12,6 +12,18 @@ import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 const app = express();
+
+// Serialize Prisma.Decimal money values as plain numbers so the frontend keeps receiving numbers.
+// decimal.js's default toJSON() returns a string, so patch it before Express serializes anything.
+(Prisma.Decimal.prototype as any).toJSON = function (this: Prisma.Decimal) {
+  return this.toNumber();
+};
+app.set('json replacer', (_key: string, value: unknown) =>
+  value instanceof Prisma.Decimal ? value.toNumber() : value
+);
+
+const money = (v: any): Prisma.Decimal => new Prisma.Decimal(v ?? 0);
+const roundMoney = (v: any): Prisma.Decimal => money(v).toDecimalPlaces(2);
 
 // Before helmet/cors/body parsers so platform health probes always get a fast 200
 app.get('/health', (_req: Request, res: Response) => {
@@ -226,9 +238,9 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     where: { type: 'expense' }
   });
 
-  const incomeTotal = allTimeIncome._sum.amount || 0;
-  const expenseTotal = allTimeExpense._sum.amount || 0;
-  const totalBalance = incomeTotal - expenseTotal;
+  const incomeTotal = money(allTimeIncome._sum.amount);
+  const expenseTotal = money(allTimeExpense._sum.amount);
+  const totalBalance = incomeTotal.minus(expenseTotal);
 
   const normalizedStatuses = todayAttendanceRaw.map((r) => String(r.status || '').trim().toLowerCase());
   const absent = normalizedStatuses.filter((s) => s === 'absent' || s === 'a').length;
@@ -254,8 +266,8 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
       _sum: { amount: true },
       where: { type: 'expense', createdAt: { gte: histStart, lt: histEnd } }
     });
-    historyIncome.push({ date: histStart, amount: li._sum.amount || 0 });
-    historyExpense.push({ date: histStart, amount: le._sum.amount || 0 });
+    historyIncome.push({ date: histStart, amount: money(li._sum.amount).toNumber() });
+    historyExpense.push({ date: histStart, amount: money(le._sum.amount).toNumber() });
   }
 
   res.json({
@@ -270,7 +282,7 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     financials: {
       income: incomeTotal,
       expense: expenseTotal,
-      profit: incomeTotal - expenseTotal,
+      profit: incomeTotal.minus(expenseTotal),
       totalBalance,
       history: {
         income: historyIncome.map(h => ({ date: h.date, amount: h.amount })),
@@ -357,10 +369,10 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
         _sum: { amount: true },
         where: { type: 'expense', createdAt: { gte: start, lt: end } }
       });
-      const incomeTotal = income._sum.amount || 0;
-      const expenseTotal = expense._sum.amount || 0;
+      const incomeTotal = money(income._sum.amount);
+      const expenseTotal = money(expense._sum.amount);
       return res.json({
-        total: incomeTotal - expenseTotal,
+        total: incomeTotal.minus(expenseTotal),
         incomeTotal,
         expenseTotal
       });
@@ -372,9 +384,9 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
       take: limit
     });
 
-    const total = entries.reduce((s, e) => s + e.amount, 0);
+    const total = entries.reduce((s, e) => s.plus(e.amount), money(0));
     const map: Record<string, number> = {};
-    for (const e of entries) map[e.category] = (map[e.category] || 0) + e.amount;
+    for (const e of entries) map[e.category] = money(map[e.category]).plus(e.amount).toNumber();
     const breakdown = Object.entries(map).map(([category, amount]) => ({ category, amount }));
 
     res.json({
@@ -1196,7 +1208,7 @@ app.post('/fees/:id/pay', async (req: Request, res: Response) => {
       data: {
         type: 'income',
         category: (fee.feeType && fee.feeType.toLowerCase()) + '_fee',
-        amount: fee.amount - fee.discount,
+        amount: fee.amount.minus(fee.discount),
         referenceInvoice: fee.id
       }
     });
@@ -1624,7 +1636,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
     }
 
     // Determine Tuition Amount
-    let tuitionAmount = 0;
+    let tuitionAmount = money(0);
 
     // Priority 1: Student-specific tuition assignment
     const studentAssignment = assignments.find((a: any) => {
@@ -1634,9 +1646,10 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
     });
 
     if (studentAssignment) {
-      tuitionAmount = studentAssignment.customAmount ?? studentAssignment.feeStructure.amount;
+      const base = money(studentAssignment.customAmount ?? studentAssignment.feeStructure.amount);
+      tuitionAmount = base;
       if (studentAssignment.discountPercent > 0) {
-        tuitionAmount = tuitionAmount - (tuitionAmount * (studentAssignment.discountPercent / 100));
+        tuitionAmount = base.minus(base.times(studentAssignment.discountPercent).div(100)).toDecimalPlaces(2);
       }
     }
     // Priority 2: Class tuition fee from admission package
@@ -1648,12 +1661,12 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
         const pkg = admissionPackages.find(p => p.classId === studentClass.id);
         const tuitionItem = pkg?.feeItems.find(fi => fi.name && fi.name.toLowerCase().includes('tuition'));
         if (tuitionItem) {
-          tuitionAmount = tuitionItem.amount;
+          tuitionAmount = money(tuitionItem.amount);
         }
       }
     }
 
-    if (tuitionAmount <= 0) {
+    if (tuitionAmount.lte(0)) {
       skipped++; // Or handle as "No tuition defined"
       continue;
     }
@@ -1664,7 +1677,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
       const admissionDate = student.admissionDate;
       if (admissionDate && admissionDate.getFullYear() === year && (admissionDate.getMonth() + 1) === month) {
         const remainingDays = totalDaysInMonth - admissionDate.getDate() + 1;
-        finalAmount = (tuitionAmount / totalDaysInMonth) * remainingDays;
+        finalAmount = tuitionAmount.div(totalDaysInMonth).times(remainingDays).toDecimalPlaces(2);
       }
     }
 
@@ -1673,12 +1686,12 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
       data: {
         studentId: student.id,
         type: 'tuition',
-        totalAmount: Math.round(finalAmount),
+        totalAmount: finalAmount.toDecimalPlaces(0),
         status: 'unpaid',
         billingMonth: billingMonth,
         dueDate: new Date(year, month - 1, dueDay),
         items: {
-          create: [{ name: `Monthly Tuition - ${billingMonth}`, amount: Math.round(finalAmount) }]
+          create: [{ name: `Monthly Tuition - ${billingMonth}`, amount: finalAmount.toDecimalPlaces(0) }]
         }
       }
     });
@@ -2312,7 +2325,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       });
 
       // 3. Create Invoice
-      const totalAmount = pkg.feeItems.reduce((sum, item) => sum + item.amount, 0);
+      const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
 
       const invoice = await tx.invoice.create({
         data: {
@@ -2363,14 +2376,14 @@ app.post('/payments', async (req: Request, res: Response) => {
       const invoice = await tx.invoice.findUnique({ where: { id: invoiceId } });
       if (!invoice) throw new Error('Invoice not found');
 
-      const newPaidAmount = invoice.paidAmount + amount;
-      const newStatus = newPaidAmount >= invoice.totalAmount ? 'paid' : 'partial';
+      const newPaidAmount = money(invoice.paidAmount).plus(amount);
+      const newStatus = newPaidAmount.gte(invoice.totalAmount) ? 'paid' : 'partial';
 
       // 1. Create Payment
       const payment = await tx.payment.create({
         data: {
           invoiceId,
-          amount,
+          amount: money(amount).toDecimalPlaces(2),
           method,
           transactionRef,
           receivedBy
@@ -2399,7 +2412,7 @@ app.post('/payments', async (req: Request, res: Response) => {
         data: {
           type: 'income',
           category: invoice.type === 'admission' ? 'admission_fee' : 'fee_collection',
-          amount,
+          amount: money(amount).toDecimalPlaces(2),
           referenceInvoice: invoiceId
         }
       });
@@ -2445,7 +2458,7 @@ app.post('/invoices/from-package', async (req: Request, res: Response) => {
 
   if (!pkg) return res.status(404).json({ error: 'Package not found' });
 
-  const totalAmount = pkg.feeItems.reduce((sum, item) => sum + item.amount, 0);
+  const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
 
   const invoice = await prisma.invoice.create({
     data: {
@@ -2488,24 +2501,24 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
         data: {
           studentId,
           type,
-          totalAmount,
+          totalAmount: roundMoney(totalAmount),
           status: 'unpaid',
           billingMonth,
           createdAt: date ? new Date(date) : undefined,
           items: {
-            create: items.map(i => ({ name: i.name, amount: i.amount }))
+            create: items.map(i => ({ name: i.name, amount: roundMoney(i.amount) }))
           }
         },
         include: { items: true, payments: true }
       });
 
       if (initialPayment && initialPayment > 0) {
-        const newPaidAmount = invoice.paidAmount + initialPayment;
-        const newStatus = newPaidAmount >= invoice.totalAmount ? 'paid' : 'partial';
+        const newPaidAmount = money(invoice.paidAmount).plus(initialPayment);
+        const newStatus = newPaidAmount.gte(invoice.totalAmount) ? 'paid' : 'partial';
         await tx.payment.create({
           data: {
             invoiceId: invoice.id,
-            amount: initialPayment,
+            amount: money(initialPayment).toDecimalPlaces(2),
             method
           }
         });
@@ -2517,7 +2530,7 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
           data: {
             type: 'income',
             category: type === 'admission' ? 'admission_fee' : 'fee_collection',
-            amount: initialPayment,
+            amount: money(initialPayment).toDecimalPlaces(2),
             referenceInvoice: invoice.id
           }
         });
@@ -2669,18 +2682,18 @@ app.get('/finance/reports/summary', async (req: Request, res: Response) => {
   }
 
   const entries = await prisma.ledgerEntry.findMany({ where });
-  const income = entries.filter(e => e.type === 'income').reduce((s, e) => s + e.amount, 0);
-  const expense = entries.filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
+  const income = entries.filter(e => e.type === 'income').reduce((s, e) => s.plus(e.amount), money(0));
+  const expense = entries.filter(e => e.type === 'expense').reduce((s, e) => s.plus(e.amount), money(0));
 
   const byCategory = entries.reduce((acc: any, e) => {
-    acc[e.category] = (acc[e.category] || 0) + e.amount;
+    acc[e.category] = money(acc[e.category]).plus(e.amount).toNumber();
     return acc;
   }, {});
 
   res.json({
     totalIncome: income,
     totalExpense: expense,
-    netProfit: income - expense,
+    netProfit: income.minus(expense),
     byCategory
   });
 });
@@ -2692,14 +2705,14 @@ app.get('/finance/reports/fees', async (req: Request, res: Response) => {
   });
 
   const report = invoices.map(inv => {
-    const paid = inv.payments.reduce((s, p) => s + p.amount, 0);
+    const paid = inv.payments.reduce((s, p) => s.plus(p.amount), money(0));
     return {
       studentName: inv.student.name,
       class: inv.student.class,
       type: inv.type,
       total: inv.totalAmount,
       paid,
-      due: inv.totalAmount - paid,
+      due: inv.totalAmount.minus(paid),
       status: inv.status,
       date: inv.createdAt
     };

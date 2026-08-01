@@ -135,7 +135,7 @@ model AdmissionFeeItem {
   id          String   @id @default(cuid())
   packageId   String
   name        String
-  amount      Float
+  amount      Decimal
   isMandatory Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -147,8 +147,8 @@ model Invoice {
   id           String   @id @default(cuid())
   studentId    String
   type         String   // 'admission', 'tuition', etc.
-  totalAmount  Float
-  paidAmount   Float    @default(0)
+  totalAmount  Decimal
+  paidAmount   Decimal  @default(0)
   status       String   // 'unpaid', 'partial', 'paid'
   dueDate      DateTime?
   billingMonth String?  // 'YYYY-MM'
@@ -164,7 +164,7 @@ model InvoiceItem {
   id        String   @id @default(cuid())
   invoiceId String
   name      String
-  amount    Float
+  amount    Decimal
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -174,7 +174,7 @@ model InvoiceItem {
 model Payment {
   id             String   @id @default(cuid())
   invoiceId      String
-  amount         Float
+  amount         Decimal
   method         String
   transactionRef String?
   receivedBy     String?
@@ -189,7 +189,7 @@ model LedgerEntry {
   id               String   @id @default(cuid())
   type             String   // 'income', 'expense'
   category         String
-  amount           Float
+  amount           Decimal
   referenceInvoice String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -199,8 +199,8 @@ model Product {
   id             String   @id @default(cuid())
   name           String
   category       String?
-  purchasePrice  Float
-  sellingPrice   Float
+  purchasePrice  Decimal
+  sellingPrice   Decimal
   currentStock   Int       @default(0)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -222,7 +222,7 @@ model Purchase {
   id           String         @id @default(cuid())
   supplierId   String?
   purchaseDate DateTime       @default(now())
-  totalCost    Float          @default(0)
+  totalCost    Decimal        @default(0)
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   supplier     Supplier?      @relation(fields: [supplierId], references: [id])
@@ -234,7 +234,7 @@ model PurchaseItem {
   purchaseId  String
   productId   String
   quantity    Int
-  price       Float
+  price       Decimal
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   purchase    Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
@@ -245,7 +245,7 @@ model Sale {
   id            String     @id @default(cuid())
   studentId     String?
   saleDate      DateTime   @default(now())
-  totalAmount   Float      @default(0)
+  totalAmount   Decimal    @default(0)
   paymentStatus String     @default("unpaid")
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
@@ -258,7 +258,7 @@ model SaleItem {
   saleId    String
   productId String
   quantity  Int
-  price     Float
+  price     Decimal
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   sale      Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
@@ -276,7 +276,7 @@ model Teacher {
   status     String   @default("Active")
   designation String  @default("Teacher")
   joiningDate DateTime?
-  salary      Float?
+  salary      Decimal?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   salaries   TeacherSalary[]
@@ -304,8 +304,8 @@ model StudentFee {
   id         String   @id @default(cuid())
   studentId  String
   feeType    String
-  amount     Float
-  discount   Float    @default(0)
+  amount     Decimal
+  discount   Decimal    @default(0)
   status     String   @default("Due")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -315,10 +315,10 @@ model StudentFee {
 model TeacherSalary {
   id          String   @id @default(cuid())
   teacherId   String
-  baseSalary  Float
-  bonus       Float    @default(0)
-  deductions  Float    @default(0)
-  netSalary   Float
+  baseSalary  Decimal
+  bonus       Decimal    @default(0)
+  deductions  Decimal    @default(0)
+  netSalary   Decimal
   paymentDate DateTime
   status      String   @default("Pending")
   createdAt   DateTime @default(now())
@@ -329,10 +329,10 @@ model TeacherSalary {
 model StaffSalary {
   id          String   @id @default(cuid())
   staffId     String
-  baseSalary  Float
-  bonus       Float    @default(0)
-  deductions  Float    @default(0)
-  netSalary   Float
+  baseSalary  Decimal
+  bonus       Decimal    @default(0)
+  deductions  Decimal    @default(0)
+  netSalary   Decimal
   paymentDate DateTime
   status      String   @default("Pending")
   createdAt   DateTime @default(now())
@@ -343,7 +343,7 @@ model StaffSalary {
 model SchoolExpense {
   id        String   @id @default(cuid())
   category  String
-  amount    Float
+  amount    Decimal
   date      DateTime
   notes     String?
   createdAt DateTime @default(now())
@@ -368,7 +368,7 @@ model FeeStructure {
   id         String      @id @default(cuid())
   name       String
   classId    String?
-  amount     Float
+  amount     Decimal
   frequency  String      @default("monthly")
   isActive   Boolean     @default(true)
   createdAt  DateTime    @default(now())
@@ -382,7 +382,7 @@ model StudentFeeAssignment {
   studentId       String
   feeStructureId  String
   discountPercent Float        @default(0)
-  customAmount    Float?
+  customAmount    Decimal?
   startMonth      Int
   startYear       Int
   endMonth        Int?
@@ -538,7 +538,7 @@ model Institute {
 model FeeParticular {
   id        String   @id @default(cuid())
   label     String
-  amount    Float?   // null for FIXED fields
+  amount    Decimal?   // null for FIXED fields
   isFixed   Boolean  @default(false)
   target    String   @default("All Students")
   createdAt DateTime @default(now())

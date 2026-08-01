@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -360,7 +360,7 @@ async function main() {
     if (!firstStudent) continue;
     const pkg = packageByClass.get(`${cls.name}|${cls.section}`);
     if (!pkg) continue;
-    const total = pkg.feeItems.reduce((sum: number, f: any) => sum + f.amount, 0);
+    const total = pkg.feeItems.reduce((sum, f: any) => sum.plus(f.amount), new Prisma.Decimal(0));
     const existing = await prisma.invoice.findFirst({ where: { studentId: firstStudent.id, type: 'admission' } });
     if (existing) continue;
     const invoice = await prisma.invoice.create({
