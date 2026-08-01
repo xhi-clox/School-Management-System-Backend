@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -69,6 +69,70 @@ app.use(
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
+
+import {
+  isCloudinaryConfigured,
+  isBase64Image,
+  uploadBase64Image,
+} from './cloudinary';
+
+class ImageUploadGuardError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+// Convert any base64 image in the request body (avatar/photo/logo) into a
+// Cloudinary URL before routes store it, so photo bytes never bloat the DB.
+app.use(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.body || typeof req.body !== 'object') return next();
+
+  const MAX_BASE64_LENGTH = 4_500_000;
+
+  try {
+    const walk = async (node: any): Promise<any> => {
+      if (typeof node === 'string') {
+        if (isBase64Image(node)) {
+          if (node.length > MAX_BASE64_LENGTH) {
+            throw new ImageUploadGuardError(
+              'Image is too large (max ~3 MB). Please upload a smaller photo.',
+              400
+            );
+          }
+          if (!isCloudinaryConfigured()) {
+            throw new ImageUploadGuardError(
+              'Photo uploads are not configured: set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET in the server environment.',
+              400
+            );
+          }
+          return await uploadBase64Image(node);
+        }
+        return node;
+      }
+      if (Array.isArray(node)) {
+        for (let i = 0; i < node.length; i++) node[i] = await walk(node[i]);
+        return node;
+      }
+      if (node && typeof node === 'object') {
+        for (const key of Object.keys(node)) {
+          node[key] = await walk(node[key]);
+        }
+        return node;
+      }
+      return node;
+    };
+
+    await walk(req.body);
+    next();
+  } catch (error: any) {
+    console.error('Image upload error:', error);
+    return res
+      .status(error.statusCode || 500)
+      .json({ error: error.message || 'Image upload failed. Please try again.' });
+  }
+});
 
 app.get('/test-db', async (_req: Request, res: Response) => {
   try {
