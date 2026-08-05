@@ -249,7 +249,8 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
   const explicitPresent = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
   const tracked = explicitPresent + absent + late + onLeave;
   const totalForToday = activeStudents || totalStudents;
-  const inferredPresent = Math.max(totalForToday - tracked, 0);
+  const hasTodayRecords = todayAttendanceRaw.length > 0;
+  const inferredPresent = hasTodayRecords ? Math.max(totalForToday - tracked, 0) : 0;
   const present = explicitPresent + inferredPresent;
 
   // Build 6-month history for chart
@@ -3381,7 +3382,7 @@ app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Re
 });
 
 // Class Routine Management
-app.get('/api/class-routine/classes', async (_req: Request, res: Response) => {
+app.get('/class-routine/classes', async (_req: Request, res: Response) => {
   try {
     const classes = await prisma.schoolClass.findMany({
       orderBy: { name: 'asc' },
@@ -3414,7 +3415,7 @@ app.get('/api/class-routine/classes', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/api/class-routine/teachers', async (_req: Request, res: Response) => {
+app.get('/class-routine/teachers', async (_req: Request, res: Response) => {
   try {
     const teachers = await prisma.teacher.findMany({
       where: { status: 'Active' },
@@ -3434,7 +3435,7 @@ app.get('/api/class-routine/teachers', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/api/class-routine/subjects', async (_req: Request, res: Response) => {
+app.get('/class-routine/subjects', async (_req: Request, res: Response) => {
   try {
     const subjects = await prisma.subject.findMany({
       select: {
@@ -3453,7 +3454,7 @@ app.get('/api/class-routine/subjects', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/api/class-routine/rooms', async (_req: Request, res: Response) => {
+app.get('/class-routine/rooms', async (_req: Request, res: Response) => {
   try {
     // Return mock room data since there's no Room model in the schema
     const rooms = [
@@ -3477,7 +3478,7 @@ app.get('/api/class-routine/rooms', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/api/class-routine/time-slots', async (_req: Request, res: Response) => {
+app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
   try {
     // Return time slots data - in a real implementation, this would come from a TimeSlot table
     const timeSlots = [
@@ -3498,7 +3499,7 @@ app.get('/api/class-routine/time-slots', async (_req: Request, res: Response) =>
   }
 });
 
-app.get('/api/class-routine/timetable', async (req: Request, res: Response) => {
+app.get('/class-routine/timetable', async (req: Request, res: Response) => {
   try {
     const { classId, section } = req.query;
 
@@ -3533,7 +3534,7 @@ app.get('/api/class-routine/timetable', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/class-routine/update-entry', async (req: Request, res: Response) => {
+app.post('/class-routine/update-entry', async (req: Request, res: Response) => {
   try {
     const { classId, section, day, period, subject, teacher, room } = req.body;
 
