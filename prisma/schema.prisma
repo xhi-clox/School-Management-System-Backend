@@ -68,6 +68,7 @@ model Student {
   login         StudentLogin?
   parentId      String?
   parent        Parent?  @relation(fields: [parentId], references: [id])
+  academicHistory StudentAcademicRecord[]
 }
 
 model Guardian {
@@ -543,4 +544,22 @@ model FeeParticular {
   target    String   @default("All Students")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model StudentAcademicRecord {
+  id           String   @id @default(cuid())
+  studentId    String
+  academicYear String
+  class        String
+  section      String?
+  roll         Int?
+  status       String   // 'Promoted' | 'Graduated' | 'Retained'
+  startDate    DateTime?
+  endDate      DateTime?
+  createdAt    DateTime @default(now())
+
+  student      Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@index([academicYear])
 }

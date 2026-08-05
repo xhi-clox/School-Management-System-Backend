@@ -618,59 +618,311 @@ app.delete('/students/:id', authMiddleware, checkRole(['Admin']), async (req: Re
   }
 });
 
+function academicYearRange(label?: string | null): { start: Date | null; end: Date | null } {
+  if (!label) return { start: null, end: null };
+  const match = label.match(/(\d{4})/);
+  if (!match) return { start: null, end: null };
+  const startYear = Number(match[1]);
+  // July-to-June academic year convention (matches the promotion default)
+  return { start: new Date(startYear, 6, 1), end: new Date(startYear + 1, 6, 1) };
+}
+
 app.post('/students/promote', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const schema = z.object({
-      studentIds: z.array(z.string()).min(1),
-      newClass: z.string().min(1),
-      newSection: z.string().min(1),
-      newAcademicYear: z.string().min(1),
+      promotions: z.array(z.object({
+        studentId: z.string().min(1),
+        action: z.enum(['promote', 'graduate', 'retain']),
+        newClass: z.string().optional(),
+        newSection: z.string().optional(),
+        newAcademicYear: z.string().optional(),
+      })).min(1),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const promotions = parsed.data.promotions;
 
-    const { studentIds, newClass, newSection, newAcademicYear } = parsed.data;
+    // Non-graduate actions need a destination
+    for (const p of promotions) {
+      if (p.action !== 'graduate' && (!p.newClass || !p.newSection || !p.newAcademicYear)) {
+        return res.status(400).json({ error: `${p.action} action requires newClass, newSection and newAcademicYear` });
+      }
+    }
 
     const students = await prisma.student.findMany({
-      where: { id: { in: studentIds } },
-      select: { id: true, class: true, section: true, academicYear: true, status: true },
+      where: { id: { in: promotions.map(p => p.studentId) } },
+      select: { id: true, class: true, section: true, roll: true, academicYear: true, status: true },
     });
+    const studentMap = new Map(students.map(s => [s.id, s]));
 
-    // Only promote active students who aren't already in the target class/section/year
-    const toPromote = students.filter(
-      (s) =>
-        s.status === 'Active' &&
-        !(s.class === newClass && s.section === newSection && s.academicYear === newAcademicYear)
-    );
-    const skipped = students.length - toPromote.length;
+    let skipped = 0;
+    let promotedCount = 0;
+    let graduatedCount = 0;
+    let retainedCount = 0;
+    const operations: any[] = [];
 
-    if (toPromote.length > 0) {
-      // Re-assign rolls starting after the highest roll already in the target class/section
+    const promoteItems: { student: any; newClass: string; newSection: string; newAcademicYear: string }[] = [];
+    const graduateIds: string[] = [];
+    const retainItems: { student: any; newAcademicYear: string }[] = [];
+
+    for (const p of promotions) {
+      const student = studentMap.get(p.studentId);
+      if (!student) { skipped++; continue; }
+
+      if (p.action === 'promote') {
+        const alreadyThere =
+          student.class === p.newClass &&
+          student.section === p.newSection &&
+          student.academicYear === p.newAcademicYear;
+        if (student.status !== 'Active' || alreadyThere) { skipped++; continue; }
+        promoteItems.push({ student, newClass: p.newClass!, newSection: p.newSection!, newAcademicYear: p.newAcademicYear! });
+      } else if (p.action === 'graduate') {
+        if (student.status !== 'Active') { skipped++; continue; }
+        graduateIds.push(student.id);
+      } else {
+        if (student.status !== 'Active' || student.academicYear === p.newAcademicYear) { skipped++; continue; }
+        retainItems.push({ student, newAcademicYear: p.newAcademicYear! });
+      }
+    }
+
+    // Promote: re-assign rolls per destination class/section (excluding students being moved)
+    const promoteGroups = new Map<string, typeof promoteItems>();
+    for (const item of promoteItems) {
+      const key = `${item.newClass}||${item.newSection}`;
+      const group = promoteGroups.get(key) ?? [];
+      group.push(item);
+      promoteGroups.set(key, group);
+    }
+    for (const [key, group] of promoteGroups) {
+      const [newClass, newSection] = key.split('||');
+      const ids = group.map(g => g.student.id);
       const existing = await prisma.student.aggregate({
-        where: { class: newClass, section: newSection },
+        where: { class: newClass, section: newSection, id: { notIn: ids } },
         _max: { roll: true },
       });
       let nextRoll = (existing._max.roll ?? 0) + 1;
 
-      await prisma.$transaction(
-        toPromote.map((s, i) =>
+      group.forEach((g, i) => {
+        const { start, end } = academicYearRange(g.student.academicYear);
+        operations.push(
           prisma.student.update({
-            where: { id: s.id },
+            where: { id: g.student.id },
+            data: { class: newClass, section: newSection, academicYear: g.newAcademicYear, roll: nextRoll + i },
+          }),
+          prisma.studentAcademicRecord.create({
             data: {
-              class: newClass,
-              section: newSection,
-              academicYear: newAcademicYear,
-              roll: nextRoll + i,
+              studentId: g.student.id,
+              academicYear: g.student.academicYear || '',
+              class: g.student.class,
+              section: g.student.section,
+              roll: g.student.roll,
+              status: 'Promoted',
+              startDate: start,
+              endDate: end,
             },
           })
-        )
+        );
+      });
+    }
+    promotedCount = promoteItems.length;
+
+    // Graduate: mark status only, keep class/section/year so history stays browsable
+    for (const g of students.filter(s => graduateIds.includes(s.id))) {
+      const { start, end } = academicYearRange(g.academicYear);
+      operations.push(
+        prisma.student.update({ where: { id: g.id }, data: { status: 'Graduated' } }),
+        prisma.studentAcademicRecord.create({
+          data: {
+            studentId: g.id,
+            academicYear: g.academicYear || '',
+            class: g.class,
+            section: g.section,
+            roll: g.roll,
+            status: 'Graduated',
+            startDate: start,
+            endDate: end,
+          },
+        })
       );
     }
+    graduatedCount = graduateIds.length;
 
-    res.json({ success: true, promoted: toPromote.length, skipped });
+    // Retain: keep class/section/roll, bump year
+    for (const item of retainItems) {
+      const { start, end } = academicYearRange(item.student.academicYear);
+      operations.push(
+        prisma.student.update({ where: { id: item.student.id }, data: { academicYear: item.newAcademicYear } }),
+        prisma.studentAcademicRecord.create({
+          data: {
+            studentId: item.student.id,
+            academicYear: item.student.academicYear || '',
+            class: item.student.class,
+            section: item.student.section,
+            roll: item.student.roll,
+            status: 'Retained',
+            startDate: start,
+            endDate: end,
+          },
+        })
+      );
+    }
+    retainedCount = retainItems.length;
+
+    if (operations.length > 0) {
+      await prisma.$transaction(operations);
+    }
+
+    res.json({ success: true, promoted: promotedCount, graduated: graduatedCount, retained: retainedCount, skipped });
   } catch (error: any) {
     console.error('Promote students error:', error);
     res.status(500).json({ error: 'Failed to promote students', details: error.message });
+  }
+});
+
+// Academic year history for a student (records + current enrollment)
+app.get('/students/:id/history', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const student = await prisma.student.findUnique({
+      where: { id },
+      select: { id: true, name: true, admissionNo: true, class: true, section: true, roll: true, academicYear: true, status: true },
+    });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+
+    const records = await prisma.studentAcademicRecord.findMany({
+      where: { studentId: id },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.json({ student, records });
+  } catch (error: any) {
+    console.error('Error fetching student history:', error);
+    res.status(500).json({ error: 'Failed to fetch student history', details: error.message });
+  }
+});
+
+// Attendance for a student within an academic year
+app.get('/students/:id/attendance', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { academicYear } = req.query as any;
+    const { start, end } = academicYearRange(academicYear);
+    if (!start || !end) return res.status(400).json({ error: 'A valid academicYear is required' });
+
+    const records = await prisma.attendance.findMany({
+      where: { studentId: id, date: { gte: start, lt: end } },
+      orderBy: { date: 'asc' },
+    });
+    res.json(records);
+  } catch (error: any) {
+    console.error('Error fetching student attendance:', error);
+    res.status(500).json({ error: 'Failed to fetch student attendance', details: error.message });
+  }
+});
+
+// Marks (results) for a student within an academic year
+app.get('/students/:id/results', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { academicYear } = req.query as any;
+    const where: any = { studentId: id };
+    if (academicYear) where.exam = { academicYear };
+
+    const results = await prisma.result.findMany({
+      where,
+      include: { exam: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    const subjectIds = [...new Set(results.map(r => r.subjectId))];
+    const subjects = await prisma.subject.findMany({ where: { id: { in: subjectIds } } });
+    res.json({ results, subjects });
+  } catch (error: any) {
+    console.error('Error fetching student results:', error);
+    res.status(500).json({ error: 'Failed to fetch student results', details: error.message });
+  }
+});
+
+// Fees/invoices for a student within an academic year
+app.get('/students/:id/fees', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { academicYear } = req.query as any;
+    const { start, end } = academicYearRange(academicYear);
+    if (!start || !end) return res.status(400).json({ error: 'A valid academicYear is required' });
+
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        studentId: id,
+        OR: [
+          { createdAt: { gte: start, lt: end } },
+          { dueDate: { gte: start, lt: end } },
+        ],
+      },
+      include: { items: true, payments: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const studentFees = await prisma.studentFee.findMany({
+      where: { studentId: id, createdAt: { gte: start, lt: end } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({ invoices, studentFees });
+  } catch (error: any) {
+    console.error('Error fetching student fees:', error);
+    res.status(500).json({ error: 'Failed to fetch student fees', details: error.message });
+  }
+});
+
+// Promotion archive: distinct academic years + roster per year
+app.get('/promotions/archive', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { academicYear } = req.query as any;
+
+    const recordYears = await prisma.studentAcademicRecord.findMany({ distinct: ['academicYear'], select: { academicYear: true } });
+    const studentYears = await prisma.student.findMany({ distinct: ['academicYear'], select: { academicYear: true } });
+    const years = Array.from(new Set([
+      ...recordYears.map(r => r.academicYear),
+      ...studentYears.map(s => s.academicYear),
+    ])).filter(Boolean).sort().reverse();
+
+    if (!academicYear) return res.json({ years, students: [] });
+
+    const records = await prisma.studentAcademicRecord.findMany({
+      where: { academicYear },
+      include: {
+        student: { select: { id: true, name: true, admissionNo: true, avatar: true, gender: true } },
+      },
+      orderBy: [{ class: 'asc' }, { section: 'asc' }, { roll: 'asc' }],
+    });
+
+    const current = await prisma.student.findMany({
+      where: { academicYear },
+      select: { id: true, name: true, admissionNo: true, avatar: true, gender: true, class: true, section: true, roll: true, status: true },
+      orderBy: [{ class: 'asc' }, { section: 'asc' }, { roll: 'asc' }],
+    });
+
+    const mapped = records.map((r: any) => ({
+      id: r.student.id,
+      name: r.student.name,
+      admissionNo: r.student.admissionNo,
+      avatar: r.student.avatar,
+      gender: r.student.gender,
+      class: r.class,
+      section: r.section || '',
+      roll: r.roll,
+      status: r.status,
+    }));
+
+    const recordKeys = new Set(records.map((r: any) => `${r.student.id}:${r.class}:${r.section || ''}`));
+    const currentMapped = current
+      .filter((s: any) => !recordKeys.has(`${s.id}:${s.class}:${s.section || ''}`))
+      .map((s: any) => ({ ...s, status: 'Enrolled' }));
+
+    res.json({ years, students: [...mapped, ...currentMapped] });
+  } catch (error: any) {
+    console.error('Error fetching promotion archive:', error);
+    res.status(500).json({ error: 'Failed to fetch promotion archive', details: error.message });
   }
 });
 
@@ -4121,7 +4373,45 @@ app.get('/student/assignments', async (_req: Request, res: Response) => {
 });
 
 const port = Number(process.env.PORT) || 4000;
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Academify API listening on http://0.0.0.0:${port}`);
-});
+
+async function ensureStudentAcademicRecordTable() {
+  try {
+    await prisma.$queryRaw`SELECT 1 FROM "StudentAcademicRecord" LIMIT 1`;
+    return;
+  } catch {
+    // Table does not exist yet — create it below
+  }
+
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "StudentAcademicRecord" (
+      "id" TEXT NOT NULL,
+      "studentId" TEXT NOT NULL,
+      "academicYear" TEXT NOT NULL,
+      "class" TEXT NOT NULL,
+      "section" TEXT,
+      "roll" INTEGER,
+      "status" TEXT NOT NULL,
+      "startDate" TIMESTAMP(3),
+      "endDate" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "StudentAcademicRecord_pkey" PRIMARY KEY ("id")
+    )`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "StudentAcademicRecord_studentId_idx" ON "StudentAcademicRecord"("studentId")`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "StudentAcademicRecord_academicYear_idx" ON "StudentAcademicRecord"("academicYear")`;
+  await prisma.$executeRaw`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'StudentAcademicRecord_studentId_fkey') THEN
+        ALTER TABLE "StudentAcademicRecord" ADD CONSTRAINT "StudentAcademicRecord_studentId_fkey" FOREIGN KEY ("studentId") REFERENCES "Student"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+      END IF;
+    END $$;`;
+  console.log('Ensured StudentAcademicRecord table exists');
+}
+
+ensureStudentAcademicRecordTable()
+  .catch((error) => console.error('Failed to ensure StudentAcademicRecord table:', error))
+  .finally(() => {
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Academify API listening on http://0.0.0.0:${port}`);
+    });
+  });
 
