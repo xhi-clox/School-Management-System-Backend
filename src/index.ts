@@ -3059,58 +3059,33 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          include: {
-            _count: {
-              select: {
-                packages: true
-              }
-            }
-          }
-        }
-      }
+      include: { classes: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // Get today's date
-    const today = new Date();
-    const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
+    const classes = await teacherClassList(teacher);
 
-    // Get today's classes (mock data for now - would come from routine table)
-    const todaysClasses = teacher.classes.map(cls => ({
-      time: '09:00 - 09:40',
-      subject: teacher.subject || 'Mathematics',
+    // Today's classes mapped to routine time slots (no routine table exists yet)
+    const timeSlots = [
+      '08:00 - 08:40', '08:40 - 09:20', '09:20 - 10:00',
+      '10:20 - 11:00', '11:00 - 11:40', '11:40 - 12:20', '12:20 - 01:00'
+    ];
+    const todaysClasses = classes.map((cls, i) => ({
+      time: timeSlots[i % timeSlots.length],
+      subject: teacher.subject || 'General',
       class: `${cls.name} - ${cls.section}`,
       room: 'R-101'
     }));
 
-    // Get pending attendance (classes today that need attendance)
-    const pendingAttendance = todaysClasses.length;
-
-    // Get assignments to review (mock data)
-    const assignmentsToReview = 5;
-
-    // Get upcoming exams (mock data)
-    const upcomingExams = [
-      { date: '2024-01-15', subject: teacher.subject || 'Mathematics', class: 'Grade 1 - A' },
-      { date: '2024-01-20', subject: teacher.subject || 'Mathematics', class: 'Grade 1 - A' }
-    ];
-
-    // Get messages (mock data)
-    const messages = [
-      { id: '1', from: 'Admin', subject: 'Meeting Tomorrow' },
-      { id: '2', from: 'Parent', subject: 'Student Progress' }
-    ];
-
-    // Get recent notices (mock data)
-    const recentNotices = [
-      { id: '1', title: 'School Holiday', date: '2024-01-10' },
-      { id: '2', title: 'Exam Schedule', date: '2024-01-08' }
-    ];
+    const upcomingExams = await prisma.exam.findMany({
+      where: { endDate: { gte: new Date() } },
+      include: { type: true },
+      orderBy: { startDate: 'asc' },
+      take: 5
+    });
 
     const stats = {
       teacher: {
@@ -3118,19 +3093,18 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
         name: teacher.name,
         email: teacher.email,
         subject: teacher.subject,
-        classes: teacher.classes.map(cls => ({
-          id: cls.id,
-          name: cls.name,
-          section: cls.section,
-          studentCount: cls._count.packages || 0
-        }))
+        classes
       },
       todaysClasses,
-      pendingAttendance,
-      assignmentsToReview,
-      upcomingExams,
-      messages,
-      recentNotices
+      pendingAttendance: todaysClasses.length,
+      assignmentsToReview: 0,
+      upcomingExams: upcomingExams.map((e: any) => ({
+        date: toDateStr(e.startDate),
+        subject: e.name,
+        class: e.type?.name || ''
+      })),
+      messages: [],
+      recentNotices: []
     };
 
     res.json(stats);
@@ -3140,6 +3114,18 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
   }
 });
 
+async function teacherClassList(teacher: any) {
+  return Promise.all(
+    (teacher.classes || []).map(async (cls: any) => ({
+      id: cls.id,
+      name: cls.name,
+      section: cls.section,
+      studentCount: await prisma.student.count({ where: { class: cls.name, section: cls.section } }),
+      isClassTeacher: true
+    }))
+  );
+}
+
 app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -3147,32 +3133,14 @@ app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: 
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          include: {
-            _count: {
-              select: {
-                packages: true
-              }
-            }
-          }
-        }
-      }
+      include: { classes: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // Return only classes where this teacher is assigned as class teacher
-    const classes = teacher.classes.map(cls => ({
-      id: cls.id,
-      name: cls.name,
-      section: cls.section,
-      studentCount: cls._count.packages || 0,
-      isClassTeacher: true
-    }));
-
+    const classes = await teacherClassList(teacher);
     res.json(classes);
   } catch (error) {
     console.error('Error fetching teacher classes:', error);
@@ -3242,10 +3210,11 @@ app.get('/teacher/subjects', authMiddleware, checkRole(['Teacher']), async (req:
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // Get subjects (mock data for now - would come from teacher-subject assignment table)
-    const subjects = [
-      { id: '1', name: teacher.subject || 'Mathematics', code: 'MATH101', type: 'Core' }
-    ];
+    // Get real subjects from the Subject table
+    const subjects = await prisma.subject.findMany({
+      select: { id: true, name: true, code: true, type: true },
+      orderBy: { name: 'asc' }
+    });
 
     res.json(subjects);
   } catch (error) {
@@ -3297,11 +3266,23 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
       orderBy: { roll: 'asc' }
     });
 
+    // Load any existing attendance for this class on the requested date
+    const dayStart = new Date(String(date));
+    const dayEnd = new Date(dayStart.getTime() + 86400000);
+    const savedRecords = await prisma.attendance.findMany({
+      where: {
+        date: { gte: dayStart, lt: dayEnd },
+        studentId: { in: students.map((s) => s.id) }
+      },
+      select: { studentId: true, status: true }
+    });
+    const statusMap = new Map(savedRecords.map((r) => [r.studentId, r.status]));
+
     const studentData = students.map(student => ({
       studentId: student.id,
       studentName: student.name,
       roll: student.roll,
-      status: 'Present' // Default status
+      status: statusMap.get(student.id) || 'present'
     }));
 
     res.json(studentData);
@@ -3338,8 +3319,31 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    // For now, just return success (in real implementation, save to attendance table)
-    res.json({ success: true, message: 'Attendance saved successfully' });
+    const classInfo = teacher.classes[0];
+
+    // Save attendance to the Attendance table (same as /attendance/save)
+    const day = new Date(String(date));
+    const students = await prisma.student.findMany({
+      where: { class: classInfo.name, section: classInfo.section }
+    });
+    const ids = new Set(students.map((s) => s.id));
+    const toSave = (records as any[]).filter((r: any) => r.studentId && ids.has(r.studentId));
+
+    if (toSave.length === 0) {
+      return res.status(400).json({ error: 'No valid student records provided' });
+    }
+
+    await prisma.$transaction(
+      toSave.map((r: any) =>
+        prisma.attendance.upsert({
+          where: { studentId_date: { studentId: r.studentId, date: day } },
+          update: { status: String(r.status) },
+          create: { studentId: r.studentId, date: day, status: String(r.status) }
+        })
+      )
+    );
+
+    res.json({ success: true, message: 'Attendance saved successfully', count: toSave.length });
   } catch (error) {
     console.error('Error saving attendance:', error);
     res.status(500).json({ error: 'Failed to save attendance' });
@@ -3359,20 +3363,20 @@ app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Re
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // Get exam schedules for this teacher's subjects (mock data)
-    const exams = [
-      {
-        id: '1',
-        name: 'Mid-term Exam',
-        subject: teacher.subject || 'Mathematics',
-        date: '2024-01-15',
-        class: 'Grade 1 - A',
-        startTime: '09:00',
-        endTime: '11:00'
-      }
-    ];
+    // Get real exams from the Exam table
+    const exams = await prisma.exam.findMany({
+      include: { type: true },
+      orderBy: { startDate: 'desc' }
+    });
 
-    res.json(exams);
+    res.json(exams.map((e: any) => ({
+      id: e.id,
+      name: e.name,
+      type: e.type?.name || '',
+      date: toDateStr(e.startDate),
+      startDate: e.startDate,
+      endDate: e.endDate
+    })));
   } catch (error) {
     console.error('Error fetching teacher exams:', error);
     res.status(500).json({ error: 'Failed to fetch exams' });
