@@ -618,29 +618,60 @@ app.delete('/students/:id', authMiddleware, checkRole(['Admin']), async (req: Re
   }
 });
 
-app.post('/students/promote', async (req: Request, res: Response) => {
-  const schema = z.object({
-    studentIds: z.array(z.string()).min(1),
-    newClass: z.string().min(1),
-    newSection: z.string().min(1),
-    newAcademicYear: z.string().min(1),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { studentIds, newClass, newSection, newAcademicYear } = parsed.data;
+app.post('/students/promote', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      studentIds: z.array(z.string()).min(1),
+      newClass: z.string().min(1),
+      newSection: z.string().min(1),
+      newAcademicYear: z.string().min(1),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  await prisma.student.updateMany({
-    where: { id: { in: studentIds } },
-    data: {
-      class: newClass,
-      section: newSection,
-      academicYear: newAcademicYear,
-      // Reset roll number? Maybe keep it or set to 0 for re-assignment
-      // roll: 0 
+    const { studentIds, newClass, newSection, newAcademicYear } = parsed.data;
+
+    const students = await prisma.student.findMany({
+      where: { id: { in: studentIds } },
+      select: { id: true, class: true, section: true, academicYear: true, status: true },
+    });
+
+    // Only promote active students who aren't already in the target class/section/year
+    const toPromote = students.filter(
+      (s) =>
+        s.status === 'Active' &&
+        !(s.class === newClass && s.section === newSection && s.academicYear === newAcademicYear)
+    );
+    const skipped = students.length - toPromote.length;
+
+    if (toPromote.length > 0) {
+      // Re-assign rolls starting after the highest roll already in the target class/section
+      const existing = await prisma.student.aggregate({
+        where: { class: newClass, section: newSection },
+        _max: { roll: true },
+      });
+      let nextRoll = (existing._max.roll ?? 0) + 1;
+
+      await prisma.$transaction(
+        toPromote.map((s, i) =>
+          prisma.student.update({
+            where: { id: s.id },
+            data: {
+              class: newClass,
+              section: newSection,
+              academicYear: newAcademicYear,
+              roll: nextRoll + i,
+            },
+          })
+        )
+      );
     }
-  });
 
-  res.json({ success: true, count: studentIds.length });
+    res.json({ success: true, promoted: toPromote.length, skipped });
+  } catch (error: any) {
+    console.error('Promote students error:', error);
+    res.status(500).json({ error: 'Failed to promote students', details: error.message });
+  }
 });
 
 // Student Logins
