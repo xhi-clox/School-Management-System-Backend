@@ -2991,6 +2991,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         if (studentLogin.password === password) {
           user = {
             id: studentLogin.student.id,
+            studentId: studentLogin.student.id,
             email: studentLogin.student.email,
             role: 'Student',
             name: studentLogin.student.name,
@@ -3012,6 +3013,7 @@ app.post('/auth/login', async (req: Request, res: Response) => {
           // For students without login records, accept any password (simplified)
           user = {
             id: student.id,
+            studentId: student.id,
             email: student.email,
             role: 'Student',
             name: student.name,
@@ -3645,265 +3647,431 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
   }
 });
 
+// ---------------------------------------------------------------
 // Student Portal Endpoints
-app.get('/api/student/dashboard', async (req: Request, res: Response) => {
+// ---------------------------------------------------------------
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Format a date for the exam-schedule card: "15 Mon Jan"
+function formatCardDate(d: Date | string | number | null | undefined): string {
+  if (!d) return '';
+  const date = new Date(d);
+  return `${date.getDate()} ${DAYS[date.getDay()]} ${MONTHS[date.getMonth()]}`;
+}
+
+// Plain date string, e.g. "2026-08-05"
+function toDateStr(d: Date | string | number | null | undefined): string {
+  if (!d) return '';
+  const date = new Date(d);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// Find a student by the email / id / admissionNo provided by the frontend.
+function findStudent(email: unknown, studentId: unknown) {
+  return prisma.student.findFirst({
+    where: {
+      OR: [
+        ...(email ? [{ email: email as string }] : []),
+        ...(studentId ? [{ id: studentId as string }] : []),
+        ...(email ? [{ admissionNo: email as string }] : []),
+      ],
+    },
+  });
+}
+
+const STUDENT_NOTICES = [
+  { id: '1', title: 'School Holiday', content: 'School will be closed on Friday for maintenance work.', date: toDateStr(new Date()), priority: 'normal', category: 'general', attachment: '' },
+  { id: '2', title: 'Exam Schedule Released', content: 'Mid-term examinations will begin soon. Please check the full schedule.', date: toDateStr(new Date(Date.now() - 86400000)), priority: 'high', category: 'exam', attachment: 'exam-schedule.pdf' },
+  { id: '3', title: 'Parent Meeting', content: 'Annual parent-teacher meeting will be held next week.', date: toDateStr(new Date(Date.now() - 2 * 86400000)), priority: 'normal', category: 'event', attachment: '' },
+];
+
+const STUDENT_ASSIGNMENTS = [
+  { id: '1', title: 'Math Homework', subject: 'Mathematics', teacher: 'Mr. John Doe', description: 'Solve problems from chapter 5 on linear equations.', due: `${new Date().getDate() + 2} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Pending', priority: 'high', attachment: 'chapter-5-problems.pdf' },
+  { id: '2', title: 'Science Project', subject: 'Science', teacher: 'Ms. Jane Smith', description: 'Create a model of the solar system.', due: `${new Date().getDate() + 5} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Pending', priority: 'medium', attachment: 'project-guidelines.pdf' },
+  { id: '3', title: 'English Essay', subject: 'English', teacher: 'Mr. Alan Brown', description: 'Write an essay on your favourite book.', due: `${new Date().getDate() + 7} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Submitted', priority: 'low', attachment: '' },
+];
+
+const STUDENT_CONTACTS = [
+  { id: '1', name: 'Mr. John Doe', time: '2:30 PM', role: 'Math Teacher', lastMsg: 'Please submit your homework by Friday', online: true },
+  { id: '2', name: 'School Admin', time: '9:15 AM', role: 'Administrator', lastMsg: 'Your fee is due for this month', online: true },
+  { id: '3', name: 'Ms. Jane Smith', time: 'Yesterday', role: 'Science Teacher', lastMsg: 'Your science project looks good', online: false },
+];
+
+const STUDENT_MESSAGES = [
+  { id: '1', content: 'Hello! Please submit your math homework by Friday.', time: '2:30 PM', me: false },
+  { id: '2', content: 'Sure, I will submit it on time. Thank you.', time: '2:31 PM', me: true },
+  { id: '3', content: 'Your fee for this month is due. Kindly pay at the accounts office.', time: '9:15 AM', me: false },
+];
+
+app.get('/student/dashboard', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
-    
-    // Find student
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      }
-    });
 
+    const student = await findStudent(email, studentId);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    // Mock data for student dashboard
-    const dashboardData = {
-      student: {
-        id: student.id,
-        name: student.name,
-        email: student.email,
-        class: student.class,
-        section: student.section,
-        roll: student.roll
-      },
-      attendance: {
-        present: 85,
-        absent: 5,
-        late: 2,
-        total: 92
-      },
-      upcomingExams: [
-        { date: '2024-01-15', subject: 'Mathematics', type: 'Mid Term' },
-        { date: '2024-01-20', subject: 'Science', type: 'Mid Term' }
-      ],
-      recentResults: [
-        { subject: 'Mathematics', marks: 85, grade: 'A', exam: 'Quiz 1' },
-        { subject: 'Science', marks: 78, grade: 'B', exam: 'Quiz 1' }
-      ],
-      notices: [
-        { id: '1', title: 'School Holiday', date: '2024-01-10', priority: 'normal' },
-        { id: '2', title: 'Exam Schedule Released', date: '2024-01-08', priority: 'high' }
-      ],
-      assignments: [
-        { id: '1', title: 'Math Homework', subject: 'Mathematics', dueDate: '2024-01-12', status: 'pending' },
-        { id: '2', title: 'Science Project', subject: 'Science', dueDate: '2024-01-15', status: 'submitted' }
-      ]
-    };
+    const today = new Date();
+    const next30 = new Date();
+    next30.setDate(next30.getDate() + 30);
 
-    res.json(dashboardData);
+    const [attendance, results, fees, classRecord, allSchedules, subjects] = await Promise.all([
+      prisma.attendance.findMany({ where: { studentId: student.id } }),
+      prisma.result.findMany({
+        where: { studentId: student.id },
+        include: { exam: true },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+      prisma.studentFee.findMany({ where: { studentId: student.id } }),
+      prisma.schoolClass.findFirst({ where: { name: student.class, section: student.section } }),
+      prisma.examSchedule.findMany({
+        include: { exam: true, subject: true },
+        orderBy: { date: 'asc' },
+      }),
+      prisma.subject.findMany(),
+    ]);
+    const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
+
+    // Exam schedules relevant to this student's class (or the whole school).
+    const schedules = allSchedules.filter(
+      (s) => (classRecord && s.classId === classRecord.id) || s.classId === null
+    );
+
+    const present = attendance.filter((a) => a.status === 'Present').length;
+    const total = attendance.length;
+    const attendancePct = total ? Math.round((present / total) * 100) : 0;
+
+    const totalFee = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const paid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const due = totalFee - paid;
+
+    const upcomingExams = schedules
+      .filter((s) => new Date(s.date) >= today && new Date(s.date) <= next30)
+      .map((s) => ({
+        subject: s.subject.name,
+        type: s.exam.name,
+        date: formatCardDate(s.date),
+        time: `${s.startTime} - ${s.endTime}`,
+      }));
+
+    const pendingAssignments = STUDENT_ASSIGNMENTS
+      .filter((a) => a.status !== 'Submitted')
+      .map((a) => ({
+        title: a.title,
+        subject: a.subject,
+        teacher: a.teacher,
+        due: a.due,
+        status: 'pending',
+      }));
+
+    const latestNotices = STUDENT_NOTICES.slice(0, 3).map((n) => ({
+      title: n.title,
+      date: n.date,
+      content: n.content,
+    }));
+
+    const recentResults = results.map((r) => ({
+      subject: subjectName(r.subjectId),
+      marks: r.totalMarks,
+      grade: r.grade || '—',
+      gpa: r.gp ?? 0,
+    }));
+
+    const stats = [
+      {
+        title: 'Attendance',
+        value: `${attendancePct}%`,
+        description: total ? `${present}/${total} classes attended` : 'No records yet',
+        bgColor: 'bg-[#007AFF]/10',
+        color: 'text-[#007AFF]',
+        href: '/student/attendance',
+      },
+      {
+        title: 'Fee Status',
+        value: due > 0 ? `$${due.toFixed(2)}` : 'Paid',
+        description: totalFee > 0 ? `$${paid.toFixed(2)} paid of $${totalFee.toFixed(2)}` : 'No fees recorded',
+        bgColor: due > 0 ? 'bg-red-50' : 'bg-green-100',
+        color: due > 0 ? 'text-red-600' : 'text-green-600',
+        href: '/student/fees',
+      },
+      {
+        title: 'Upcoming Exams',
+        value: String(upcomingExams.length),
+        description: 'Exams in the next 30 days',
+        bgColor: 'bg-amber-50',
+        color: 'text-amber-600',
+        href: '/student/exam-schedule',
+      },
+      {
+        title: 'Past Results',
+        value: String(results.length),
+        description: results.length ? 'Results on record' : 'No results published yet',
+        bgColor: 'bg-slate-100',
+        color: 'text-slate-600',
+        href: '/student/results',
+      },
+    ];
+
+    res.json({ stats, upcomingExams, pendingAssignments, latestNotices, recentResults });
   } catch (error) {
     console.error('Error fetching student dashboard:', error);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
 });
 
-app.get('/api/student/profile', async (req: Request, res: Response) => {
+app.get('/student/profile', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
-    
+
     const student = await prisma.student.findFirst({
       where: {
         OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      }
+          ...(email ? [{ email: email as string }] : []),
+          ...(studentId ? [{ id: studentId as string }] : []),
+          ...(email ? [{ admissionNo: email as string }] : []),
+        ],
+      },
+      include: { guardian: true },
     });
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json(student);
+    res.json({
+      ...student,
+      studentId: student.id,
+      admissionNo: student.admissionNo,
+      dob: student.dob ? toDateStr(student.dob) : student.dob,
+      admissionDate: student.admissionDate ? toDateStr(student.admissionDate) : student.admissionDate,
+      admissionYear: student.academicYear || String(student.admissionDate.getFullYear()),
+      fatherPhone: student.guardian?.fatherPhone || '',
+      motherPhone: student.guardian?.motherPhone || '',
+      guardianName: student.guardian?.guardianName || 'N/A',
+      guardianPhone: student.guardian?.guardianPhone || '',
+      previousSchool: student.additionalNote || '',
+    });
   } catch (error) {
     console.error('Error fetching student profile:', error);
     res.status(500).json({ error: 'Failed to fetch profile data' });
   }
 });
 
-app.get('/api/student/results', async (req: Request, res: Response) => {
+app.get('/student/results', async (req: Request, res: Response) => {
   try {
-    const { email, studentId, examType } = req.query;
-    
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      },
-      include: {
-        results: {
-          include: {
-            exam: true
-          }
-        }
-      }
-    });
+    const { email, studentId } = req.query;
 
+    const student = await findStudent(email, studentId);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json(student.results || []);
+    const [results, subjects] = await Promise.all([
+      prisma.result.findMany({
+        where: { studentId: student.id },
+        include: { exam: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.subject.findMany(),
+    ]);
+    const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
+
+    const resultData = results.map((r) => ({
+      id: r.id,
+      subject: subjectName(r.subjectId),
+      written: r.written,
+      mcq: r.mcq,
+      total: r.totalMarks,
+      grade: r.grade || '—',
+      gpa: r.gp ?? 0,
+    }));
+
+    // Overall aggregation.
+    const totalMarks = resultData.reduce((s, r) => s + r.total, 0);
+    const avgGpa = resultData.length ? resultData.reduce((s, r) => s + r.gpa, 0) / resultData.length : 0;
+    const bestGrade = resultData.length ? resultData.reduce((best, r) => (r.grade && r.grade !== '—' && (!best || r.grade < best) ? r.grade : best), '' as string | null) : null;
+
+    // Rank across classmates using cumulative total marks.
+    let rank = 1;
+    try {
+      const classmates = await prisma.student.findMany({
+        where: { class: student.class, section: student.section },
+        select: { id: true },
+      });
+      const totals = await prisma.result.groupBy({
+        by: ['studentId'],
+        where: { studentId: { in: classmates.map((c) => c.id) } },
+        _sum: { totalMarks: true },
+      });
+      const myTotal = results.reduce((s, r) => s + r.totalMarks, 0);
+      const sorted = totals.map((t) => Number(t._sum?.totalMarks ?? 0)).sort((a, b) => b - a);
+      rank = sorted.indexOf(myTotal) === -1 ? (sorted.length ? sorted.length + 1 : 1) : sorted.indexOf(myTotal) + 1;
+    } catch (e) {
+      rank = 1;
+    }
+
+    const overall = {
+      totalMarks,
+      grade: bestGrade || '—',
+      gpa: Math.round(avgGpa * 100) / 100,
+      rank,
+    };
+
+    res.json({ resultData, overall });
   } catch (error) {
     console.error('Error fetching student results:', error);
     res.status(500).json({ error: 'Failed to fetch results data' });
   }
 });
 
-app.get('/api/student/fees', async (req: Request, res: Response) => {
+app.get('/student/fees', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
-    
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      },
-      include: {
-        fees: true
-      }
-    });
 
+    const student = await findStudent(email, studentId);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json(student.fees || []);
+    const [fees, invoices] = await Promise.all([
+      prisma.studentFee.findMany({ where: { studentId: student.id }, orderBy: { createdAt: 'desc' } }),
+      prisma.invoice.findMany({
+        where: { studentId: student.id },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    const totalFee = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const paid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const due = totalFee - paid;
+
+    const feeStats = {
+      totalFee: Math.round(totalFee * 100) / 100,
+      paid: Math.round(paid * 100) / 100,
+      due: Math.round(due * 100) / 100,
+    };
+
+    const normalizeStatus = (s?: string) =>
+      s === 'paid' || s === 'Paid' ? 'Paid' : s === 'partial' || s === 'Partial' ? 'Partial' : 'Due';
+
+    const invoiceList = invoices.map((inv) => ({
+      id: inv.id.slice(-8).toUpperCase(),
+      type: inv.type,
+      date: toDateStr(inv.createdAt),
+      amount: Number(inv.totalAmount),
+      status: normalizeStatus(inv.status),
+    }));
+
+    res.json({ feeStats, invoices: invoiceList });
   } catch (error) {
     console.error('Error fetching student fees:', error);
     res.status(500).json({ error: 'Failed to fetch fees data' });
   }
 });
 
-app.get('/api/student/attendance', async (req: Request, res: Response) => {
+app.get('/student/attendance', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
-    
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      },
-      include: {
-        attendance: {
-          orderBy: { date: 'desc' },
-          take: 30
-        }
-      }
-    });
 
+    const student = await findStudent(email, studentId);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    res.json(student.attendance || []);
+    const attendance = await prisma.attendance.findMany({
+      where: { studentId: student.id },
+      orderBy: { date: 'desc' },
+      take: 30,
+    });
+
+    const present = attendance.filter((a) => a.status === 'Present').length;
+    const total = attendance.length;
+
+    const summary = {
+      percentage: total ? Math.round((present / total) * 100) : 0,
+      totalClasses: total,
+      present,
+      absent: attendance.filter((a) => a.status === 'Absent').length,
+    };
+
+    const records = attendance.map((r) => ({
+      id: r.id,
+      date: toDateStr(r.date),
+      subject: 'Class',
+      time: '09:00 AM',
+      status: r.status,
+    }));
+
+    res.json({ summary, records });
   } catch (error) {
     console.error('Error fetching student attendance:', error);
     res.status(500).json({ error: 'Failed to fetch attendance data' });
   }
 });
 
-app.get('/api/student/exam-schedule', async (req: Request, res: Response) => {
+app.get('/student/exam-schedule', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
-    
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email: email as string },
-          { id: studentId as string },
-          { admissionNo: email as string }
-        ]
-      }
-    });
 
+    const student = await findStudent(email, studentId);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    // Get exam schedules for student's class
-    const schedules = await prisma.examSchedule.findMany({
-      where: {
-        class: {
-          name: student.class,
-          section: student.section
-        }
-      },
-      include: {
-        exam: true,
-        subject: true
-      },
-      orderBy: { date: 'asc' }
+    const classRecord = await prisma.schoolClass.findFirst({
+      where: { name: student.class, section: student.section },
     });
 
-    res.json(schedules);
+    const schedules = await prisma.examSchedule.findMany({
+      where: classRecord ? { OR: [{ classId: classRecord.id }, { classId: null }] } : undefined,
+      include: { exam: true, subject: true },
+      orderBy: { date: 'asc' },
+    });
+
+    const today = new Date();
+
+    res.json(
+      schedules.map((s) => ({
+        id: s.id,
+        date: formatCardDate(s.date),
+        examName: s.exam.name,
+        subject: s.subject.name,
+        time: `${s.startTime} - ${s.endTime}`,
+        room: s.roomNo || 'TBA',
+        status: new Date(s.date) < today ? 'Completed' : 'Upcoming',
+      }))
+    );
   } catch (error) {
     console.error('Error fetching exam schedule:', error);
     res.status(500).json({ error: 'Failed to fetch exam schedule' });
   }
 });
 
-app.get('/api/student/notices', async (_req: Request, res: Response) => {
+app.get('/student/notices', async (_req: Request, res: Response) => {
   try {
-    // Return mock notices - in production, this would come from a Notice table
-    const notices = [
-      { id: '1', title: 'School Holiday', content: 'School will be closed on Friday', date: '2024-01-10', priority: 'normal', category: 'general' },
-      { id: '2', title: 'Exam Schedule Released', content: 'Mid-term exams start from Jan 15', date: '2024-01-08', priority: 'high', category: 'exam' },
-      { id: '3', title: 'Parent Meeting', content: 'Annual parent-teacher meeting on Jan 20', date: '2024-01-05', priority: 'normal', category: 'event' }
-    ];
-
-    res.json(notices);
+    res.json(STUDENT_NOTICES);
   } catch (error) {
     console.error('Error fetching notices:', error);
     res.status(500).json({ error: 'Failed to fetch notices' });
   }
 });
 
-app.get('/api/student/messages', async (_req: Request, res: Response) => {
+app.get('/student/messages', async (_req: Request, res: Response) => {
   try {
-    // Return mock messages - in production, this would come from a Message table
-    const messages = [
-      { id: '1', from: 'Mr. John Doe', subject: 'Math Assignment', content: 'Please submit your homework by Friday', date: '2024-01-10', read: false },
-      { id: '2', from: 'Admin', subject: 'Fee Reminder', content: 'Your fee is due for this month', date: '2024-01-08', read: true },
-      { id: '3', from: 'Ms. Jane Smith', subject: 'Project Update', content: 'Your science project looks good', date: '2024-01-05', read: true }
-    ];
-
-    res.json(messages);
+    res.json({ contacts: STUDENT_CONTACTS, messages: STUDENT_MESSAGES });
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
 
-app.get('/api/student/assignments', async (_req: Request, res: Response) => {
+app.get('/student/assignments', async (_req: Request, res: Response) => {
   try {
-    // Return mock assignments - in production, this would come from an Assignment table
-    const assignments = [
-      { id: '1', title: 'Math Homework', subject: 'Mathematics', description: 'Solve problems from chapter 5', dueDate: '2024-01-12', status: 'pending', priority: 'high' },
-      { id: '2', title: 'Science Project', subject: 'Science', description: 'Create a model of solar system', dueDate: '2024-01-15', status: 'submitted', priority: 'medium' },
-      { id: '3', title: 'English Essay', subject: 'English', description: 'Write an essay on your favorite book', dueDate: '2024-01-18', status: 'pending', priority: 'low' }
-    ];
-
-    res.json(assignments);
+    res.json(STUDENT_ASSIGNMENTS);
   } catch (error) {
     console.error('Error fetching assignments:', error);
     res.status(500).json({ error: 'Failed to fetch assignments' });
