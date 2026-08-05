@@ -18,11 +18,38 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as { userId: string };
-    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as { userId: string; role: string };
+    let user = null;
+
+    // Find user based on role
+    if (decoded.role === 'Admin') {
+      user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    } else if (decoded.role === 'Teacher') {
+      const teacher = await prisma.teacher.findUnique({ where: { id: decoded.userId } });
+      if (teacher) {
+        user = {
+          id: teacher.id,
+          email: teacher.email,
+          role: 'Teacher',
+          name: teacher.name,
+          subject: teacher.subject
+        };
+      }
+    } else if (decoded.role === 'Student') {
+      const student = await prisma.student.findUnique({ where: { id: decoded.userId } });
+      if (student) {
+        user = {
+          id: student.id,
+          email: student.email,
+          role: 'Student',
+          name: student.name,
+          admissionNo: student.admissionNo
+        };
+      }
+    }
 
     if (!user) {
-      return res.status(401).json({ message: 'Invalid token' });
+      return res.status(401).json({ message: 'Invalid token - user not found' });
     }
 
     (req as any).user = user;
