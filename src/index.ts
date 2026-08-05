@@ -188,7 +188,7 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     prisma.staff.count(),
     prisma.attendance.findMany({
       where: { date: { gte: todayStart, lt: todayEnd } },
-      select: { status: true }
+      select: { studentId: true, status: true }
     }),
     prisma.student.findMany({
       take: 5,
@@ -242,16 +242,14 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
   const expenseTotal = money(allTimeExpense._sum.amount);
   const totalBalance = incomeTotal.minus(expenseTotal);
 
-  const normalizedStatuses = todayAttendanceRaw.map((r) => String(r.status || '').trim().toLowerCase());
+  const seenStudents = new Set<string>();
+  const uniqueToday = todayAttendanceRaw.filter((r) => (seenStudents.has(r.studentId) ? false : (seenStudents.add(r.studentId), true)));
+  const normalizedStatuses = uniqueToday.map((r) => String(r.status || '').trim().toLowerCase());
   const absent = normalizedStatuses.filter((s) => s === 'absent' || s === 'a').length;
   const late = normalizedStatuses.filter((s) => s === 'late' || s === 'l').length;
   const onLeave = normalizedStatuses.filter((s) => s === 'leave' || s === 'lv' || s === 'on leave' || s === 'on-leave' || s === 'half-day' || s === 'h').length;
-  const explicitPresent = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
-  const tracked = explicitPresent + absent + late + onLeave;
-  const totalForToday = activeStudents || totalStudents;
-  const hasTodayRecords = todayAttendanceRaw.length > 0;
-  const inferredPresent = hasTodayRecords ? Math.max(totalForToday - tracked, 0) : 0;
-  const present = explicitPresent + inferredPresent;
+  const present = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
+  const totalForToday = uniqueToday.length;
 
   // Build 6-month history for chart
   const historyIncome: Array<{ date: Date; amount: number }> = [];
