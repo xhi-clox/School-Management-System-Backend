@@ -349,25 +349,27 @@ app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
 app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
   const schema = z.object({
     type: z.enum(['income', 'expense', 'profit']),
-    month: z.coerce.number().int().min(1).max(12).optional().default(new Date().getMonth() + 1),
-    year: z.coerce.number().int().optional().default(new Date().getFullYear()),
+    month: z.coerce.number().int().min(1).max(12).optional(),
+    year: z.coerce.number().int().min(1970).max(2200).optional(),
     limit: z.coerce.number().int().min(1).max(200).optional().default(10),
   });
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { type, month, year, limit } = parsed.data;
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
+
+  const dateFilter = month && year
+    ? { createdAt: { gte: new Date(year, month - 1, 1), lt: new Date(year, month, 1) } }
+    : {};
 
   try {
     if (type === 'profit') {
       const income = await prisma.ledgerEntry.aggregate({
         _sum: { amount: true },
-        where: { type: 'income', createdAt: { gte: start, lt: end } }
+        where: { type: 'income', ...dateFilter }
       });
       const expense = await prisma.ledgerEntry.aggregate({
         _sum: { amount: true },
-        where: { type: 'expense', createdAt: { gte: start, lt: end } }
+        where: { type: 'expense', ...dateFilter }
       });
       const incomeTotal = money(income._sum.amount);
       const expenseTotal = money(expense._sum.amount);
@@ -378,16 +380,22 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
       });
     }
 
-    const entries = await prisma.ledgerEntry.findMany({
-      where: { type, createdAt: { gte: start, lt: end } },
-      orderBy: { createdAt: 'desc' },
-      take: limit
-    });
+    const where = { type, ...dateFilter };
+    const [grouped, entries] = await Promise.all([
+      prisma.ledgerEntry.groupBy({
+        by: ['category'],
+        where,
+        _sum: { amount: true }
+      }),
+      prisma.ledgerEntry.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit
+      })
+    ]);
 
-    const total = entries.reduce((s, e) => s.plus(e.amount), money(0));
-    const map: Record<string, number> = {};
-    for (const e of entries) map[e.category] = money(map[e.category]).plus(e.amount).toNumber();
-    const breakdown = Object.entries(map).map(([category, amount]) => ({ category, amount }));
+    const breakdown = grouped.map(g => ({ category: g.category, amount: money(g._sum.amount).toNumber() }));
+    const total = grouped.reduce((s, g) => s.plus(money(g._sum.amount)), money(0));
 
     res.json({
       total,
