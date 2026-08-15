@@ -24,6 +24,7 @@ app.set('json replacer', (_key: string, value: unknown) =>
 
 const money = (v: any): Prisma.Decimal => new Prisma.Decimal(v ?? 0);
 const roundMoney = (v: any): Prisma.Decimal => money(v).toDecimalPlaces(2);
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 // Before helmet/cors/body parsers so platform health probes always get a fast 200
 app.get('/health', (_req: Request, res: Response) => {
@@ -1283,6 +1284,265 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   });
 
   res.json({ success: true, highestMarks });
+});
+
+// ===== Results reporting (overview / class / student) =====
+
+async function buildExamReport(examId: string) {
+  const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { type: true } });
+  if (!exam) throw new Error('Exam not found');
+
+  const [grading, schedules, results] = await Promise.all([
+    prisma.gradingSystem.findMany({ where: { examTypeId: exam.typeId }, orderBy: { minPercent: 'desc' } }),
+    prisma.examSchedule.findMany({ where: { examId }, include: { subject: true, class: true } }),
+    prisma.result.findMany({
+      where: { examId },
+      include: { student: true }
+    })
+  ]);
+
+  const failGrades = new Set<string>();
+  grading.forEach((g) => { if (g.status === 'FAIL') failGrades.add(g.grade); });
+  if (failGrades.size === 0) failGrades.add('F');
+
+  const subjectName = new Map<string, string>();
+  const subjectFullMarksByClass = new Map<string, Map<string, number>>();
+  const subjectDefaultFullMarks = new Map<string, number>();
+  for (const s of schedules) {
+    subjectName.set(s.subjectId, s.subject?.name || s.subjectId);
+    if (!subjectDefaultFullMarks.has(s.subjectId)) subjectDefaultFullMarks.set(s.subjectId, s.fullMarks ?? 100);
+    if (s.class?.name) {
+      if (!subjectFullMarksByClass.has(s.subjectId)) subjectFullMarksByClass.set(s.subjectId, new Map());
+      subjectFullMarksByClass.get(s.subjectId)!.set(s.class.name, s.fullMarks ?? 100);
+    }
+  }
+
+  const studentMap = new Map<string, { student: any; subjects: any[] }>();
+  for (const r of results) {
+    if (!studentMap.has(r.studentId)) studentMap.set(r.studentId, { student: r.student, subjects: [] });
+    studentMap.get(r.studentId)!.subjects.push(r);
+  }
+
+  const students: any[] = [];
+  for (const { student, subjects } of studentMap.values()) {
+    if (!subjects.length) continue;
+    let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, failed = false;
+    for (const r of subjects) {
+      totalMarks += r.totalMarks || 0;
+      const fm = subjectFullMarksByClass.get(r.subjectId)?.get(student.class) ?? subjectDefaultFullMarks.get(r.subjectId) ?? 100;
+      fullMarks += fm;
+      if (r.gp != null) { gpSum += r.gp; gpCount++; }
+      if (r.grade && failGrades.has(r.grade)) failed = true;
+    }
+    const gpa = gpCount ? round2(gpSum / gpCount) : 0;
+    const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
+    let grade = '';
+    if (failed) {
+      grade = 'F';
+    } else if (grading.length) {
+      const g = grading.find((x) => percentage >= x.minPercent && percentage <= x.maxPercent);
+      grade = g ? g.grade : (grading[grading.length - 1]?.grade || '');
+    }
+    students.push({
+      studentId: student.id,
+      name: student.name,
+      admissionNo: student.admissionNo,
+      avatar: student.avatar,
+      class: student.class,
+      section: student.section,
+      roll: student.roll,
+      totalMarks: round2(totalMarks),
+      fullMarks: round2(fullMarks),
+      percentage,
+      gpa,
+      grade,
+      passed: !failed,
+      failed,
+      subjectCount: subjects.length
+    });
+  }
+
+  return { exam, grading, results, students, failGrades, subjectName, subjectDefaultFullMarks };
+}
+
+function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport>>, studentFilter?: Set<string>) {
+  const map = new Map<string, { subject: string; totals: number[]; passCount: number }>();
+  for (const r of report.results) {
+    if (studentFilter && !studentFilter.has(r.studentId)) continue;
+    if (!map.has(r.subjectId)) map.set(r.subjectId, { subject: report.subjectName.get(r.subjectId) || r.subjectId, totals: [], passCount: 0 });
+    const rec = map.get(r.subjectId)!;
+    const fm = report.subjectDefaultFullMarks.get(r.subjectId) ?? 100;
+    rec.totals.push(fm > 0 ? (r.totalMarks / fm) * 100 : 0);
+    if (!(r.grade && report.failGrades.has(r.grade))) rec.passCount++;
+  }
+  return [...map.values()]
+    .map((x) => ({
+      subject: x.subject,
+      average: round2(x.totals.reduce((a, b) => a + b, 0) / (x.totals.length || 1)),
+      passRate: round2((x.passCount / (x.totals.length || 1)) * 100)
+    }))
+    .sort((a, b) => a.subject.localeCompare(b.subject));
+}
+
+function rankStudents(list: any[]) {
+  return [...list]
+    .sort((a, b) => b.gpa - a.gpa || b.percentage - a.percentage || a.name.localeCompare(b.name))
+    .map((s, i) => ({ rank: i + 1, ...s }));
+}
+
+app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    let { examId, academicYear } = req.query as any;
+    if (!examId) {
+      const fallback = await prisma.exam.findFirst({
+        where: academicYear ? { academicYear } : {},
+        orderBy: { startDate: 'desc' }
+      });
+      examId = fallback?.id;
+    }
+    if (!examId) return res.status(400).json({ error: 'examId (or academicYear) is required' });
+
+    const report = await buildExamReport(examId);
+    const { students } = report;
+    const total = students.length;
+    const passed = students.filter((s) => s.passed).length;
+    const failed = total - passed;
+    const passRate = total ? round2((passed / total) * 100) : 0;
+    const average = total ? round2(students.reduce((a, s) => a + s.percentage, 0) / total) : 0;
+
+    const classMap = new Map<string, any[]>();
+    for (const s of students) {
+      const key = s.class || 'N/A';
+      if (!classMap.has(key)) classMap.set(key, []);
+      classMap.get(key)!.push(s);
+    }
+    const classPerformance = [...classMap.entries()]
+      .map(([cls, arr]) => {
+        const p = arr.filter((s) => s.passed).length;
+        return {
+          class: cls,
+          students: arr.length,
+          passed: p,
+          failed: arr.length - p,
+          passRate: round2((p / arr.length) * 100),
+          average: round2(arr.reduce((a, s) => a + s.percentage, 0) / arr.length)
+        };
+      })
+      .sort((a, b) => a.class.localeCompare(b.class));
+
+    const subjectPerformance = subjectStatsForReport(report);
+    const ranked = rankStudents(students);
+    const topStudents = ranked.slice(0, 10).map((s) => ({ rank: s.rank, studentId: s.studentId, name: s.name, admissionNo: s.admissionNo, avatar: s.avatar, class: s.class, section: s.section, roll: s.roll, gpa: s.gpa, percentage: s.percentage, grade: s.grade, totalMarks: s.totalMarks }));
+    const atRiskStudents = students
+      .filter((s) => s.failed || s.gpa < 2.0)
+      .sort((a, b) => a.gpa - b.gpa || b.percentage - a.percentage)
+      .slice(0, 10)
+      .map((s) => ({ studentId: s.studentId, name: s.name, admissionNo: s.admissionNo, avatar: s.avatar, class: s.class, section: s.section, roll: s.roll, gpa: s.gpa, percentage: s.percentage, grade: s.grade }));
+    const weakestSubjects = [...subjectPerformance].sort((a, b) => a.average - b.average).slice(0, 5);
+    const highestClass = classPerformance.length ? classPerformance.reduce((a, b) => (b.average > a.average ? b : a)) : null;
+    const lowestClass = classPerformance.length ? classPerformance.reduce((a, b) => (b.average < a.average ? b : a)) : null;
+
+    let previousExam = null;
+    const prev = await prisma.exam.findFirst({
+      where: { typeId: report.exam.typeId, startDate: { lt: report.exam.startDate } },
+      orderBy: { startDate: 'desc' }
+    });
+    if (prev) {
+      try {
+        const prevReport = await buildExamReport(prev.id);
+        const prevAvg = prevReport.students.length
+          ? round2(prevReport.students.reduce((a, s) => a + s.percentage, 0) / prevReport.students.length)
+          : 0;
+        previousExam = { id: prev.id, name: prev.name, average: prevAvg, avgChange: round2(average - prevAvg) };
+      } catch (e) {
+        previousExam = null;
+      }
+    }
+
+    res.json({
+      exam: { id: report.exam.id, name: report.exam.name, academicYear: report.exam.academicYear, type: report.exam.type?.name || '' },
+      stats: { students: total, passed, failed, passRate, average },
+      classPerformance,
+      subjectPerformance,
+      analytics: { highestClass, lowestClass, topStudents, atRiskStudents, weakestSubjects },
+      previousExam
+    });
+  } catch (error: any) {
+    console.error('Error building results overview:', error);
+    res.status(500).json({ error: 'Failed to build results overview', details: error.message });
+  }
+});
+
+app.get('/results/class', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId, class: cls, section } = req.query as any;
+    if (!examId || !cls) return res.status(400).json({ error: 'examId and class are required' });
+
+    const report = await buildExamReport(examId);
+    let students = report.students.filter((s) => s.class === cls);
+    if (section) students = students.filter((s) => s.section === section);
+
+    const total = students.length;
+    const passed = students.filter((s) => s.passed).length;
+    const average = total ? round2(students.reduce((a, s) => a + s.percentage, 0) / total) : 0;
+    const rankList = rankStudents(students);
+
+    const subjectPerformance = subjectStatsForReport(report, new Set(students.map((s) => s.studentId)));
+
+    res.json({
+      exam: { id: report.exam.id, name: report.exam.name },
+      class: cls,
+      section: section || null,
+      stats: { students: total, passed, failed: total - passed, passRate: total ? round2((passed / total) * 100) : 0, average },
+      subjectPerformance,
+      rankList
+    });
+  } catch (error: any) {
+    console.error('Error building class results:', error);
+    res.status(500).json({ error: 'Failed to build class results', details: error.message });
+  }
+});
+
+app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId, studentId } = req.query as any;
+    if (!examId || !studentId) return res.status(400).json({ error: 'examId and studentId are required' });
+
+    const report = await buildExamReport(examId);
+    const agg = report.students.find((s) => s.studentId === studentId);
+    if (!agg) return res.status(404).json({ error: 'No results found for this student in the exam' });
+
+    const student = await prisma.student.findUnique({ where: { id: studentId } });
+    const rows = report.results
+      .filter((r) => r.studentId === studentId)
+      .map((r) => ({
+        subject: report.subjectName.get(r.subjectId) || r.subjectId,
+        written: r.written,
+        mcq: r.mcq,
+        practical: r.practical,
+        total: r.totalMarks,
+        grade: r.grade || '',
+        gp: r.gp ?? 0,
+        highestMarks: r.highestMarks
+      }))
+      .sort((a, b) => a.subject.localeCompare(b.subject));
+
+    const clsRanked = report.students
+      .filter((s) => s.class === agg.class)
+      .sort((a, b) => b.gpa - a.gpa || b.percentage - a.percentage);
+    const position = clsRanked.findIndex((s) => s.studentId === studentId) + 1;
+
+    res.json({
+      student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, class: student?.class, section: student?.section, roll: student?.roll },
+      exam: { id: report.exam.id, name: report.exam.name },
+      rows,
+      totals: { totalMarks: agg.totalMarks, fullMarks: agg.fullMarks, percentage: agg.percentage, gpa: agg.gpa, grade: agg.grade },
+      position
+    });
+  } catch (error: any) {
+    console.error('Error building student results:', error);
+    res.status(500).json({ error: 'Failed to build student results', details: error.message });
+  }
 });
 
 // Exam Schedules (Routine)
