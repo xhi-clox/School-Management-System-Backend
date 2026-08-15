@@ -175,6 +175,7 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     totalStudents,
     activeStudents,
     teachersCount,
+    inactiveTeachers,
     classesCount,
     staffCount,
     todayAttendanceRaw,
@@ -184,11 +185,18 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     prisma.student.count(),
     prisma.student.count({ where: { status: 'Active' } }),
     prisma.teacher.count(),
+    prisma.teacher.count({ where: { status: { not: 'Active' } } }),
     prisma.schoolClass.count(),
     prisma.staff.count(),
     prisma.attendance.findMany({
       where: { date: { gte: todayStart, lt: todayEnd } },
-      select: { studentId: true, status: true }
+      select: {
+        studentId: true,
+        status: true,
+        student: {
+          select: { id: true, name: true, admissionNo: true, avatar: true, class: true, section: true, roll: true, status: true, guardianPhone: true }
+        }
+      }
     }),
     prisma.student.findMany({
       take: 5,
@@ -273,6 +281,20 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
   const present = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
   const totalForToday = uniqueToday.length;
 
+  const absentStudents = uniqueToday
+    .filter((r) => ['absent', 'a'].includes(String(r.status || '').trim().toLowerCase()))
+    .map((r) => ({
+      id: r.student?.id || r.studentId,
+      name: r.student?.name || 'Unknown',
+      admissionNo: r.student?.admissionNo || '',
+      avatar: r.student?.avatar || null,
+      class: r.student?.class || '',
+      section: r.student?.section || '',
+      roll: r.student?.roll ?? 0,
+      status: r.student?.status || 'Inactive',
+      guardianPhone: r.student?.guardianPhone || ''
+    }));
+
   // Build 6-month history for chart
   const historyIncome: Array<{ date: Date; amount: number }> = [];
   const historyExpense: Array<{ date: Date; amount: number }> = [];
@@ -297,6 +319,7 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
       activeStudents,
       inactiveStudents,
       teachers: teachersCount,
+      inactiveTeachers,
       classes: classesCount,
       staff: staffCount
     },
@@ -319,7 +342,8 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
       present,
       absent,
       late,
-      onLeave
+      onLeave,
+      absentStudents
     },
     upcomingExams: upcomingExams.map(ex => ({
       id: ex.id,
