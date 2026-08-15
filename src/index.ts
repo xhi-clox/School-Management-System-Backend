@@ -396,6 +396,51 @@ app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
   }
 });
 
+// Dashboard: weekly attendance summary (grouped per day)
+app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Response) => {
+  const schema = z.object({
+    startDate: z.string().min(1),
+    endDate: z.string().min(1),
+    email: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { startDate, endDate } = parsed.data as { startDate: string; endDate: string };
+
+  const start = new Date(String(startDate));
+  const end = new Date(String(endDate));
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+
+  try {
+    const records = await prisma.attendance.findMany({
+      where: { date: { gte: start, lte: end } },
+      select: { date: true, status: true },
+    });
+
+    const dayMap = new Map<string, { present: number; absent: number; late: number }>();
+    for (const r of records) {
+      const key = `${r.date.getFullYear()}-${String(r.date.getMonth() + 1).padStart(2, '0')}-${String(r.date.getDate()).padStart(2, '0')}`;
+      const entry = dayMap.get(key) || { present: 0, absent: 0, late: 0 };
+      if (r.status === 'Present') entry.present++;
+      else if (r.status === 'Absent') entry.absent++;
+      else if (r.status === 'Late') entry.late++;
+      dayMap.set(key, entry);
+    }
+
+    const result: Array<{ date: string; present: number; absent: number; late: number }> = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      result.push({ date: key, ...(dayMap.get(key) || { present: 0, absent: 0, late: 0 }) });
+    }
+
+    res.json(result);
+  } catch (error) {
+    console.error('Weekly attendance summary error:', error);
+    res.status(500).json({ error: 'Failed to load weekly attendance summary' });
+  }
+});
+
 app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
   const schema = z.object({
     type: z.enum(['income', 'expense', 'profit']),
