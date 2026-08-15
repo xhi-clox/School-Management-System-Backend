@@ -224,10 +224,32 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     }
   });
 
+  const [todayIncome, todayExpense] = await Promise.all([
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'income', createdAt: { gte: todayStart, lt: todayEnd } }
+    }),
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'expense', createdAt: { gte: todayStart, lt: todayEnd } }
+    })
+  ]);
+
   const studentsPerClass = await prisma.student.groupBy({
     by: ['class'],
     _count: { id: true }
   });
+
+  const feeInvoices = await prisma.invoice.findMany({
+    select: { totalAmount: true, payments: { select: { amount: true } } }
+  });
+  let feesDue = money(0);
+  let feesCollected = money(0);
+  for (const inv of feeInvoices) {
+    const paid = inv.payments.reduce((s, p) => s.plus(p.amount), money(0));
+    feesCollected = feesCollected.plus(paid);
+    feesDue = feesDue.plus(inv.totalAmount.minus(paid));
+  }
 
   const allTimeIncome = await prisma.ledgerEntry.aggregate({
     _sum: { amount: true },
@@ -283,6 +305,10 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
       expense: expenseTotal,
       profit: incomeTotal.minus(expenseTotal),
       totalBalance,
+      todayIncome: money(todayIncome._sum.amount),
+      todayExpense: money(todayExpense._sum.amount),
+      feesDue,
+      feesCollected,
       history: {
         income: historyIncome.map(h => ({ date: h.date, amount: h.amount })),
         expense: historyExpense.map(h => ({ date: h.date, amount: h.amount }))
