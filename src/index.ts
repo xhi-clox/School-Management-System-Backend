@@ -4330,30 +4330,6 @@ function findStudent(email: unknown, studentId: unknown) {
   });
 }
 
-const STUDENT_NOTICES = [
-  { id: '1', title: 'School Holiday', content: 'School will be closed on Friday for maintenance work.', date: toDateStr(new Date()), priority: 'normal', category: 'general', attachment: '' },
-  { id: '2', title: 'Exam Schedule Released', content: 'Mid-term examinations will begin soon. Please check the full schedule.', date: toDateStr(new Date(Date.now() - 86400000)), priority: 'high', category: 'exam', attachment: 'exam-schedule.pdf' },
-  { id: '3', title: 'Parent Meeting', content: 'Annual parent-teacher meeting will be held next week.', date: toDateStr(new Date(Date.now() - 2 * 86400000)), priority: 'normal', category: 'event', attachment: '' },
-];
-
-const STUDENT_ASSIGNMENTS = [
-  { id: '1', title: 'Math Homework', subject: 'Mathematics', teacher: 'Mr. John Doe', description: 'Solve problems from chapter 5 on linear equations.', due: `${new Date().getDate() + 2} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Pending', priority: 'high', attachment: 'chapter-5-problems.pdf' },
-  { id: '2', title: 'Science Project', subject: 'Science', teacher: 'Ms. Jane Smith', description: 'Create a model of the solar system.', due: `${new Date().getDate() + 5} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Pending', priority: 'medium', attachment: 'project-guidelines.pdf' },
-  { id: '3', title: 'English Essay', subject: 'English', teacher: 'Mr. Alan Brown', description: 'Write an essay on your favourite book.', due: `${new Date().getDate() + 7} ${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`, status: 'Submitted', priority: 'low', attachment: '' },
-];
-
-const STUDENT_CONTACTS = [
-  { id: '1', name: 'Mr. John Doe', time: '2:30 PM', role: 'Math Teacher', lastMsg: 'Please submit your homework by Friday', online: true },
-  { id: '2', name: 'School Admin', time: '9:15 AM', role: 'Administrator', lastMsg: 'Your fee is due for this month', online: true },
-  { id: '3', name: 'Ms. Jane Smith', time: 'Yesterday', role: 'Science Teacher', lastMsg: 'Your science project looks good', online: false },
-];
-
-const STUDENT_MESSAGES = [
-  { id: '1', content: 'Hello! Please submit your math homework by Friday.', time: '2:30 PM', me: false },
-  { id: '2', content: 'Sure, I will submit it on time. Thank you.', time: '2:31 PM', me: true },
-  { id: '3', content: 'Your fee for this month is due. Kindly pay at the accounts office.', time: '9:15 AM', me: false },
-];
-
 app.get('/student/dashboard', async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
@@ -4407,21 +4383,9 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
         time: `${s.startTime} - ${s.endTime}`,
       }));
 
-    const pendingAssignments = STUDENT_ASSIGNMENTS
-      .filter((a) => a.status !== 'Submitted')
-      .map((a) => ({
-        title: a.title,
-        subject: a.subject,
-        teacher: a.teacher,
-        due: a.due,
-        status: 'pending',
-      }));
+    const pendingAssignments: never[] = [];
 
-    const latestNotices = STUDENT_NOTICES.slice(0, 3).map((n) => ({
-      title: n.title,
-      date: n.date,
-      content: n.content,
-    }));
+    const latestNotices: never[] = [];
 
     const recentResults = results.map((r) => ({
       subject: subjectName(r.subjectId),
@@ -4529,48 +4493,70 @@ app.get('/student/results', async (req: Request, res: Response) => {
     ]);
     const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
 
-    const resultData = results.map((r) => ({
-      id: r.id,
-      subject: subjectName(r.subjectId),
-      written: r.written,
-      mcq: r.mcq,
-      total: r.totalMarks,
-      grade: r.grade || '—',
-      gpa: r.gp ?? 0,
-    }));
-
-    // Overall aggregation.
-    const totalMarks = resultData.reduce((s, r) => s + r.total, 0);
-    const avgGpa = resultData.length ? resultData.reduce((s, r) => s + r.gpa, 0) / resultData.length : 0;
-    const bestGrade = resultData.length ? resultData.reduce((best, r) => (r.grade && r.grade !== '—' && (!best || r.grade < best) ? r.grade : best), '' as string | null) : null;
-
-    // Rank across classmates using cumulative total marks.
-    let rank = 1;
-    try {
-      const classmates = await prisma.student.findMany({
-        where: { class: student.class, section: student.section },
-        select: { id: true },
-      });
-      const totals = await prisma.result.groupBy({
-        by: ['studentId'],
-        where: { studentId: { in: classmates.map((c) => c.id) } },
-        _sum: { totalMarks: true },
-      });
-      const myTotal = results.reduce((s, r) => s + r.totalMarks, 0);
-      const sorted = totals.map((t) => Number(t._sum?.totalMarks ?? 0)).sort((a, b) => b - a);
-      rank = sorted.indexOf(myTotal) === -1 ? (sorted.length ? sorted.length + 1 : 1) : sorted.indexOf(myTotal) + 1;
-    } catch (e) {
-      rank = 1;
+    // Group results by exam so the portal shows only real exams.
+    const byExam = new Map<string, typeof results>();
+    for (const r of results) {
+      if (!byExam.has(r.examId)) byExam.set(r.examId, []);
+      byExam.get(r.examId)!.push(r);
     }
 
-    const overall = {
-      totalMarks,
-      grade: bestGrade || '—',
-      gpa: Math.round(avgGpa * 100) / 100,
-      rank,
-    };
+    const classmates = await prisma.student.findMany({
+      where: { class: student.class, section: student.section },
+      select: { id: true },
+    });
+    const classmateIds = classmates.map((c) => c.id);
 
-    res.json({ resultData, overall });
+    const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; grade: string; gpa: number; rank: number } }> = [];
+    for (const [examId, list] of byExam.entries()) {
+      const rows = list.map((r) => ({
+        id: r.id,
+        subject: subjectName(r.subjectId),
+        written: r.written,
+        mcq: r.mcq,
+        total: r.totalMarks,
+        grade: r.grade || '—',
+        gpa: r.gp ?? 0,
+      }));
+
+      const totalMarks = rows.reduce((s, r) => s + r.total, 0);
+      const avgGpa = rows.length ? rows.reduce((s, r) => s + r.gpa, 0) / rows.length : 0;
+      const bestGrade = rows.length ? rows.reduce((best, r) => (r.grade && r.grade !== '—' && (!best || r.grade < best) ? r.grade : best), '' as string | null) : null;
+
+      // Rank within this exam across classmates.
+      let rank = 1;
+      try {
+        const totals = classmateIds.length
+          ? await prisma.result.groupBy({
+              by: ['studentId'],
+              where: { studentId: { in: classmateIds }, examId },
+              _sum: { totalMarks: true },
+            })
+          : [];
+        const myTotal = rows.reduce((s, r) => s + r.total, 0);
+        const sorted = totals.map((t) => Number(t._sum?.totalMarks ?? 0)).sort((a, b) => b - a);
+        rank = sorted.indexOf(myTotal) === -1 ? (sorted.length ? sorted.length + 1 : 1) : sorted.indexOf(myTotal) + 1;
+      } catch (e) {
+        rank = 1;
+      }
+
+      exams.push({
+        id: examId,
+        name: list[0].exam.name,
+        resultData: rows,
+        overall: {
+          totalMarks,
+          grade: bestGrade || '—',
+          gpa: Math.round(avgGpa * 100) / 100,
+          rank,
+        },
+      });
+    }
+
+    res.json({
+      exams,
+      resultData: exams.length ? exams[0].resultData : [],
+      overall: exams.length ? exams[0].overall : { totalMarks: 0, grade: '—', gpa: 0, rank: 1 },
+    });
   } catch (error) {
     console.error('Error fetching student results:', error);
     res.status(500).json({ error: 'Failed to fetch results data' });
@@ -4650,8 +4636,6 @@ app.get('/student/attendance', async (req: Request, res: Response) => {
     const records = attendance.map((r) => ({
       id: r.id,
       date: toDateStr(r.date),
-      subject: 'Class',
-      time: '09:00 AM',
       status: r.status,
     }));
 
@@ -4702,7 +4686,7 @@ app.get('/student/exam-schedule', async (req: Request, res: Response) => {
 
 app.get('/student/notices', async (_req: Request, res: Response) => {
   try {
-    res.json(STUDENT_NOTICES);
+    res.json([]);
   } catch (error) {
     console.error('Error fetching notices:', error);
     res.status(500).json({ error: 'Failed to fetch notices' });
@@ -4711,7 +4695,7 @@ app.get('/student/notices', async (_req: Request, res: Response) => {
 
 app.get('/student/messages', async (_req: Request, res: Response) => {
   try {
-    res.json({ contacts: STUDENT_CONTACTS, messages: STUDENT_MESSAGES });
+    res.json({ contacts: [], messages: [] });
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: 'Failed to fetch messages' });
@@ -4720,7 +4704,7 @@ app.get('/student/messages', async (_req: Request, res: Response) => {
 
 app.get('/student/assignments', async (_req: Request, res: Response) => {
   try {
-    res.json(STUDENT_ASSIGNMENTS);
+    res.json([]);
   } catch (error) {
     console.error('Error fetching assignments:', error);
     res.status(500).json({ error: 'Failed to fetch assignments' });
