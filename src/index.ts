@@ -3756,26 +3756,27 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: { classes: true, permission: true }
+      include: { classes: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    const classes = await teacherEffectiveClasses(teacher, 'all');
+    // Head-teacher (assigned) classes only
+    const classes = await Promise.all(
+      (teacher.classes || []).map(async (cls: any) => ({
+        id: cls.id,
+        name: cls.name,
+        section: cls.section,
+        studentCount: await prisma.student.count({ where: { class: cls.name, section: cls.section } }),
+        isClassTeacher: true
+      }))
+    );
 
-    // Today's classes mapped to routine time slots (no routine table exists yet)
-    const timeSlots = [
-      '08:00 - 08:40', '08:40 - 09:20', '09:20 - 10:00',
-      '10:20 - 11:00', '11:00 - 11:40', '11:40 - 12:20', '12:20 - 01:00'
-    ];
-    const todaysClasses = classes.map((cls, i) => ({
-      time: timeSlots[i % timeSlots.length],
-      subject: teacher.subject || 'General',
-      class: `${cls.name} - ${cls.section}`,
-      room: 'R-101'
-    }));
+    // No class routine endpoint exists yet, so today's schedule stays empty
+    // (do not fabricate time slots / rooms).
+    const todaysClasses: any[] = [];
 
     const upcomingExams = await prisma.exam.findMany({
       where: { endDate: { gte: new Date() } },
