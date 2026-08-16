@@ -284,6 +284,18 @@ model Teacher {
   attendance TeacherAttendance[]
   classes    SchoolClass[]
   login      TeacherLogin?
+  permission TeacherPermission?
+}
+
+model TeacherPermission {
+  id                 String   @id @default(cuid())
+  teacherId          String   @unique
+  teacher            Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  attendanceMode     String   @default("assigned")
+  attendanceClassIds String[]
+  marksMode          String   @default("assigned")
+  marksClassIds      String[]
+  updatedAt          DateTime @updatedAt
 }
 
 model Staff {

@@ -3537,6 +3537,65 @@ app.delete('/teachers/logins/:id', authMiddleware, checkRole(['Admin']), async (
   }
 });
 
+// ---------------------------------------------------------------
+// Teacher Permissions Management
+// ---------------------------------------------------------------
+app.get('/permissions', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
+  try {
+    const teachers = await prisma.teacher.findMany({
+      orderBy: { name: 'asc' },
+      include: { permission: true }
+    });
+    const classes = await prisma.schoolClass.findMany({
+      orderBy: [{ name: 'asc' }, { section: 'asc' }]
+    });
+
+    res.json({
+      teachers: teachers.map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        email: t.email,
+        subject: t.subject,
+        designation: t.designation,
+        status: t.status,
+        permission: t.permission || null
+      })),
+      classes: classes.map((c: any) => ({ id: c.id, name: c.name, section: c.section }))
+    });
+  } catch (error) {
+    console.error('Error fetching permissions:', error);
+    res.status(500).json({ error: 'Failed to fetch permissions' });
+  }
+});
+
+app.put('/permissions/:teacherId', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { teacherId } = req.params;
+    const schema = z.object({
+      attendanceMode: z.enum(['none', 'assigned', 'all', 'specific']),
+      attendanceClassIds: z.array(z.string()),
+      marksMode: z.enum(['none', 'assigned', 'all', 'specific']),
+      marksClassIds: z.array(z.string())
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const teacher = await prisma.teacher.findUnique({ where: { id: teacherId } });
+    if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
+
+    const permission = await prisma.teacherPermission.upsert({
+      where: { teacherId },
+      update: parsed.data,
+      create: { teacherId, ...parsed.data }
+    });
+
+    res.json(permission);
+  } catch (error) {
+    console.error('Error updating permissions:', error);
+    res.status(500).json({ error: 'Failed to update permissions' });
+  }
+});
+
 // Authentication endpoint
 app.post('/auth/login', async (req: Request, res: Response) => {
   try {
@@ -3697,14 +3756,14 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: { classes: true }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    const classes = await teacherClassList(teacher);
+    const classes = await teacherEffectiveClasses(teacher, 'all');
 
     // Today's classes mapped to routine time slots (no routine table exists yet)
     const timeSlots = [
@@ -3752,16 +3811,73 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
   }
 });
 
-async function teacherClassList(teacher: any) {
+async function teacherPermissionRecord(teacher: any) {
+  if (teacher.permission) return teacher.permission;
+  try {
+    return await prisma.teacherPermission.upsert({
+      where: { teacherId: teacher.id },
+      update: {},
+      create: { teacherId: teacher.id }
+    });
+  } catch (error: any) {
+    const existing = await prisma.teacherPermission.findUnique({ where: { teacherId: teacher.id } });
+    if (existing) return existing;
+    throw error;
+  }
+}
+
+async function teacherAllowedClassIds(teacher: any, scope: 'attendance' | 'marks'): Promise<Set<string>> {
+  const permission = await teacherPermissionRecord(teacher);
+  const mode = scope === 'attendance' ? permission.attendanceMode : permission.marksMode;
+  const ids = scope === 'attendance' ? permission.attendanceClassIds : permission.marksClassIds;
+
+  if (mode === 'all') {
+    const all = await prisma.schoolClass.findMany({ select: { id: true } });
+    return new Set(all.map((c: any) => c.id));
+  }
+  if (mode === 'specific') return new Set(ids || []);
+  if (mode === 'none') return new Set();
+  return new Set((teacher.classes || []).map((c: any) => c.id));
+}
+
+async function teacherAllowedClassIdsAll(teacher: any): Promise<Set<string>> {
+  const [a, b] = await Promise.all([
+    teacherAllowedClassIds(teacher, 'attendance'),
+    teacherAllowedClassIds(teacher, 'marks')
+  ]);
+  return new Set([...Array.from(a), ...Array.from(b)]);
+}
+
+async function teacherScopeClasses(teacher: any, scope: 'attendance' | 'marks') {
+  const allowed = await teacherAllowedClassIds(teacher, scope);
+  if (allowed.size === 0) return [];
+  const classTeacherIds = new Set((teacher.classes || []).map((c: any) => c.id));
+  const classes = await prisma.schoolClass.findMany({
+    where: { id: { in: Array.from(allowed) } },
+    orderBy: [{ name: 'asc' }, { section: 'asc' }]
+  });
   return Promise.all(
-    (teacher.classes || []).map(async (cls: any) => ({
+    classes.map(async (cls: any) => ({
       id: cls.id,
       name: cls.name,
       section: cls.section,
       studentCount: await prisma.student.count({ where: { class: cls.name, section: cls.section } }),
-      isClassTeacher: true
+      isClassTeacher: classTeacherIds.has(cls.id)
     }))
   );
+}
+
+async function teacherEffectiveClasses(teacher: any, scope: string) {
+  if (scope === 'all') {
+    const [a, b] = await Promise.all([
+      teacherScopeClasses(teacher, 'attendance'),
+      teacherScopeClasses(teacher, 'marks')
+    ]);
+    const map = new Map<string, any>();
+    [...a, ...b].forEach((c: any) => map.set(c.id, c));
+    return Array.from(map.values());
+  }
+  return teacherScopeClasses(teacher, scope as 'attendance' | 'marks');
 }
 
 app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
@@ -3771,14 +3887,15 @@ app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: 
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: { classes: true }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    const classes = await teacherClassList(teacher);
+    const scope = req.query.scope === 'attendance' || req.query.scope === 'marks' ? String(req.query.scope) : 'all';
+    const classes = await teacherEffectiveClasses(teacher, scope);
     res.json(classes);
   } catch (error) {
     console.error('Error fetching teacher classes:', error);
@@ -3794,22 +3911,24 @@ app.get('/teacher/classes/:id/students', authMiddleware, checkRole(['Teacher']),
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          where: { id: classId }
-        }
-      }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    if (teacher.classes.length === 0) {
+    const scope = req.query.scope === 'attendance' || req.query.scope === 'marks' ? String(req.query.scope) : 'all';
+    const allowed = scope === 'all' ? await teacherAllowedClassIdsAll(teacher) : await teacherAllowedClassIds(teacher, scope as 'attendance' | 'marks');
+
+    if (!allowed.has(classId)) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    const classInfo = teacher.classes[0];
+    const classInfo = await prisma.schoolClass.findUnique({ where: { id: classId } });
+    if (!classInfo) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
 
     // Get students for this class using Student model
     const students = await prisma.student.findMany({
@@ -3873,22 +3992,22 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          where: { id: classId as string }
-        }
-      }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    if (teacher.classes.length === 0) {
+    const allowed = await teacherAllowedClassIds(teacher, 'attendance');
+    if (!allowed.has(classId as string)) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    const classInfo = teacher.classes[0];
+    const classInfo = await prisma.schoolClass.findUnique({ where: { id: classId as string } });
+    if (!classInfo) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
 
     // Get students for this class using Student model
     const students = await prisma.student.findMany({
@@ -3942,22 +4061,22 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          where: { id: classId }
-        }
-      }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    if (teacher.classes.length === 0) {
+    const allowed = await teacherAllowedClassIds(teacher, 'attendance');
+    if (!allowed.has(classId)) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    const classInfo = teacher.classes[0];
+    const classInfo = await prisma.schoolClass.findUnique({ where: { id: classId } });
+    if (!classInfo) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
 
     // Save attendance to the Attendance table (same as /attendance/save)
     const day = new Date(String(date));
@@ -4216,18 +4335,15 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
     // Get teacher information
     const teacher = await prisma.teacher.findFirst({
       where: { email: user.email },
-      include: {
-        classes: {
-          where: { id: classId }
-        }
-      }
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    if (teacher.classes.length === 0) {
+    const allowed = await teacherAllowedClassIds(teacher, 'marks');
+    if (!allowed.has(classId)) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
