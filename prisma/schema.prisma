@@ -286,6 +286,7 @@ model Teacher {
   classes    SchoolClass[]
   login      TeacherLogin?
   permission TeacherPermission?
+  classSubjects ClassSubjectTeacher[]
 }
 
 model TeacherPermission {
@@ -297,6 +298,22 @@ model TeacherPermission {
   marksMode          String   @default("assigned")
   marksClassIds      String[]
   updatedAt          DateTime @updatedAt
+}
+
+model ClassSubjectTeacher {
+  id        String   @id @default(cuid())
+  teacherId String
+  classId   String
+  subjectId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacher   Teacher      @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  class     SchoolClass  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject   Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, subjectId])
+  @@index([teacherId])
 }
 
 model Staff {
@@ -376,6 +393,7 @@ model SchoolClass {
   packages  AdmissionPackage[]
   feeStructures FeeStructure[]
   examSchedules ExamSchedule[]
+  classSubjects ClassSubjectTeacher[]
 }
 
 model FeeStructure {
@@ -418,6 +436,7 @@ model Subject {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   schedules ExamSchedule[]
+  classSubjects ClassSubjectTeacher[]
 }
 
 model Attendance {

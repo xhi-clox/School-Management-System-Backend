@@ -1997,11 +1997,14 @@ app.delete('/expenses/:id', async (req: Request, res: Response) => {
 
 // Classes
 app.get('/classes', async (_req: Request, res: Response) => {
-  const classes = await prisma.schoolClass.findMany({ orderBy: [{ name: 'asc' }, { section: 'asc' }] });
+  const classes = await prisma.schoolClass.findMany({
+    orderBy: [{ name: 'asc' }, { section: 'asc' }],
+    include: { teacher: { select: { id: true, name: true } } }
+  });
   const counts = await Promise.all(
     classes.map(async (c) => {
       const count = await prisma.student.count({ where: { class: c.name, section: c.section } });
-      return { ...c, students: count };
+      return { ...c, teacher: c.teacher?.name ?? '', students: count };
     })
   );
   res.json(counts);
@@ -2041,6 +2044,7 @@ app.delete('/classes/:id', async (req: Request, res: Response) => {
       prisma.admissionPackage.deleteMany({ where: { classId: id } }),
       prisma.examSchedule.deleteMany({ where: { classId: id } }),
       prisma.feeStructure.deleteMany({ where: { classId: id } }),
+      prisma.classSubjectTeacher.deleteMany({ where: { classId: id } }),
       prisma.schoolClass.delete({ where: { id } }),
     ]);
     res.status(204).send();
@@ -3596,6 +3600,114 @@ app.put('/permissions/:teacherId', authMiddleware, checkRole(['Admin']), async (
   }
 });
 
+// ---------------------------------------------------------------
+// Class-Subject-Teacher Assignments (which teacher teaches which subject in which class)
+// ---------------------------------------------------------------
+app.get('/class-subject-teachers', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
+  try {
+    const [assignments, teachers, classes, subjects] = await Promise.all([
+      prisma.classSubjectTeacher.findMany({
+        orderBy: [{ class: { name: 'asc' } }, { class: { section: 'asc' } }, { subject: { name: 'asc' } }],
+        include: { teacher: true, class: true, subject: true }
+      }),
+      prisma.teacher.findMany({ orderBy: { name: 'asc' } }),
+      prisma.schoolClass.findMany({ orderBy: [{ name: 'asc' }, { section: 'asc' }] }),
+      prisma.subject.findMany({ orderBy: { name: 'asc' } })
+    ]);
+
+    res.json({
+      assignments: assignments.map((a: any) => ({
+        id: a.id,
+        teacherId: a.teacherId,
+        classId: a.classId,
+        subjectId: a.subjectId,
+        teacherName: a.teacher?.name || '',
+        className: a.class?.name || '',
+        classSection: a.class?.section || '',
+        subjectName: a.subject?.name || ''
+      })),
+      teachers: teachers.map((t: any) => ({ id: t.id, name: t.name, subject: t.subject })),
+      classes: classes.map((c: any) => ({ id: c.id, name: c.name, section: c.section })),
+      subjects: subjects.map((s: any) => ({ id: s.id, name: s.name, code: s.code }))
+    });
+  } catch (error) {
+    console.error('Error fetching class-subject-teachers:', error);
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+app.post('/class-subject-teachers', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      teacherId: z.string().min(1),
+      classId: z.string().min(1),
+      subjectId: z.string().min(1)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const { teacherId, classId, subjectId } = parsed.data;
+
+    const [teacher, cls, subject] = await Promise.all([
+      prisma.teacher.findUnique({ where: { id: teacherId } }),
+      prisma.schoolClass.findUnique({ where: { id: classId } }),
+      prisma.subject.findUnique({ where: { id: subjectId } })
+    ]);
+    if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
+    if (!cls) return res.status(404).json({ error: 'Class not found' });
+    if (!subject) return res.status(404).json({ error: 'Subject not found' });
+
+    // One teacher per (class, subject) — upsert so reassigning just updates the teacher.
+    const assignment = await prisma.classSubjectTeacher.upsert({
+      where: { classId_subjectId: { classId, subjectId } },
+      update: { teacherId },
+      create: { teacherId, classId, subjectId }
+    });
+
+    res.status(201).json(assignment);
+  } catch (error) {
+    console.error('Error creating class-subject-teacher:', error);
+    res.status(500).json({ error: 'Failed to create assignment' });
+  }
+});
+
+app.put('/class-subject-teachers/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const schema = z.object({
+      teacherId: z.string().min(1),
+      classId: z.string().min(1),
+      subjectId: z.string().min(1)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const existing = await prisma.classSubjectTeacher.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Assignment not found' });
+
+    const assignment = await prisma.classSubjectTeacher.update({
+      where: { id },
+      data: parsed.data
+    });
+
+    res.json(assignment);
+  } catch (error) {
+    console.error('Error updating class-subject-teacher:', error);
+    res.status(500).json({ error: 'Failed to update assignment' });
+  }
+});
+
+app.delete('/class-subject-teachers/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await prisma.classSubjectTeacher.delete({ where: { id } });
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting class-subject-teacher:', error);
+    res.status(500).json({ error: 'Failed to delete assignment' });
+  }
+});
+
 // Authentication endpoint
 app.post('/auth/login', async (req: Request, res: Response) => {
   try {
@@ -3778,12 +3890,17 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
     // (do not fabricate time slots / rooms).
     const todaysClasses: any[] = [];
 
-    const upcomingExams = await prisma.exam.findMany({
-      where: { endDate: { gte: new Date() } },
-      include: { type: true },
-      orderBy: { startDate: 'asc' },
-      take: 5
-    });
+    const now = new Date();
+    const relevantExams = await teacherRelevantExams(teacher);
+    const sortByStart = (a: any, b: any) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime();
+    const ongoingExams = relevantExams
+      .filter((e: any) => new Date(e.startDate) <= now && new Date(e.endDate) >= now)
+      .sort(sortByStart)
+      .slice(0, 5);
+    const upcomingExams = relevantExams
+      .filter((e: any) => new Date(e.startDate) >= now)
+      .sort(sortByStart)
+      .slice(0, 5);
 
     const stats = {
       teacher: {
@@ -3796,11 +3913,8 @@ app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req
       todaysClasses,
       pendingAttendance: todaysClasses.length,
       assignmentsToReview: 0,
-      upcomingExams: upcomingExams.map((e: any) => ({
-        date: toDateStr(e.startDate),
-        subject: e.name,
-        class: e.type?.name || ''
-      })),
+      ongoingExams,
+      upcomingExams,
       messages: [],
       recentNotices: []
     };
@@ -3881,6 +3995,89 @@ async function teacherEffectiveClasses(teacher: any, scope: string) {
   return teacherScopeClasses(teacher, scope as 'attendance' | 'marks');
 }
 
+// Which exams are relevant to this teacher.
+// Permission-aware:
+//   marksMode 'all'      -> unrestricted (all exams; admin granted everything)
+//   marksMode 'specific' -> exams covering marksClassIds classes (any subject)
+//   marksMode 'assigned'/'none' -> exams matching the teacher's recorded (class, subject)
+//       pairs from ClassSubjectTeacher; falls back to assigned classes + teacher.subject
+//       match when no pairs are recorded.
+async function teacherExamScope(teacher: any) {
+  const permission = await teacherPermissionRecord(teacher);
+  const mode = permission.marksMode;
+  if (mode === 'all') return { unrestricted: true, pairs: null as any, classIds: null as any, subjectIds: null as any };
+  if (mode === 'specific') {
+    return { unrestricted: false, pairs: null as any, classIds: new Set<string>(permission.marksClassIds || []), subjectIds: null as any };
+  }
+
+  const pairs = await prisma.classSubjectTeacher.findMany({
+    where: { teacherId: teacher.id },
+    select: { classId: true, subjectId: true }
+  });
+  if (pairs.length > 0) {
+    return {
+      unrestricted: false,
+      pairs: pairs.map((p: any) => ({ classId: p.classId, subjectId: p.subjectId })),
+      classIds: null as any,
+      subjectIds: null as any
+    };
+  }
+
+  const classIds = new Set<string>((teacher.classes || []).map((c: any) => c.id));
+  const subjName = (teacher.subject || '').trim().toLowerCase();
+  const subjectIds = new Set<string>();
+  if (subjName) {
+    const subjects = await prisma.subject.findMany({ select: { id: true, name: true } });
+    subjects.forEach((s: any) => {
+      if ((s.name || '').trim().toLowerCase() === subjName) subjectIds.add(s.id);
+    });
+  }
+  return { unrestricted: false, pairs: null as any, classIds, subjectIds: subjectIds.size > 0 ? subjectIds : null as any };
+}
+
+async function teacherRelevantExams(teacher: any): Promise<Array<any>> {
+  const scope = await teacherExamScope(teacher);
+
+  let examIds: Set<string> | null = null;
+  if (!scope.unrestricted) {
+    const OR: any[] = [];
+    if (scope.pairs) {
+      for (const p of scope.pairs) OR.push({ classId: p.classId, subjectId: p.subjectId });
+    } else {
+      if (scope.classIds && scope.classIds.size > 0) OR.push({ classId: { in: Array.from(scope.classIds) } });
+      if (scope.subjectIds && scope.subjectIds.size > 0) OR.push({ subjectId: { in: Array.from(scope.subjectIds) } });
+    }
+    if (OR.length > 0) {
+      const schedules = await prisma.examSchedule.findMany({ where: { OR }, select: { examId: true } });
+      examIds = new Set(schedules.map((s: any) => s.examId));
+    } else {
+      examIds = new Set();
+    }
+  }
+
+  const exams = await prisma.exam.findMany({
+    where: examIds ? { id: { in: Array.from(examIds) } } : {},
+    include: { type: true, schedules: { include: { class: true } } },
+    orderBy: { startDate: 'asc' }
+  });
+
+  return exams.map((e: any) => {
+    const classMap = new Map<string, any>();
+    (e.schedules || []).forEach((s: any) => {
+      if (s.class) classMap.set(s.class.id, { id: s.class.id, name: s.class.name, section: s.class.section });
+    });
+    return {
+      id: e.id,
+      name: e.name,
+      type: e.type?.name || '',
+      date: toDateStr(e.startDate),
+      startDate: e.startDate,
+      endDate: e.endDate,
+      classes: Array.from(classMap.values())
+    };
+  });
+}
+
 app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -3896,7 +4093,24 @@ app.get('/teacher/classes', authMiddleware, checkRole(['Teacher']), async (req: 
     }
 
     const scope = req.query.scope === 'attendance' || req.query.scope === 'marks' ? String(req.query.scope) : 'all';
-    const classes = await teacherEffectiveClasses(teacher, scope);
+    let classes = await teacherEffectiveClasses(teacher, scope);
+
+    const examId = typeof req.query.examId === 'string' && req.query.examId ? String(req.query.examId) : '';
+    if (examId) {
+      const schedules = await prisma.examSchedule.findMany({
+        where: { examId },
+        select: { classId: true }
+      });
+      const scheduledClassIds = new Set<string>(
+        schedules.map((s: any) => s.classId).filter((id: any): id is string => !!id)
+      );
+      // Only restrict to classes that had the exam when schedules exist,
+      // so entry is not blocked if routines weren't created for this exam.
+      if (scheduledClassIds.size > 0) {
+        classes = classes.filter((cls: any) => scheduledClassIds.has(cls.id));
+      }
+    }
+
     res.json(classes);
   } catch (error) {
     console.error('Error fetching teacher classes:', error);
@@ -4121,19 +4335,17 @@ app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Re
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // Get real exams from the Exam table
-    const exams = await prisma.exam.findMany({
-      include: { type: true },
-      orderBy: { startDate: 'desc' }
-    });
+    // Exams relevant to this teacher (permission-aware: all / specific classes / own classes+subject pairs)
+    const exams = await teacherRelevantExams(teacher);
 
     res.json(exams.map((e: any) => ({
       id: e.id,
       name: e.name,
-      type: e.type?.name || '',
-      date: toDateStr(e.startDate),
+      type: e.type,
+      date: e.date,
       startDate: e.startDate,
-      endDate: e.endDate
+      endDate: e.endDate,
+      classes: e.classes
     })));
   } catch (error) {
     console.error('Error fetching teacher exams:', error);
