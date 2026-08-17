@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { addMonths } from 'date-fns';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import { authMiddleware } from './auth';
+import { checkRole } from './checkRole';
 
 
 const prisma = new PrismaClient();
@@ -164,13 +166,30 @@ app.get('/notifications', (_req: Request, res: Response) => {
 });
 
 // Dashboard Stats
-app.get('/dashboard/stats', async (_req: Request, res: Response) => {
+app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) => {
   try {
+  const user = (req as any).user;
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
   const todayEnd = new Date(todayStart);
   todayEnd.setDate(todayEnd.getDate() + 1);
+
+  // Scope student counts to the teacher's head-teacher classes so the
+  // dashboard matches what the teacher sees on the Students page.
+  let studentWhere: any = {};
+  if (user && user.role === 'Teacher') {
+    const teacher = await prisma.teacher.findUnique({ where: { id: user.id } });
+    if (teacher) {
+      const classes = await prisma.schoolClass.findMany({
+        where: { teacher: { id: teacher.id } },
+        select: { name: true, section: true }
+      });
+      studentWhere = classes.length > 0
+        ? { OR: classes.map((c) => ({ class: c.name, section: c.section })) }
+        : { id: '__none__' };
+    }
+  }
 
   const [
     totalStudents,
@@ -183,8 +202,8 @@ app.get('/dashboard/stats', async (_req: Request, res: Response) => {
     recentActivity,
     upcomingExams
   ] = await Promise.all([
-    prisma.student.count(),
-    prisma.student.count({ where: { status: 'Active' } }),
+    prisma.student.count({ where: studentWhere }),
+    prisma.student.count({ where: { ...studentWhere, status: 'Active' } }),
     prisma.teacher.count(),
     prisma.teacher.count({ where: { status: { not: 'Active' } } }),
     prisma.schoolClass.count(),
@@ -503,9 +522,6 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
   }
 });
 
-import { authMiddleware } from './auth';
-import { checkRole } from './checkRole';
-
 // Students
 app.get('/students', authMiddleware, async (req: Request, res: Response) => {
   const user = (req as any).user;
@@ -513,9 +529,17 @@ app.get('/students', authMiddleware, async (req: Request, res: Response) => {
   if (user.role === 'Teacher') {
     const teacher = await prisma.teacher.findUnique({ where: { id: user.id } });
     if (teacher) {
-      const classes = await prisma.schoolClass.findMany({ where: { teacher: { id: teacher.id } } });
-      const classNames = classes.map(c => c.name);
-      const students = await prisma.student.findMany({ where: { class: { in: classNames } }, orderBy: { createdAt: 'desc' } });
+      const classes = await prisma.schoolClass.findMany({
+        where: { teacher: { id: teacher.id } },
+        select: { name: true, section: true }
+      });
+      if (classes.length === 0) {
+        return res.json([]);
+      }
+      const students = await prisma.student.findMany({
+        where: { OR: classes.map((c) => ({ class: c.name, section: c.section })) },
+        orderBy: { createdAt: 'desc' }
+      });
       return res.json(students);
     }
   }
