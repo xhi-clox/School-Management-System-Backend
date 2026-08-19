@@ -333,6 +333,43 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     historyExpense.push({ date: histStart, amount: money(le._sum.amount).toNumber() });
   }
 
+  // Daily history for the current month (day 1 -> today)
+  const dailyIncome: Array<{ date: Date; amount: number }> = [];
+  const dailyExpense: Array<{ date: Date; amount: number }> = [];
+  const todayDay = new Date().getDate();
+  for (let d = 1; d <= todayDay; d++) {
+    const dStart = new Date(currentYear, currentMonth, d);
+    const dEnd = new Date(currentYear, currentMonth, d + 1);
+    const dli = await prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'income', createdAt: { gte: dStart, lt: dEnd } }
+    });
+    const dle = await prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'expense', createdAt: { gte: dStart, lt: dEnd } }
+    });
+    dailyIncome.push({ date: dStart, amount: money(dli._sum.amount).toNumber() });
+    dailyExpense.push({ date: dStart, amount: money(dle._sum.amount).toNumber() });
+  }
+
+  // Yearly history for the current year (Jan -> current month)
+  const yearlyIncome: Array<{ date: Date; amount: number }> = [];
+  const yearlyExpense: Array<{ date: Date; amount: number }> = [];
+  for (let m = 0; m <= currentMonth; m++) {
+    const mStart = new Date(currentYear, m, 1);
+    const mEnd = new Date(currentYear, m + 1, 1);
+    const mli = await prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'income', createdAt: { gte: mStart, lt: mEnd } }
+    });
+    const mle = await prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'expense', createdAt: { gte: mStart, lt: mEnd } }
+    });
+    yearlyIncome.push({ date: mStart, amount: money(mli._sum.amount).toNumber() });
+    yearlyExpense.push({ date: mStart, amount: money(mle._sum.amount).toNumber() });
+  }
+
   res.json({
     counts: {
       students: totalStudents,
@@ -354,7 +391,15 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       feesCollected,
       history: {
         income: historyIncome.map(h => ({ date: h.date, amount: h.amount })),
-        expense: historyExpense.map(h => ({ date: h.date, amount: h.amount }))
+        expense: historyExpense.map(h => ({ date: h.date, amount: h.amount })),
+        daily: {
+          income: dailyIncome.map(h => ({ date: h.date, amount: h.amount })),
+          expense: dailyExpense.map(h => ({ date: h.date, amount: h.amount }))
+        },
+        yearly: {
+          income: yearlyIncome.map(h => ({ date: h.date, amount: h.amount })),
+          expense: yearlyExpense.map(h => ({ date: h.date, amount: h.amount }))
+        }
       }
     },
     todayAttendance: {
@@ -546,6 +591,28 @@ app.get('/students', authMiddleware, async (req: Request, res: Response) => {
 
   const students = await prisma.student.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(students);
+});
+
+app.get('/students/rolls/used', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { class: cls, section } = req.query;
+    if (!cls) return res.status(400).json({ error: 'class is required' });
+    const students = await prisma.student.findMany({
+      where: {
+        class: String(cls),
+        ...(section ? { section: String(section) } : {}),
+        roll: { gt: 0 }
+      },
+      select: { roll: true }
+    });
+    const rolls = students
+      .map((s) => s.roll as number)
+      .sort((a, b) => a - b);
+    res.json({ rolls, nextRoll: rolls.length ? rolls[rolls.length - 1] + 1 : 1 });
+  } catch (error: any) {
+    console.error('Error fetching used rolls:', error);
+    res.status(500).json({ error: 'Failed to fetch used rolls' });
+  }
 });
 
 app.get('/students/:id', authMiddleware, async (req: Request, res: Response) => {
@@ -2886,6 +2953,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       additionalNote: z.string().optional(),
       birthCertNo: z.string().optional(),
       siblingsCount: z.coerce.number().int().optional(), // Change: added z.coerce.number()
+      admissionNo: z.union([z.literal(''), z.string().regex(/^\d{1,5}$/, 'Admission number must be 1-5 digits')]).optional(),
       classId: z.string(), // This is SchoolClass ID
       section: z.string().optional(),
       shift: z.string().optional(),
@@ -2933,6 +3001,44 @@ app.post('/students/admission', async (req: Request, res: Response) => {
     const result = await prisma.$transaction(async (tx) => {
       // 1. Create Student
       const className = pkg.class.name;
+      const resolvedSection = student.section || pkg.class.section;
+
+      // Resolve admission number: manual (max 5 digits) or auto-generated sequential (max 5 digits)
+      let admissionNo: string;
+      if (student.admissionNo && student.admissionNo.trim()) {
+        admissionNo = `ADM-${String(student.admissionNo.trim()).padStart(5, '0')}`;
+        const existing = await (tx as any).student.findUnique({ where: { admissionNo } });
+        if (existing) {
+          throw new Error(`Admission number ${admissionNo} already exists`);
+        }
+      } else {
+        const rows = await (tx as any).student.findMany({
+          where: { admissionNo: { not: null } },
+          select: { admissionNo: true }
+        });
+        let max = 0;
+        for (const r of rows) {
+          const m = r.admissionNo?.match(/(\d+)/);
+          if (m) max = Math.max(max, parseInt(m[1], 10));
+        }
+        const next = Math.min(max + 1, 99999);
+        admissionNo = `ADM-${String(next).padStart(5, '0')}`;
+      }
+
+      // Reject rolls already used in the same class + section
+      if (student.roll) {
+        const rollExists = await (tx as any).student.findFirst({
+          where: {
+            class: className,
+            section: resolvedSection,
+            roll: student.roll
+          },
+          select: { id: true }
+        });
+        if (rollExists) {
+          throw new Error(`Roll ${student.roll} already exists in this class/section`);
+        }
+      }
 
       const studentData: any = {
         name: student.name,
@@ -2950,7 +3056,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         birthCertNo: student.birthCertNo,
         siblingsCount: student.siblingsCount ?? 0,
         class: className,
-        section: student.section || pkg.class.section,
+        section: resolvedSection,
         shift: student.shift,
         roll: student.roll || 0,
         academicYear: student.academicYear || pkg.session,
@@ -2959,7 +3065,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         guardianPhone: guardian.guardianPhone,
         guardianEmail: guardian.guardianEmail,
         address: guardian.address || guardian.guardianAddress,
-        admissionNo: `ADM-${Date.now()}`,
+        admissionNo,
         status: 'pending_payment'
       };
 
