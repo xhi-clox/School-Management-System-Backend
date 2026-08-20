@@ -4484,6 +4484,23 @@ app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Re
 });
 
 // Class Routine Management
+const ROUTINE_COLORS = [
+  'bg-blue-100 border-blue-200 text-blue-800',
+  'bg-green-100 border-green-200 text-green-800',
+  'bg-pink-100 border-pink-200 text-pink-800',
+  'bg-orange-100 border-orange-200 text-orange-800',
+  'bg-purple-100 border-purple-200 text-purple-800',
+  'bg-yellow-100 border-yellow-200 text-yellow-800',
+  'bg-indigo-100 border-indigo-200 text-indigo-800',
+  'bg-red-100 border-red-200 text-red-800',
+];
+
+function routineColorFor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return ROUTINE_COLORS[hash % ROUTINE_COLORS.length];
+}
+
 app.get('/class-routine/classes', async (_req: Request, res: Response) => {
   try {
     const classes = await prisma.schoolClass.findMany({
@@ -4582,8 +4599,7 @@ app.get('/class-routine/rooms', async (_req: Request, res: Response) => {
 
 app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
   try {
-    // Return time slots data - in a real implementation, this would come from a TimeSlot table
-    const timeSlots = [
+    const defaultSlots = [
       { id: '1', period: 'Period 1', timeRange: '08:00 - 08:40', isBreak: false },
       { id: '2', period: 'Period 2', timeRange: '08:40 - 09:20', isBreak: false },
       { id: '3', period: 'Period 3', timeRange: '09:20 - 10:00', isBreak: false },
@@ -4594,10 +4610,93 @@ app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
       { id: '7', period: 'Period 7', timeRange: '12:20 - 01:00', isBreak: false },
     ];
 
-    res.json(timeSlots);
+    const persisted = await prisma.routinePeriod.findMany({
+      orderBy: { sortOrder: 'asc' }
+    });
+
+    if (persisted.length === 0) {
+      return res.json(defaultSlots);
+    }
+
+    res.json(persisted.map(p => ({
+      id: p.id,
+      period: p.period,
+      timeRange: p.timeRange,
+      isBreak: p.isBreak
+    })));
   } catch (error) {
     console.error('Error fetching time slots:', error);
     res.status(500).json({ error: 'Failed to fetch time slots' });
+  }
+});
+
+app.post('/class-routine/periods/save', async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      id: z.string().optional(),
+      period: z.string().min(1),
+      timeRange: z.string().min(1),
+      isBreak: z.boolean().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { id, period, timeRange, isBreak } = parsed.data;
+
+    if (id) {
+      await prisma.routinePeriod.update({
+        where: { id },
+        data: { period, timeRange, isBreak: isBreak ?? false }
+      });
+    } else {
+      const maxOrder = await prisma.routinePeriod.aggregate({ _max: { sortOrder: true } });
+      await prisma.routinePeriod.create({
+        data: { period, timeRange, isBreak: isBreak ?? false, sortOrder: (maxOrder._max.sortOrder ?? -1) + 1 }
+      });
+    }
+
+    const all = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+    res.json(all.map(p => ({ id: p.id, period: p.period, timeRange: p.timeRange, isBreak: p.isBreak })));
+  } catch (error) {
+    console.error('Error saving period:', error);
+    res.status(500).json({ error: 'Failed to save period' });
+  }
+});
+
+app.post('/class-routine/periods/reorder', async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({ ids: z.array(z.string()).min(1) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { ids } = parsed.data;
+    const tx = await prisma.$transaction(
+      ids.map((id, index) => prisma.routinePeriod.update({
+        where: { id },
+        data: { sortOrder: index }
+      }))
+    );
+
+    const all = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+    res.json(all.map(p => ({ id: p.id, period: p.period, timeRange: p.timeRange, isBreak: p.isBreak })));
+  } catch (error) {
+    console.error('Error reordering periods:', error);
+    res.status(500).json({ error: 'Failed to reorder periods' });
+  }
+});
+
+app.delete('/class-routine/periods/:id', async (req: Request, res: Response) => {
+  try {
+    await prisma.routinePeriod.delete({ where: { id: req.params.id } });
+    const all = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+    res.json(all.map(p => ({ id: p.id, period: p.period, timeRange: p.timeRange, isBreak: p.isBreak })));
+  } catch (error) {
+    console.error('Error deleting period:', error);
+    res.status(500).json({ error: 'Failed to delete period' });
   }
 });
 
@@ -4618,18 +4717,23 @@ app.get('/class-routine/timetable', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Class not found' });
     }
 
-    // For now, return empty timetable since we don't have a routine table in the database
-    // In a real implementation, you would have a RoutineEntry model and query like:
-    // const routines = await prisma.routineEntry.findMany({
-    //   where: { classId, section },
-    //   include: { subject: true, teacher: true, room: true }
-    // });
+    const entries = await prisma.routineEntry.findMany({
+      where: { classId: classId as string, section: section as string }
+    });
 
-    const emptyTimetable = {
-      [`${classId}-${section}`]: {}
-    };
+    const timetable: Record<string, any> = {};
+    for (const e of entries) {
+      const key = `${e.day}-${e.period}`;
+      timetable[key] = {
+        id: e.id,
+        name: e.subject,
+        teacher: e.teacher || '',
+        room: e.room || '',
+        color: routineColorFor(e.subject)
+      };
+    }
 
-    res.json(emptyTimetable);
+    res.json({ [`${classId}-${section}`]: timetable });
   } catch (error) {
     console.error('Error fetching timetable:', error);
     res.status(500).json({ error: 'Failed to fetch timetable' });
@@ -4638,17 +4742,14 @@ app.get('/class-routine/timetable', async (req: Request, res: Response) => {
 
 app.post('/class-routine/update-entry', async (req: Request, res: Response) => {
   try {
-    const { classId, section, day, period, subject, teacher, room } = req.body;
-
-    // Validation
     const schema = z.object({
       classId: z.string(),
       section: z.string(),
       day: z.enum(['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']),
       period: z.string(),
       subject: z.string(),
-      teacher: z.string(),
-      room: z.string()
+      teacher: z.string().optional(),
+      room: z.string().optional()
     });
 
     const parsed = schema.safeParse(req.body);
@@ -4656,8 +4757,24 @@ app.post('/class-routine/update-entry', async (req: Request, res: Response) => {
       return res.status(400).json({ error: parsed.error.flatten() });
     }
 
-    // For now, just return success since we don't have a routine table
-    // In a real implementation, you would update the RoutineEntry table
+    const { classId, section, day, period, subject, teacher, room } = parsed.data;
+
+    // Empty subject clears the cell
+    if (!subject || !subject.trim()) {
+      await prisma.routineEntry.deleteMany({
+        where: { classId, section, day, period }
+      });
+      return res.json({ success: true, message: 'Entry removed' });
+    }
+
+    await prisma.routineEntry.upsert({
+      where: {
+        classId_section_day_period: { classId, section, day, period }
+      },
+      update: { subject, teacher: teacher || null, room: room || null },
+      create: { classId, section, day, period, subject, teacher: teacher || null, room: room || null }
+    });
+
     res.json({ success: true, message: 'Entry updated successfully' });
   } catch (error) {
     console.error('Error updating routine entry:', error);

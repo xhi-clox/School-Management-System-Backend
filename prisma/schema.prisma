@@ -595,3 +595,29 @@ model StudentAcademicRecord {
   @@index([studentId])
   @@index([academicYear])
 }
+
+model RoutineEntry {
+  id        String   @id @default(cuid())
+  classId   String
+  section   String
+  day       String   // Saturday ... Thursday
+  period    String   // time slot id
+  subject   String
+  teacher   String?
+  room      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([classId, section])
+  @@unique([classId, section, day, period])
+}
+
+model RoutinePeriod {
+  id        String   @id @default(cuid())
+  period    String
+  timeRange String
+  isBreak   Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
