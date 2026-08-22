@@ -175,6 +175,12 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const todayEnd = new Date(todayStart);
   todayEnd.setDate(todayEnd.getDate() + 1);
 
+  // Attendance.date is stored at UTC midnight of the local day, so use UTC
+  // boundaries for the attendance query (ledger queries below keep local time).
+  const attStart = utcMidnight(localDayKey(now));
+  const attEnd = new Date(attStart);
+  attEnd.setUTCDate(attEnd.getUTCDate() + 1);
+
   // Scope student counts to the teacher's head-teacher classes so the
   // dashboard matches what the teacher sees on the Students page.
   let studentWhere: any = {};
@@ -209,7 +215,7 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     prisma.schoolClass.count(),
     prisma.staff.count(),
     prisma.attendance.findMany({
-      where: { date: { gte: todayStart, lt: todayEnd } },
+      where: { date: { gte: attStart, lt: attEnd } },
       select: {
         studentId: true,
         status: true,
@@ -473,8 +479,6 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
 
   const start = new Date(String(startDate));
   const end = new Date(String(endDate));
-  start.setHours(0, 0, 0, 0);
-  end.setHours(23, 59, 59, 999);
 
   try {
     const records = await prisma.attendance.findMany({
@@ -484,7 +488,7 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
 
     const dayMap = new Map<string, { present: number; absent: number; late: number }>();
     for (const r of records) {
-      const key = `${r.date.getFullYear()}-${String(r.date.getMonth() + 1).padStart(2, '0')}-${String(r.date.getDate()).padStart(2, '0')}`;
+      const key = utcDayKeyOf(r.date);
       const entry = dayMap.get(key) || { present: 0, absent: 0, late: 0 };
       if (r.status === 'Present') entry.present++;
       else if (r.status === 'Absent') entry.absent++;
@@ -493,8 +497,8 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
     }
 
     const result: Array<{ date: string; present: number; absent: number; late: number }> = [];
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+      const key = utcDayKeyOf(d);
       result.push({ date: key, ...(dayMap.get(key) || { present: 0, absent: 0, late: 0 }) });
     }
 
@@ -2488,9 +2492,9 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
     select: { id: true, name: true, roll: true }
   });
 
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-  const daysInMonth = new Date(year, month, 0).getDate();
+  const start = new Date(Date.UTC(year, month - 1, 1));
+  const end = new Date(Date.UTC(year, month, 1));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const days = Array.from({ length: daysInMonth }, (_, i) => String(i + 1).padStart(2, '0'));
 
   const records = await prisma.attendance.findMany({
@@ -2513,7 +2517,7 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
 
   const matrix = new Map<string, Record<string, string>>();
   for (const r of records) {
-    const day = String(new Date(r.date).getDate()).padStart(2, '0');
+    const day = String(new Date(r.date).getUTCDate()).padStart(2, '0');
     const m = matrix.get(r.studentId) ?? {};
     m[day] = toLetter(r.status);
     matrix.set(r.studentId, m);
@@ -4891,6 +4895,23 @@ function toDateStr(d: Date | string | number | null | undefined): string {
   if (!d) return '';
   const date = new Date(d);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+// Attendance.date is stored as UTC midnight of the day key (`new Date('YYYY-MM-DD')`).
+// Date-range queries and day-key extraction against attendance.date must therefore use
+// UTC boundaries/parts, otherwise servers west of UTC shift records out of range.
+function utcMidnight(dayKey: string): Date {
+  return new Date(`${dayKey}T00:00:00.000Z`);
+}
+
+// Calendar day key in the server's LOCAL timezone, e.g. "2026-08-21".
+function localDayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Day key from a stored attendance date (UTC), e.g. "2026-08-21".
+function utcDayKeyOf(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 // Find a student by the email / id / admissionNo provided by the frontend.
