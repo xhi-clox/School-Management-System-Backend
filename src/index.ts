@@ -158,11 +158,133 @@ app.get('/test-db', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/notifications', (_req: Request, res: Response) => {
-  res.json([
-    { id: '1', message: 'Welcome to the School Management System!', createdAt: new Date() },
-    { id: '2', message: 'New academic year setup is available.', createdAt: new Date() }
-  ]);
+// Admin / personal profile
+app.get('/profile', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const auth = (req as any).user as { id: string; role: string };
+    let profile: any = null;
+
+    if (auth.role === 'Admin') {
+      const user = await prisma.user.findUnique({
+        where: { id: auth.id },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          name: true,
+          phone: true,
+          address: true,
+          department: true,
+          designation: true,
+          avatar: true,
+          createdAt: true,
+        },
+      });
+      profile = user;
+    } else if (auth.role === 'Teacher') {
+      const teacher = await prisma.teacher.findUnique({
+        where: { id: auth.id },
+        select: { id: true, name: true, email: true, phone: true, avatar: true, subject: true, designation: true },
+      });
+      profile = teacher ? { ...teacher, role: 'Teacher', department: 'Teaching Staff' } : null;
+    } else if (auth.role === 'Student') {
+      const student = await prisma.student.findUnique({
+        where: { id: auth.id },
+        select: { id: true, name: true, email: true, phone: true, avatar: true, class: true, section: true, roll: true, admissionNo: true, gender: true },
+      });
+      profile = student ? { ...student, role: 'Student' } : null;
+    }
+
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    res.json(profile);
+  } catch (error: any) {
+    console.error('Error fetching profile:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+app.put('/profile', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const auth = (req as any).user as { id: string; role: string };
+    const { name, phone, address, department, designation, avatar } = req.body;
+
+    if (auth.role !== 'Admin') {
+      return res.status(403).json({ error: 'Only admin accounts can update this profile' });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: auth.id },
+      data: {
+        name: name ?? null,
+        phone: phone ?? null,
+        address: address ?? null,
+        department: department ?? null,
+        designation: designation ?? null,
+        avatar: avatar ?? null,
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        name: true,
+        phone: true,
+        address: true,
+        department: true,
+        designation: true,
+        avatar: true,
+      },
+    });
+    res.json(updated);
+  } catch (error: any) {
+    console.error('Error updating profile:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Notifications
+app.get('/notifications', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const auth = (req as any).user as { id: string; role: string };
+    const notifications = await prisma.notification.findMany({
+      where: { userId: auth.id },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    res.json(notifications);
+  } catch (error: any) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+app.post('/notifications/:id/read', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const auth = (req as any).user as { id: string; role: string };
+    const updated = await prisma.notification.updateMany({
+      where: { id: req.params.id, userId: auth.id },
+      data: { read: true },
+    });
+    res.json({ success: true, updated: updated.count });
+  } catch (error: any) {
+    console.error('Error marking notification read:', error);
+    res.status(500).json({ error: 'Failed to update notification' });
+  }
+});
+
+app.post('/notifications/read-all', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const auth = (req as any).user as { id: string; role: string };
+    const updated = await prisma.notification.updateMany({
+      where: { userId: auth.id, read: false },
+      data: { read: true },
+    });
+    res.json({ success: true, updated: updated.count });
+  } catch (error: any) {
+    console.error('Error marking all notifications read:', error);
+    res.status(500).json({ error: 'Failed to update notifications' });
+  }
 });
 
 // Dashboard Stats
