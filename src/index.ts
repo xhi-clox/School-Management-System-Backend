@@ -1405,6 +1405,21 @@ app.post('/exams', async (req: Request, res: Response) => {
   res.status(201).json(exam);
 });
 
+// Admin-configurable exam weight (used in Weighted Academic Score ranking).
+app.post('/exams/:id/weight', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    let { weight } = req.body || {};
+    weight = Number(weight);
+    if (isNaN(weight) || weight < 0) return res.status(400).json({ error: 'Invalid weight. Must be a number >= 0' });
+    const updated = await prisma.exam.update({ where: { id }, data: { weight }, select: { id: true, name: true, weight: true } });
+    res.json(updated);
+  } catch (error: any) {
+    console.error('Error updating exam weight:', error);
+    res.status(500).json({ error: 'Failed to update exam weight', details: error.message });
+  }
+});
+
 // Results
 app.get('/results', async (req: Request, res: Response) => {
   const { examId, subjectId, studentIds } = req.query as any;
@@ -1804,6 +1819,658 @@ app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Re
   } catch (error: any) {
     console.error('Error building student results:', error);
     res.status(500).json({ error: 'Failed to build student results', details: error.message });
+  }
+});
+
+// ============================================================================
+// RESULT LIFECYCLE, PUBLISHING, VALIDATION, RANKING, PERFORMANCE & REPORT CARD
+// (Phase 1: Result & Academic Performance module)
+// ============================================================================
+
+const RESULT_STATUSES = ['Draft', 'Verification', 'Finalized', 'Published'] as const;
+const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
+  Draft: ['Verification', 'Published'],
+  Verification: ['Finalized', 'Draft'],
+  Finalized: ['Verification', 'Draft', 'Published'],
+  Published: ['Finalized'],
+};
+const RANK_MODES = ['TotalMarks', 'Percentage', 'GPA', 'WeightedAcademicScore'] as const;
+
+function resultStatusAdvance(from: string, to: string): boolean {
+  const allowed = ALLOWED_STATUS_TRANSITIONS[from];
+  return Array.isArray(allowed) && allowed.includes(to);
+}
+
+// Weighted Academic Score: for every exam in the academic year that has a
+// configured weight (>0), weight that exam's student percentage by its weight,
+// then average across those exams. Used for the 'WeightedAcademicScore' rank mode.
+async function weightedAcademicScoreMap(academicYear: string): Promise<Map<string, number>> {
+  const exams = await prisma.exam.findMany({
+    where: { academicYear, weight: { gt: 0 } },
+    orderBy: { startDate: 'asc' }
+  });
+  const acc = new Map<string, { sum: number; totalW: number }>();
+  for (const exam of exams) {
+    let students: any[] = [];
+    try {
+      students = (await buildExamReport(exam.id)).students;
+    } catch (e) {
+      continue;
+    }
+    for (const s of students) {
+      const cur = acc.get(s.studentId) || { sum: 0, totalW: 0 };
+      cur.sum += (s.percentage || 0) * exam.weight;
+      cur.totalW += exam.weight;
+      acc.set(s.studentId, cur);
+    }
+  }
+  const result = new Map<string, number>();
+  for (const [id, v] of acc) result.set(id, v.totalW ? round2(v.sum / v.totalW) : 0);
+  return result;
+}
+
+// Re-rank a list of student summaries by a given mode. Each entry must have
+// totalMarks, percentage, gpa and (optionally) weightedScore.
+function rankStudentsBy(list: any[], mode: string, weighted = new Map<string, number>()): any[] {
+  const scoreOf = (s: any): number => {
+    switch (mode) {
+      case 'TotalMarks': return s.totalMarks || 0;
+      case 'Percentage': return s.percentage || 0;
+      case 'WeightedAcademicScore': return weighted.get(s.studentId) ?? 0;
+      case 'GPA':
+      default: return s.gpa || 0;
+    }
+  };
+  return [...list]
+    .sort((a, b) => {
+      const d = scoreOf(b) - scoreOf(a);
+      if (d !== 0) return d;
+      return (b.percentage || 0) - (a.percentage || 0) || a.name.localeCompare(b.name);
+    })
+    .map((s, i) => ({ rank: i + 1, ...s, rankScore: scoreOf(s) }));
+}
+
+// ---- Status transition ----
+app.post('/results/:examId/status', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const { status } = req.body || {};
+    if (!status || !RESULT_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Allowed: ${RESULT_STATUSES.join(', ')}` });
+    }
+    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (!resultStatusAdvance(exam.status, status)) {
+      return res.status(409).json({ error: `Cannot transition from '${exam.status}' to '${status}'` });
+    }
+    const updated = await prisma.exam.update({
+      where: { id: examId },
+      data: {
+        status,
+        updatedAt: new Date(),
+        ...(status === 'Published' ? { publishedAt: new Date(), publishedBy: (req as any).user?.email } : {}),
+      }
+    });
+    res.json({ id: updated.id, status: updated.status, publishedAt: updated.publishedAt, publishedBy: updated.publishedBy });
+  } catch (error: any) {
+    console.error('Error transitioning result status:', error);
+    res.status(500).json({ error: 'Failed to update result status', details: error.message });
+  }
+});
+
+// ---- Publish ----
+app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (exam.status !== 'Finalized' && exam.status !== 'Draft' && exam.status !== 'Verification') {
+      return res.status(409).json({ error: 'Exam must be Finalized before publishing' });
+    }
+
+    const report = await buildExamReport(examId);
+    const rankBy = (req.body?.rankBy || 'GPA') as string;
+    if (!RANK_MODES.includes(rankBy as any)) {
+      return res.status(400).json({ error: `Invalid rankBy. Allowed: ${RANK_MODES.join(', ')}` });
+    }
+
+    let weighted = new Map<string, number>();
+    if (rankBy === 'WeightedAcademicScore') weighted = await weightedAcademicScoreMap(exam.academicYear);
+
+    // Freeze ranking snapshot (within same class+section).
+    const ranked = rankStudentsBy(report.students, rankBy, weighted);
+    const byClass = new Map<string, any[]>();
+    for (const s of ranked) {
+      const key = `${s.class || 'N/A'}|${s.section || ''}`;
+      if (!byClass.has(key)) byClass.set(key, []);
+      byClass.get(key)!.push(s);
+    }
+    const ranking = Array.from(byClass.entries()).map(([key, arr]) => {
+      const [cls, section] = key.split('|');
+      return {
+        class: cls,
+        section,
+        entries: arr.map((s) => ({
+          studentId: s.studentId,
+          name: s.name,
+          admissionNo: s.admissionNo,
+          avatar: s.avatar,
+          roll: s.roll,
+          gpa: s.gpa,
+          percentage: s.percentage,
+          grade: s.grade,
+          totalMarks: s.totalMarks,
+          rank: s.rank,
+          rankScore: s.rankScore
+        }))
+      };
+    });
+
+    const adminUser = (req as any).user?.email || null;
+
+    const publish = await prisma.resultPublish.upsert({
+      where: { examId },
+      update: {
+        rankBy,
+        publishedBy: adminUser,
+        publishedAt: new Date(),
+        rankSnapshot: ranking as any
+      },
+      create: {
+        examId,
+        rankBy,
+        publishedBy: adminUser,
+        publishedAt: new Date(),
+        rankSnapshot: ranking as any
+      }
+    });
+
+    await prisma.exam.update({
+      where: { id: examId },
+      data: { status: 'Published', publishedAt: new Date(), publishedBy: adminUser, updatedAt: new Date() }
+    });
+
+    res.json({ examId, status: 'Published', rankBy, publishId: publish.id, ranking });
+  } catch (error: any) {
+    console.error('Error publishing results:', error);
+    res.status(500).json({ error: 'Failed to publish results', details: error.message });
+  }
+});
+
+// ---- Unpublish ----
+app.post('/results/:examId/unpublish', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (exam.status !== 'Published') {
+      return res.status(409).json({ error: 'Only a published exam can be unpublished' });
+    }
+    await prisma.exam.update({
+      where: { id: examId },
+      data: { status: 'Finalized', publishedAt: null, publishedBy: null, updatedAt: new Date() }
+    });
+    res.json({ examId, status: 'Finalized' });
+  } catch (error: any) {
+    console.error('Error unpublishing results:', error);
+    res.status(500).json({ error: 'Failed to unpublish results', details: error.message });
+  }
+});
+
+// ---- Validation / result readiness ----
+app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+    const [schedules, results, students] = await Promise.all([
+      prisma.examSchedule.findMany({ where: { examId }, include: { subject: true, class: true } }),
+      prisma.result.findMany({ where: { examId }, include: { student: true } }),
+      prisma.student.findMany({ select: { id: true, name: true, class: true, section: true } })
+    ]);
+
+    const issues: any[] = [];
+    // Subject list that should have marks.
+    const subjectIds = [...new Set(schedules.map((s) => s.subjectId))];
+    const enrolled = students; // all students; schedules may vary per class
+
+    // Missing marks: students without a result for a scheduled subject applicable to their class.
+    const resultKey = new Set(results.map((r) => `${r.studentId}|${r.subjectId}`));
+    let missingMarks = 0;
+    for (const st of enrolled) {
+      for (const sch of schedules) {
+        if (sch.class && sch.class.name !== st.class) continue;
+        const key = `${st.id}|${sch.subjectId}`;
+        if (!resultKey.has(key)) {
+          missingMarks++;
+          if (issues.length < 20) issues.push({ type: 'missing_marks', message: `${st.name} missing ${sch.subject?.name || sch.subjectId} marks`, studentId: st.id, subjectId: sch.subjectId });
+        }
+      }
+    }
+
+    // Missing practical marks.
+    let missingPractical = 0;
+    for (const r of results) {
+      if ((r.practical == null || r.practical === 0) && r.written > 0) {
+        missingPractical++;
+        if (issues.length < 30) issues.push({ type: 'missing_practical', message: `${r.student?.name || r.studentId} missing practical marks`, studentId: r.studentId, subjectId: r.subjectId });
+      }
+    }
+
+    // Marks exceeding maximum (per-class full marks from schedule).
+    let overMax = 0;
+    const subjectFull = new Map<string, Map<string, number>>();
+    for (const sch of schedules) {
+      if (sch.class?.name) {
+        if (!subjectFull.has(sch.subjectId)) subjectFull.set(sch.subjectId, new Map());
+        subjectFull.get(sch.subjectId)!.set(sch.class.name, Number(sch.fullMarks ?? 100));
+      }
+    }
+    const studentClassMap = new Map(students.map((s) => [s.id, s.class]));
+    for (const r of results) {
+      const cl = studentClassMap.get(r.studentId);
+      const fm = cl && subjectFull.get(r.subjectId)?.get(cl);
+      if (fm != null && r.totalMarks > Number(fm)) {
+        overMax++;
+        if (issues.length < 40) issues.push({ type: 'over_max', message: `${r.subjectId} for ${r.student?.name || r.studentId} exceeds max (${r.totalMarks}/${fm})`, studentId: r.studentId, subjectId: r.subjectId });
+      }
+    }
+
+    // Attendance availability: does at least one attended student have any attendance?
+    const attCount = await prisma.attendance.count({
+      where: { studentId: { in: enrolled.map((s) => s.id) } }
+    });
+    if (attCount === 0 && issues.length < 60) {
+      issues.push({ type: 'attendance', message: 'No attendance records found for enrolled students' });
+    }
+
+    const totalChecks = (subjectIds.length > 0 ? Math.max(1, subjectIds.length * enrolled.length) : 1) || 1;
+    const penaltyScore = missingMarks * 2 + missingPractical + overMax;
+    const health = Math.max(0, Math.min(100, Math.round(100 - (penaltyScore / totalChecks) * 100)));
+
+    // --- Class-wise breakdown: how many marks yet to enter, per class ---
+    const classSet = new Set(students.map((s) => s.class).filter(Boolean));
+    // also include classes that appear only in schedules
+    for (const sch of schedules) if (sch.class?.name) classSet.add(sch.class.name);
+    const classBreakdown = Array.from(classSet).sort().map((clsName) => {
+      const enrolledInClass = students.filter((s) => s.class === clsName);
+      const applicableSchedules = schedules.filter((sch) => !sch.class || sch.class.name === clsName);
+      const applicableSubjectIds = [...new Set(applicableSchedules.map((s) => s.subjectId))];
+      const expected = enrolledInClass.length * applicableSubjectIds.length;
+      const entered = results.filter((r) => {
+        const cl = studentClassMap.get(r.studentId);
+        return cl === clsName && applicableSubjectIds.includes(r.subjectId);
+      }).length;
+      const classMissing = Math.max(0, expected - entered);
+      const classOverMax = results.filter((r) => {
+        const cl = studentClassMap.get(r.studentId);
+        if (cl !== clsName) return false;
+        const fm = subjectFull.get(r.subjectId)?.get(clsName);
+        return fm != null && r.totalMarks > Number(fm);
+      }).length;
+      // missing per subject for tooltip
+      const missingBySubject = applicableSubjectIds.map((sid) => {
+        const subjName = schedules.find((s) => s.subjectId === sid)?.subject?.name || sid;
+        const miss = enrolledInClass.filter((st) => !resultKey.has(`${st.id}|${sid}`)).length;
+        return { subjectId: sid, subject: subjName, missing: miss };
+      }).filter((x) => x.missing > 0);
+      return {
+        class: clsName,
+        enrolled: enrolledInClass.length,
+        subjects: applicableSubjectIds.length,
+        expected,
+        entered,
+        missing: classMissing,
+        overMax: classOverMax,
+        missingBySubject,
+      };
+    });
+
+    const remainingMarks = missingMarks;
+    // Inconsistencies: written+mcq+practical vs fullMarks (already overMax) plus component-level sanity
+    const inconsistencies = issues
+      .filter((iss) => iss.type === 'over_max' || iss.type === 'missing_marks')
+      .slice(0, 20);
+
+    const run = await prisma.resultValidationRun.create({
+      data: {
+        examId,
+        health,
+        issues: issues.slice(0, 100) as any
+      }
+    });
+
+    res.json({
+      exam: { id: exam.id, name: exam.name, status: exam.status },
+      health,
+      checks: {
+        allStudentsHaveMarks: missingMarks === 0,
+        allSubjectsHaveMarks: subjectIds.length > 0 && missingMarks === 0,
+        noMarksExceedMax: overMax === 0,
+        noDuplicateResults: true,
+        practicalMarksEntered: missingPractical === 0,
+        attendanceAvailable: attCount > 0
+      },
+      counts: { missingMarks, missingPractical, overMax },
+      // extended for inline verification panel
+      remainingMarks,
+      classBreakdown,
+      inconsistencies,
+      issues: issues.slice(0, 100),
+      runId: run.id
+    });
+  } catch (error: any) {
+    console.error('Error validating results:', error);
+    res.status(500).json({ error: 'Failed to validate results', details: error.message });
+  }
+});
+
+// ---- Rank config + frozen rank ----
+app.post('/results/:examId/rank-config', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const { rankBy } = req.body || {};
+    if (!RANK_MODES.includes(rankBy as any)) {
+      return res.status(400).json({ error: `Invalid rankBy. Allowed: ${RANK_MODES.join(', ')}` });
+    }
+    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    const publish = await prisma.resultPublish.upsert({
+      where: { examId },
+      update: { rankBy },
+      create: { examId, rankBy, publishedBy: (req as any).user?.email || null }
+    });
+    res.json({ examId, rankBy, publishId: publish.id });
+  } catch (error: any) {
+    console.error('Error saving rank config:', error);
+    res.status(500).json({ error: 'Failed to save rank config', details: error.message });
+  }
+});
+
+app.get('/results/:examId/rank', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const publish = await prisma.resultPublish.findUnique({ where: { examId } });
+    if (!publish) {
+      return res.status(404).json({ error: 'No published ranking snapshot yet. Publish results first.' });
+    }
+    res.json({ examId, rankBy: publish.rankBy, rankSnapshot: publish.rankSnapshot, publishedAt: publish.publishedAt });
+  } catch (error: any) {
+    console.error('Error fetching ranking:', error);
+    res.status(500).json({ error: 'Failed to fetch ranking', details: error.message });
+  }
+});
+
+app.get('/results/:examId/rank-config', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const publish = await prisma.resultPublish.findUnique({ where: { examId } });
+    res.json({ examId, rankBy: publish?.rankBy || 'GPA', published: !!publish });
+  } catch (error: any) {
+    console.error('Error fetching rank config:', error);
+    res.status(500).json({ error: 'Failed to fetch rank config', details: error.message });
+  }
+});
+
+// ---- Student performance aggregation (multi-term progression) ----
+app.get('/student/:id/performance', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+
+    const [results, subjects, exams] = await Promise.all([
+      prisma.result.findMany({ where: { studentId: student.id }, include: { exam: { include: { type: true } } }, orderBy: { createdAt: 'asc' } }),
+      prisma.subject.findMany({ select: { id: true, name: true } }),
+      prisma.exam.findMany({ orderBy: { startDate: 'asc' }, select: { id: true, name: true, academicYear: true, status: true, type: { select: { name: true } } } })
+    ]);
+    const subjectName = new Map(subjects.map((s) => [s.id, s.name]));
+
+    // Per subject: ordered list of (exam, percent).
+    const subjectTrend = new Map<string, { subjectId: string; subject: string; points: any[] }>();
+    const orderByDate = new Map<string, number>();
+    exams.forEach((e, i) => orderByDate.set(e.id, i));
+
+    for (const r of results) {
+      if (!subjectTrend.has(r.subjectId)) {
+        subjectTrend.set(r.subjectId, { subjectId: r.subjectId, subject: subjectName.get(r.subjectId) || r.subjectId, points: [] });
+      }
+      subjectTrend.get(r.subjectId)!.points.push({
+        examId: r.examId,
+        examName: r.exam.name,
+        examType: r.exam.type?.name || '',
+        academicYear: r.exam.academicYear,
+        written: r.written,
+        mcq: r.mcq,
+        practical: r.practical,
+        ct: r.ct,
+        cwhw: r.cwhw,
+        dgc: r.dgc,
+        total: r.totalMarks,
+        grade: r.grade,
+        gpa: r.gp,
+        seq: orderByDate.get(r.examId) ?? 0
+      });
+    }
+    for (const [k, v] of subjectTrend) v.points.sort((a, b) => a.seq - b.seq);
+
+    // Overall per exam.
+    const examSummaries = new Map<string, { totalMarks: number; fullMarks: number; percentage: number }>();
+    for (const r of results) {
+      const cur = examSummaries.get(r.examId) || { totalMarks: 0, fullMarks: 0, percentage: 0 };
+      cur.totalMarks += r.totalMarks || 0;
+      cur.fullMarks += 100; // default; refined by report below when available
+      examSummaries.set(r.examId, cur);
+    }
+
+    // Build precise exam aggregate via buildExamReport for each exam with results.
+    const reportAgg = new Map<string, any>();
+    for (const examId of examSummaries.keys()) {
+      try {
+        const report = await buildExamReport(examId);
+        const agg = report.students.find((s) => s.studentId === student.id);
+        if (agg) reportAgg.set(examId, agg);
+      } catch (e) { /* ignore */ }
+    }
+
+    const overall: any[] = [];
+    for (const exam of exams) {
+      const agg = reportAgg.get(exam.id);
+      if (!agg) continue;
+      overall.push({
+        examId: exam.id,
+        examName: exam.name,
+        examType: exam.type?.name || '',
+        academicYear: exam.academicYear,
+        status: exam.status,
+        totalMarks: agg.totalMarks,
+        fullMarks: agg.fullMarks,
+        percentage: agg.percentage,
+        gpa: agg.gpa,
+        grade: agg.grade,
+        passed: agg.passed
+      });
+    }
+
+    res.json({
+      student: { id: student.id, name: student.name, class: student.class, section: student.section, roll: student.roll },
+      subjectTrend: Array.from(subjectTrend.values()),
+      overall
+    });
+  } catch (error: any) {
+    console.error('Error building student performance:', error);
+    res.status(500).json({ error: 'Failed to build student performance', details: error.message });
+  }
+});
+
+// ---- Report card data ----
+app.get('/results/:examId/report-card', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const { studentId } = req.query as any;
+    if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+
+    const report = await buildExamReport(examId);
+    const agg = report.students.find((s) => s.studentId === studentId);
+    if (!agg) return res.status(404).json({ error: 'No results for this student in this exam' });
+
+    const student = await prisma.student.findUnique({ where: { id: studentId } });
+    const institute = await prisma.institute.findFirst();
+
+    const rows = report.results
+      .filter((r: any) => r.studentId === studentId)
+      .map((r: any) => ({
+        subject: report.subjectName.get(r.subjectId) || r.subjectId,
+        written: r.written,
+        mcq: r.mcq,
+        practical: r.practical,
+        ct: r.ct,
+        cwhw: r.cwhw,
+        dgc: r.dgc,
+        total: r.totalMarks,
+        fullMarks: report.subjectDefaultFullMarks.get(r.subjectId) ?? 100,
+        grade: r.grade || '',
+        gp: r.gp ?? 0,
+        highestMarks: r.highestMarks
+      }))
+      .sort((a: any, b: any) => a.subject.localeCompare(b.subject));
+
+    // Rank within class.
+    const clsRanked = report.students
+      .filter((s: any) => s.class === agg.class)
+      .sort((a: any, b: any) => b.gpa - a.gpa || b.percentage - a.percentage);
+    const position = clsRanked.findIndex((s: any) => s.studentId === studentId) + 1;
+
+    // Attendance percentage.
+    const attendance = await prisma.attendance.findMany({ where: { studentId } });
+    const present = attendance.filter((a) => a.status === 'Present').length;
+    const attendancePct = attendance.length ? Math.round((present / attendance.length) * 100) : 0;
+
+    res.json({
+      institute: { name: institute?.name, logo: institute?.logo, address: institute?.address, phone: institute?.phone, email: institute?.email, targetLine: institute?.targetLine },
+      student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, roll: student?.roll, class: student?.class, section: student?.section },
+      exam: { id: report.exam.id, name: report.exam.name, academicYear: report.exam.academicYear, type: report.exam.type?.name || '' },
+      rows,
+      totals: {
+        totalMarks: agg.totalMarks,
+        fullMarks: agg.fullMarks,
+        percentage: agg.percentage,
+        gpa: agg.gpa,
+        grade: agg.grade,
+        passed: agg.passed
+      },
+      position,
+      attendance: { present, total: attendance.length, percentage: attendancePct }
+    });
+  } catch (error: any) {
+    console.error('Error building report card:', error);
+    res.status(500).json({ error: 'Failed to build report card', details: error.message });
+  }
+});
+
+// ---- Teacher results view ----
+app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const teacher = await prisma.teacher.findFirst({
+      where: { email: user.email },
+      include: { classes: true, permission: true }
+    });
+    if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
+
+    const examId = typeof req.query.examId === 'string' ? req.query.examId : '';
+
+    // Resolve assigned (class, subject) pairs.
+    const pairs = await prisma.classSubjectTeacher.findMany({
+      where: { teacherId: teacher.id },
+      include: { class: true, subject: true }
+    });
+
+    // If no explicit pairs, fall back to permission/resolved subject approach.
+    let assignedPairs = pairs.map((p: any) => ({ classId: p.classId, subjectId: p.subjectId, className: p.class.name, section: p.class.section, subjectName: p.subject.name }));
+    if (assignedPairs.length === 0) {
+      const subject = await prisma.subject.findFirst({ where: { name: String((teacher as any).subject || '') } });
+      const classes = await teacherScopeClasses(teacher, 'marks');
+      assignedPairs = classes.map((c: any) => ({
+        classId: c.id,
+        subjectId: subject?.id || '',
+        className: c.name,
+        section: c.section,
+        subjectName: (teacher as any).subject || ''
+      }));
+    }
+
+    if (!examId) {
+      // List subjects with aggregate stats.
+      const out = [];
+      for (const p of assignedPairs) {
+        const students = await prisma.student.findMany({
+          where: { class: p.className, section: p.section },
+          select: { id: true }
+        });
+        const results = await prisma.result.findMany({
+          where: { studentId: { in: students.map((s) => s.id) }, subjectId: p.subjectId },
+          select: { totalMarks: true }
+        });
+        const totals = results.map((r) => r.totalMarks);
+        out.push({
+          classId: p.classId,
+          className: p.className,
+          section: p.section,
+          subjectId: p.subjectId,
+          subject: p.subjectName,
+          studentCount: students.length,
+          average: totals.length ? round2(totals.reduce((a, b) => a + b, 0) / totals.length) : 0,
+          highest: totals.length ? Math.max(...totals) : 0,
+          lowest: totals.length ? Math.min(...totals) : 0,
+          marksEntered: totals.length
+        });
+      }
+      return res.json({ subjectGroups: out });
+    }
+
+    // Per-student marks for a requested (exam, subject) pair.
+    const subjects = await prisma.subject.findMany({ select: { id: true, name: true } });
+    const subjectName = new Map(subjects.map((s) => [s.id, s.name]));
+    const out = [];
+    for (const p of assignedPairs) {
+      const students = await prisma.student.findMany({
+        where: { class: p.className, section: p.section },
+        orderBy: { roll: 'asc' },
+        select: { id: true, name: true, roll: true, avatar: true, admissionNo: true }
+      });
+      const results = await prisma.result.findMany({
+        where: { examId, subjectId: p.subjectId, studentId: { in: students.map((s) => s.id) } }
+      });
+      const resultMap = new Map(results.map((r) => [r.studentId, r]));
+      out.push({
+        classId: p.classId,
+        className: p.className,
+        section: p.section,
+        subjectId: p.subjectId,
+        subject: subjectName.get(p.subjectId) || p.subjectName,
+        students: students.map((s) => {
+          const r = resultMap.get(s.id);
+          return {
+            studentId: s.id,
+            name: s.name,
+            roll: s.roll,
+            avatar: s.avatar,
+            admissionNo: s.admissionNo,
+            written: r?.written ?? null,
+            mcq: r?.mcq ?? null,
+            practical: r?.practical ?? null,
+            total: r?.totalMarks ?? null,
+            grade: r?.grade ?? null,
+            gpa: r?.gp ?? null
+          };
+        })
+      });
+    }
+    res.json({ examId, subjects: out });
+  } catch (error: any) {
+    console.error('Error fetching teacher results:', error);
+    res.status(500).json({ error: 'Failed to fetch teacher results', details: error.message });
   }
 });
 
@@ -5062,10 +5729,10 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
     const next30 = new Date();
     next30.setDate(next30.getDate() + 30);
 
-    const [attendance, results, fees, classRecord, allSchedules, subjects] = await Promise.all([
+    const [attendance, results, fees, classRecord, allSchedules, subjects, institute, invoices] = await Promise.all([
       prisma.attendance.findMany({ where: { studentId: student.id } }),
       prisma.result.findMany({
-        where: { studentId: student.id },
+        where: { studentId: student.id, exam: { status: 'Published' } },
         include: { exam: true },
         orderBy: { createdAt: 'desc' },
         take: 10,
@@ -5077,8 +5744,17 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
         orderBy: { date: 'asc' },
       }),
       prisma.subject.findMany(),
+      prisma.institute.findFirst(),
+      prisma.invoice.findMany({ where: { studentId: student.id }, include: { payments: true } }),
     ]);
     const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
+
+    const currencySymbol = (code?: string | null) => {
+      const map: Record<string, string> = { USD: '$', BDT: 'Tk.', GBP: '£', EUR: '€', INR: '₹', PKR: 'Rs.', USD2: '$ ' };
+      if (code && map[code.toUpperCase()]) return map[code.toUpperCase()];
+      return code ? `${code} ` : '$';
+    };
+    const cur = currencySymbol(institute?.currency);
 
     // Exam schedules relevant to this student's class (or the whole school).
     const schedules = allSchedules.filter(
@@ -5089,8 +5765,16 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
     const total = attendance.length;
     const attendancePct = total ? Math.round((present / total) * 100) : 0;
 
-    const totalFee = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
-    const paid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    // Canonical fee totals: Invoice (tuition billing, paid = sum of payments) + legacy StudentFee
+    const invoiceTotal = invoices.reduce((s, inv) => s + Number(inv.totalAmount), 0);
+    const invoicePaid = invoices.reduce((s, inv) => {
+      const paySum = inv.payments.reduce((a: number, p: any) => a + Number(p.amount), 0);
+      return s + (paySum || Number((inv as any).paidAmount || 0));
+    }, 0);
+    const feeTotal = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const feePaid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const totalFee = invoiceTotal + feeTotal;
+    const paid = invoicePaid + feePaid;
     const due = totalFee - paid;
 
     const upcomingExams = schedules
@@ -5124,10 +5808,10 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
       },
       {
         title: 'Fee Status',
-        value: due > 0 ? `$${due.toFixed(2)}` : 'Paid',
-        description: totalFee > 0 ? `$${paid.toFixed(2)} paid of $${totalFee.toFixed(2)}` : 'No fees recorded',
-        bgColor: due > 0 ? 'bg-red-50' : 'bg-green-100',
-        color: due > 0 ? 'text-red-600' : 'text-green-600',
+        value: totalFee === 0 ? 'No fees' : (due > 0 ? `${cur}${Number(due).toFixed(2)} due` : 'Paid'),
+        description: totalFee === 0 ? 'No fee records yet' : `${cur}${Number(paid).toFixed(2)} paid of ${cur}${Number(totalFee).toFixed(2)}`,
+        bgColor: totalFee === 0 ? 'bg-slate-50' : (due > 0 ? 'bg-red-50' : 'bg-green-100'),
+        color: totalFee === 0 ? 'text-slate-400' : (due > 0 ? 'text-red-600' : 'text-green-600'),
         href: '/student/fees',
       },
       {
@@ -5202,13 +5886,15 @@ app.get('/student/results', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const [results, subjects] = await Promise.all([
+    const [results, subjects, schedules, allGrading] = await Promise.all([
       prisma.result.findMany({
-        where: { studentId: student.id },
+        where: { studentId: student.id, exam: { status: 'Published' } },
         include: { exam: true },
         orderBy: { createdAt: 'desc' },
       }),
       prisma.subject.findMany(),
+      prisma.examSchedule.findMany({ include: { exam: true, subject: true, class: true } }),
+      prisma.gradingSystem.findMany(),
     ]);
     const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
 
@@ -5225,7 +5911,9 @@ app.get('/student/results', async (req: Request, res: Response) => {
     });
     const classmateIds = classmates.map((c) => c.id);
 
-    const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; grade: string; gpa: number; rank: number } }> = [];
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; fullMarks: number; percentage: number; grade: string; gpa: number; rank: number; passed: boolean } }> = [];
     for (const [examId, list] of byExam.entries()) {
       const rows = list.map((r) => ({
         id: r.id,
@@ -5237,9 +5925,31 @@ app.get('/student/results', async (req: Request, res: Response) => {
         gpa: r.gp ?? 0,
       }));
 
-      const totalMarks = rows.reduce((s, r) => s + r.total, 0);
-      const avgGpa = rows.length ? rows.reduce((s, r) => s + r.gpa, 0) / rows.length : 0;
-      const bestGrade = rows.length ? rows.reduce((best, r) => (r.grade && r.grade !== '—' && (!best || r.grade < best) ? r.grade : best), '' as string | null) : null;
+      const examTypeId = list[0].exam.typeId;
+      const grading = allGrading
+        .filter((g) => g.examTypeId === examTypeId)
+        .sort((a, b) => Number(b.minPercent) - Number(a.minPercent));
+      const failGrades = new Set<string>(grading.filter((g) => g.status === 'FAIL').map((g) => g.grade));
+      const examSchedules = schedules.filter((s) => s.examId === examId);
+
+      const totalMarks = list.reduce((s, r) => s + (r.totalMarks || 0), 0);
+      let fullMarks = 0;
+      let gpSum = 0, gpCount = 0, failed = false;
+      for (const r of list) {
+        const sc = examSchedules.find((s) => s.subjectId === r.subjectId && s.class?.name === student.class);
+        fullMarks += Number(sc?.fullMarks ?? 100);
+        if (r.gp != null) { gpSum += r.gp; gpCount++; }
+        if (r.grade && failGrades.has(r.grade)) failed = true;
+      }
+      const avgGpa = gpCount ? round2(gpSum / gpCount) : 0;
+      const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
+      let grade = '—';
+      if (failed) {
+        grade = 'F';
+      } else if (grading.length) {
+        const g = grading.find((x) => percentage >= Number(x.minPercent) && percentage <= Number(x.maxPercent));
+        grade = g ? g.grade : (grading[grading.length - 1]?.grade || '—');
+      }
 
       // Rank within this exam across classmates.
       let rank = 1;
@@ -5264,9 +5974,12 @@ app.get('/student/results', async (req: Request, res: Response) => {
         resultData: rows,
         overall: {
           totalMarks,
-          grade: bestGrade || '—',
-          gpa: Math.round(avgGpa * 100) / 100,
+          fullMarks,
+          percentage,
+          grade,
+          gpa: avgGpa,
           rank,
+          passed: !failed,
         },
       });
     }
@@ -5274,7 +5987,7 @@ app.get('/student/results', async (req: Request, res: Response) => {
     res.json({
       exams,
       resultData: exams.length ? exams[0].resultData : [],
-      overall: exams.length ? exams[0].overall : { totalMarks: 0, grade: '—', gpa: 0, rank: 1 },
+      overall: exams.length ? exams[0].overall : { totalMarks: 0, fullMarks: 0, percentage: 0, grade: '—', gpa: 0, rank: 1, passed: false },
     });
   } catch (error) {
     console.error('Error fetching student results:', error);
@@ -5295,12 +6008,20 @@ app.get('/student/fees', async (req: Request, res: Response) => {
       prisma.studentFee.findMany({ where: { studentId: student.id }, orderBy: { createdAt: 'desc' } }),
       prisma.invoice.findMany({
         where: { studentId: student.id },
+        include: { payments: true },
         orderBy: { createdAt: 'desc' },
       }),
     ]);
 
-    const totalFee = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
-    const paid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const invoiceTotal = invoices.reduce((s, inv) => s + Number(inv.totalAmount), 0);
+    const invoicePaid = invoices.reduce((s, inv) => {
+      const paySum = inv.payments.reduce((a: number, p: any) => a + Number(p.amount), 0);
+      return s + (paySum || Number((inv as any).paidAmount || 0));
+    }, 0);
+    const feeTotal = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const feePaid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
+    const totalFee = invoiceTotal + feeTotal;
+    const paid = invoicePaid + feePaid;
     const due = totalFee - paid;
 
     const feeStats = {

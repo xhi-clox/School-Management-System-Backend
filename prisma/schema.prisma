@@ -494,17 +494,25 @@ model ExamType {
 }
 
 model Exam {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   name        String
-  typeId      String   @default("") // Link to ExamType
-  type        ExamType @relation(fields: [typeId], references: [id])
+  typeId      String    @default("") // Link to ExamType
+  type        ExamType  @relation(fields: [typeId], references: [id])
   startDate   DateTime
   endDate     DateTime
   academicYear String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  // Result lifecycle state: Draft | Verification | Finalized | Published
+  status      String    @default("Draft")
+  publishedAt DateTime?
+  publishedBy String?
+  // Weight used when ranking by 'Weighted Academic Score' (0 = excluded)
+  weight      Float     @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   results       Result[]
   schedules     ExamSchedule[]
+  publish        ResultPublish?
+  validationRuns ResultValidationRun[]
 }
 
 model Result {
@@ -525,13 +533,39 @@ model Result {
   grade        String?  // LG (Letter Grade)
   gp           Float?   // GP (Grade Point)
   highestMarks Float    @default(0)
-  
+
+  // Result lifecycle state: Draft | Verification | Finalized | Published
+  status       String   @default("Draft")
+  verifiedAt   DateTime?
+
   createdAt    DateTime @default(now())
   updatedAt DateTime @updatedAt
   student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
   exam      Exam     @relation(fields: [examId], references: [id])
 
   @@unique([studentId, examId, subjectId])
+}
+
+model ResultPublish {
+  id          String   @id @default(cuid())
+  examId      String
+  rankBy      String   @default("GPA") // TotalMarks | Percentage | GPA | WeightedAcademicScore
+  rankSnapshot Json? // Frozen per-class ranking [{ class, section, entries }]
+  publishedBy String?
+  publishedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  exam        Exam     @relation(fields: [examId], references: [id])
+
+  @@unique([examId])
+}
+
+model ResultValidationRun {
+  id        String   @id @default(cuid())
+  examId    String
+  health    Float // 0-100 readiness percentage
+  issues    Json // [{ type, message, detail? }]
+  createdAt DateTime @default(now())
+  exam      Exam     @relation(fields: [examId], references: [id])
 }
 
 model ExamSchedule {
