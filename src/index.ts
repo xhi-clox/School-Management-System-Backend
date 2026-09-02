@@ -1830,24 +1830,24 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
-  // Fetch grading for this exam type
-  const grading = await prisma.gradingSystem.findMany({
-    where: { examTypeId: exam.typeId },
-    orderBy: { minPercent: 'desc' }
-  });
+  // Fetch all grading systems for per-subject grading support (gradingTypeId per ExamSchedule)
+  const allGrading = await prisma.gradingSystem.findMany({ orderBy: { minPercent: 'desc' } });
+  const gradingByType = new Map<string, typeof allGrading>();
+  for (const g of allGrading) {
+    if (!gradingByType.has(g.examTypeId)) gradingByType.set(g.examTypeId, []);
+    gradingByType.get(g.examTypeId)!.push(g);
+  }
+  const defaultGrading = gradingByType.get(exam.typeId) || [];
+  const grading = defaultGrading; // keep for backwards compat
 
   const studentMap = new Map(students.map(s => [s.id, s]));
 
-  // Determine which components are mandatory in this grading system so MCQ=0
-  // correctly counts as a fail when MCQ is mandatory. (#6)
-  const passConfig = grading.length > 0 ? grading[0] : null;
-  const wPass = passConfig?.writtenPass ?? 0;
-  const mPass = passConfig?.mcqPass ?? 0;
-  const pPass = (passConfig as any)?.practicalPass ?? 0;
-  const tPass = passConfig?.totalPass ?? 0;
-  const mcqMandatory = (passConfig?.mcqPass ?? 0) > 0;
-  const practicalMandatory = ((passConfig as any)?.practicalPass ?? 0) > 0;
-  const writtenMandatory = (passConfig?.writtenPass ?? 0) > 0;
+  // Default pass config (when schedule has no override) — 0 means not included / optional
+  const passConfig = defaultGrading.length > 0 ? defaultGrading[0] : null;
+  const wPassDefault = passConfig?.writtenPass ?? 0;
+  const mPassDefault = passConfig?.mcqPass ?? 0;
+  const pPassDefault = (passConfig as any)?.practicalPass ?? 0;
+  const tPassDefault = passConfig?.totalPass ?? 0;
 
   // Map class name -> full marks + pass marks for this subject (per class). (#8)
   // Avoid positional schedules[0] fallback which is fragile if ordering changes.
@@ -1883,7 +1883,19 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       const fullMarks = fullMarksByClass.get(studentClass ?? '') ?? defaultFullMarks;
       const totalMarks = m.written + m.mcq + m.practical;
 
-      // Pass/Fail Logic: 0 means component not included / optional
+      // Per-subject grading: use schedule's gradingTypeId if set, otherwise exam's type
+      const scheduleForStudent = schedules.find(s => (s.class?.name === studentClass) && s.subjectId === subjectId) as any;
+      const gradingTypeIdForThis = scheduleForStudent?.gradingTypeId || exam.typeId;
+      const gradingForThis = gradingByType.get(gradingTypeIdForThis) || defaultGrading;
+      const passCfg = gradingForThis.length > 0 ? gradingForThis[0] : passConfig;
+      const wPass = passCfg?.writtenPass ?? wPassDefault;
+      const mPass = passCfg?.mcqPass ?? mPassDefault;
+      const pPass = (passCfg as any)?.practicalPass ?? pPassDefault;
+      const tPass = passCfg?.totalPass ?? tPassDefault;
+      const writtenMandatory = (wPass ?? 0) > 0;
+      const mcqMandatory = (mPass ?? 0) > 0;
+      const practicalMandatory = (pPass ?? 0) > 0;
+
       let isFail = false;
       if (writtenMandatory && m.written < wPass) isFail = true;
       if (mcqMandatory && (m.mcq <= 0 || m.mcq < mPass)) isFail = true;
@@ -1895,9 +1907,9 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
       let gradeInfo;
       if (isFail) {
-        gradeInfo = grading.find(g => g.status === 'FAIL') || { grade: 'F', gp: 0 };
+        gradeInfo = gradingForThis.find(g => g.status === 'FAIL') || { grade: 'F', gp: 0 };
       } else {
-        gradeInfo = grading.find(g => percent >= g.minPercent && percent <= g.maxPercent) || grading[grading.length - 1];
+        gradeInfo = gradingForThis.find(g => percent >= g.minPercent && percent <= g.maxPercent) || gradingForThis[gradingForThis.length - 1];
       }
 
       if (studentClass) {
@@ -2990,12 +3002,13 @@ app.post('/schedules', async (req: Request, res: Response) => {
     endTime: z.string().min(1),
     fullMarks: z.number().optional(),
     passMarks: z.number().optional(),
+    gradingTypeId: z.string().optional().nullable(),
     roomNo: z.string().optional(),
     sortOrder: z.number().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks, roomNo, sortOrder } = parsed.data;
+  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks, gradingTypeId, roomNo, sortOrder } = parsed.data;
 
   // Note: Using examId_subjectId_classId unique constraint if classId is provided, else examId_subjectId
   // But Prisma update/upsert requires a unique key.
@@ -3014,7 +3027,7 @@ app.post('/schedules', async (req: Request, res: Response) => {
   if (existing) {
     const updated = await prisma.examSchedule.update({
       where: { id: existing.id },
-      data: { date: new Date(date), startTime, endTime, fullMarks, passMarks, roomNo: roomNo ?? null, sortOrder }
+      data: { date: new Date(date), startTime, endTime, fullMarks, passMarks, gradingTypeId: gradingTypeId || null, roomNo: roomNo ?? null, sortOrder }
     });
     return res.json(updated);
   }
@@ -3029,6 +3042,7 @@ app.post('/schedules', async (req: Request, res: Response) => {
       endTime,
       fullMarks,
       passMarks,
+      gradingTypeId: gradingTypeId || null,
       roomNo: roomNo ?? null,
       sortOrder
     }
@@ -3064,6 +3078,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         endTime: z.string().optional(),
         fullMarks: z.number().optional(),
         passMarks: z.number().optional(),
+        gradingTypeId: z.string().optional().nullable(),
         roomNo: z.string().optional(),
         sortOrder: z.number().optional(),
       })).min(1),
@@ -3082,6 +3097,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         if (item.endTime !== undefined) data.endTime = item.endTime;
         if (item.fullMarks !== undefined) data.fullMarks = item.fullMarks;
         if (item.passMarks !== undefined) data.passMarks = item.passMarks;
+        if (item.gradingTypeId !== undefined) data.gradingTypeId = item.gradingTypeId || null;
         if (item.roomNo !== undefined) data.roomNo = item.roomNo || null;
         if (item.sortOrder !== undefined) data.sortOrder = item.sortOrder;
 

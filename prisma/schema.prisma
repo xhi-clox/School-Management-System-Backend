@@ -494,6 +494,7 @@ model ExamType {
   updatedAt   DateTime @updatedAt
   exams       Exam[]
   gradingRules GradingSystem[]
+  gradingSchedules ExamSchedule[]
 }
 
 model Exam {
@@ -607,6 +608,7 @@ model ExamSchedule {
   endTime   String
   fullMarks Int?
   passMarks Int?
+  gradingTypeId String? // per-subject grading override (null = use Exam.typeId)
   roomNo    String?
   sortOrder Int?     // ordinal within a class/day for drag-rearrange
   createdAt DateTime @default(now())
@@ -614,6 +616,7 @@ model ExamSchedule {
   exam      Exam     @relation(fields: [examId], references: [id])
   subject   Subject  @relation(fields: [subjectId], references: [id])
   class     SchoolClass? @relation(fields: [classId], references: [id])
+  gradingType ExamType? @relation(fields: [gradingTypeId], references: [id])
 
   @@unique([examId, subjectId, classId])
 }
