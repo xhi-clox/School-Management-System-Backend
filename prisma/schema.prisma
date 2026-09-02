@@ -665,9 +665,10 @@ model GradingSystem {
   examTypeId   String   // Link to ExamType (required, no empty-string default)
   examType     ExamType @relation(fields: [examTypeId], references: [id])
   
-  writtenPass  Float?
-  mcqPass      Float?
-  totalPass    Float?
+  writtenPass   Float?
+  mcqPass       Float?
+  practicalPass Float?
+  totalPass     Float?
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

@@ -1857,8 +1857,10 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   const passConfig = grading.length > 0 ? grading[0] : null;
   const wPass = passConfig?.writtenPass ?? 0;
   const mPass = passConfig?.mcqPass ?? 0;
+  const pPass = (passConfig as any)?.practicalPass ?? 0;
   const tPass = passConfig?.totalPass ?? 0;
   const mcqMandatory = (passConfig?.mcqPass ?? 0) > 0;
+  const practicalMandatory = ((passConfig as any)?.practicalPass ?? 0) > 0;
   const writtenMandatory = (passConfig?.writtenPass ?? 0) > 0;
 
   // Map class name -> full marks + pass marks for this subject (per class). (#8)
@@ -1895,10 +1897,11 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       const fullMarks = fullMarksByClass.get(studentClass ?? '') ?? defaultFullMarks;
       const totalMarks = m.written + m.mcq + m.practical;
 
-      // Pass/Fail Logic
+      // Pass/Fail Logic: 0 means component not included / optional
       let isFail = false;
       if (writtenMandatory && m.written < wPass) isFail = true;
       if (mcqMandatory && (m.mcq <= 0 || m.mcq < mPass)) isFail = true;
+      if (practicalMandatory && (m.practical <= 0 || m.practical < pPass)) isFail = true;
       if (totalMarks < tPass) isFail = true;
 
       // Zero-division guard. (#14)
@@ -5303,6 +5306,7 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
     examTypeId: z.string(),
     writtenPass: z.number().optional().nullable(),
     mcqPass: z.number().optional().nullable(),
+    practicalPass: z.number().optional().nullable(),
     totalPass: z.number().optional().nullable(),
   }));
   const parsed = schema.safeParse(req.body);
@@ -5325,6 +5329,7 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
         examTypeId: i.examTypeId,
         writtenPass: i.writtenPass,
         mcqPass: i.mcqPass,
+        practicalPass: i.practicalPass,
         totalPass: i.totalPass
       }))
     });
