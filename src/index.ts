@@ -558,33 +558,80 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   }
 });
 
-// Admin - Reset Data
+// Admin - Reset Data (Danger Zone: Clear All Data)
 app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
   try {
-    await prisma.$transaction([
-      prisma.ledgerEntry.deleteMany(),
-      prisma.studentFee.deleteMany(),
-      prisma.attendance.deleteMany(),
-      prisma.student.deleteMany(),
-      prisma.teacherSalary.deleteMany(),
-      prisma.teacher.deleteMany(),
-      prisma.schoolClass.deleteMany(),
-      prisma.schoolExpense.deleteMany(),
-      prisma.subject.deleteMany(),
-      prisma.saleItem.deleteMany(),
-      prisma.sale.deleteMany(),
-      prisma.purchaseItem.deleteMany(),
-      prisma.purchase.deleteMany(),
-      prisma.product.deleteMany(),
-      prisma.supplier.deleteMany(),
-      prisma.payment.deleteMany(),
-      prisma.invoiceItem.deleteMany(),
-      prisma.invoice.deleteMany(),
-    ]);
-    res.json({ success: true, message: 'All data has been reset.' });
-  } catch (error) {
+    // Delete in FK-safe order: leaves -> roots. Keep User/Admin accounts + Institute profile.
+    // Any failure is logged with details so frontend can show why.
+    await prisma.$transaction(async (tx) => {
+      // Exam / Result leaves - data only, tables remain (deleteMany preserves schema)
+      await (tx as any).resultValidationRun.deleteMany();
+      await (tx as any).resultPublish.deleteMany();
+      await (tx as any).result.deleteMany();
+      await (tx as any).examAttendance.deleteMany();
+      await (tx as any).attendance.deleteMany();
+      await (tx as any).teacherAttendance.deleteMany();
+      await (tx as any).examSchedule.deleteMany();
+      // Preset leaves
+      await (tx as any).examPresetSubject.deleteMany();
+      await (tx as any).examPresetClass.deleteMany();
+      await (tx as any).examPreset.deleteMany();
+      await (tx as any).gradingSystem.deleteMany();
+
+      // Finance / Invoice leaves
+      await (tx as any).invoiceItem.deleteMany();
+      await (tx as any).payment.deleteMany();
+      await (tx as any).invoice.deleteMany();
+      await (tx as any).studentFee.deleteMany();
+      await (tx as any).studentFeeAssignment.deleteMany();
+      await (tx as any).feeStructure.deleteMany();
+
+      // Store leaves
+      await (tx as any).saleItem.deleteMany();
+      await (tx as any).sale.deleteMany();
+      await (tx as any).purchaseItem.deleteMany();
+      await (tx as any).purchase.deleteMany();
+      await (tx as any).product.deleteMany();
+      await (tx as any).supplier.deleteMany();
+
+      // Student leaves
+      await (tx as any).guardian.deleteMany();
+      await (tx as any).studentLogin.deleteMany();
+      await (tx as any).studentAcademicRecord.deleteMany();
+      await (tx as any).ledgerEntry.deleteMany();
+      await (tx as any).schoolExpense.deleteMany();
+
+      // Teacher / class leaves
+      await (tx as any).teacherSalary.deleteMany();
+      await (tx as any).staffSalary.deleteMany();
+      await (tx as any).teacherLogin.deleteMany();
+      await (tx as any).teacherPermission.deleteMany();
+      await (tx as any).classSubjectTeacher.deleteMany();
+      await (tx as any).admissionFeeItem.deleteMany();
+      await (tx as any).admissionPackage.deleteMany();
+      await (tx as any).routineEntry.deleteMany();
+      await (tx as any).routinePeriod.deleteMany();
+
+      // Mid-level parents after leaves
+      await (tx as any).subject.deleteMany();
+      await (tx as any).schoolClass.deleteMany();
+      await (tx as any).exam.deleteMany();
+      await (tx as any).examType.deleteMany();
+      await (tx as any).feeParticular.deleteMany();
+
+      // Roots (students/teachers last after all children)
+      await (tx as any).student.deleteMany();
+      await (tx as any).teacher.deleteMany();
+      await (tx as any).staff.deleteMany();
+      await (tx as any).notification.deleteMany();
+      // Keep User and Institute so admin can still log in. Optionally clear Parent orphan rows.
+      await (tx as any).parent.deleteMany();
+    }, { timeout: 30000, maxWait: 10000 });
+
+    res.json({ success: true, message: 'All data has been reset. Users and institute preserved.' });
+  } catch (error: any) {
     console.error('Reset error:', error);
-    res.status(500).json({ error: 'Failed to reset data' });
+    res.status(500).json({ error: 'Failed to reset data', details: error?.message || String(error) });
   }
 });
 
