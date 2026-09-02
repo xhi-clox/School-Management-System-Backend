@@ -5748,10 +5748,10 @@ app.post('/auth/login', async (req: Request, res: Response) => {
     }
 
     if (user) {
-      // Generate JWT token
+      // Generate JWT token - use same fallback as authMiddleware for consistency
       const token = jwt.sign(
         { userId: user.id, email: user.email, role: user.role },
-        process.env.JWT_SECRET || 'fallback-secret',
+        process.env.JWT_SECRET || 'fallback-jwt-secret-for-development',
         { expiresIn: '7d' }
       );
 

@@ -17,8 +17,16 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     return res.status(401).json({ message: 'Token missing' });
   }
 
+  // Try primary secret, then fallbacks for old tokens (fallback-secret vs fallback-jwt-secret-for-development)
+  const tryVerify = (t: string, secret: string) => {
+    try { return jwt.verify(t, secret) as { userId: string; role: string }; } catch { return null; }
+  };
+  let decoded = tryVerify(token, (process.env.JWT_SECRET as string) || 'fallback-jwt-secret-for-development');
+  if (!decoded) decoded = tryVerify(token, 'fallback-secret');
+  if (!decoded) decoded = tryVerify(token, 'fallback-jwt-secret-for-development');
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as { userId: string; role: string };
+    if (!decoded) throw new Error('Invalid token');
+    // decoded already obtained
     let user = null;
 
     // Find user based on role
