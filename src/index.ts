@@ -572,11 +572,9 @@ app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
       await (tx as any).attendance.deleteMany();
       await (tx as any).teacherAttendance.deleteMany();
       await (tx as any).examSchedule.deleteMany();
-      // Preset leaves
-      await (tx as any).examPresetSubject.deleteMany();
-      await (tx as any).examPresetClass.deleteMany();
-      await (tx as any).examPreset.deleteMany();
-      await (tx as any).gradingSystem.deleteMany();
+      // Preset & master data preserved so Generate Schedule still works after reset (tables remain)
+      // Do NOT delete: examPreset*, gradingSystem, product, supplier, subject, schoolClass, examType, feeParticular, feeStructure
+      // Only clear transactional children that would block master deletes if we did
 
       // Finance / Invoice leaves
       await (tx as any).invoiceItem.deleteMany();
@@ -584,15 +582,6 @@ app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
       await (tx as any).invoice.deleteMany();
       await (tx as any).studentFee.deleteMany();
       await (tx as any).studentFeeAssignment.deleteMany();
-      await (tx as any).feeStructure.deleteMany();
-
-      // Store leaves
-      await (tx as any).saleItem.deleteMany();
-      await (tx as any).sale.deleteMany();
-      await (tx as any).purchaseItem.deleteMany();
-      await (tx as any).purchase.deleteMany();
-      await (tx as any).product.deleteMany();
-      await (tx as any).supplier.deleteMany();
 
       // Student leaves
       await (tx as any).guardian.deleteMany();
@@ -612,12 +601,9 @@ app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
       await (tx as any).routineEntry.deleteMany();
       await (tx as any).routinePeriod.deleteMany();
 
-      // Mid-level parents after leaves
-      await (tx as any).subject.deleteMany();
-      await (tx as any).schoolClass.deleteMany();
+      // Mid-level parents after leaves - keep master tables so Generate Schedule still works
+      // Preserved: subject, schoolClass, examType, feeParticular, feeStructure, product, supplier, gradingSystem, examPreset*
       await (tx as any).exam.deleteMany();
-      await (tx as any).examType.deleteMany();
-      await (tx as any).feeParticular.deleteMany();
 
       // Roots (students/teachers last after all children)
       await (tx as any).student.deleteMany();
