@@ -612,9 +612,9 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
     for (const r of records) {
       const key = utcDayKeyOf(r.date);
       const entry = dayMap.get(key) || { present: 0, absent: 0, late: 0 };
-      if (r.status === 'Present') entry.present++;
-      else if (r.status === 'Absent') entry.absent++;
-      else if (r.status === 'Late') entry.late++;
+      if (normalizeAttendanceStatus(r.status) === 'Present') entry.present++;
+      else if (normalizeAttendanceStatus(r.status) === 'Absent') entry.absent++;
+      else if (normalizeAttendanceStatus(r.status) === 'Late') entry.late++;
       dayMap.set(key, entry);
     }
 
@@ -938,6 +938,28 @@ function academicYearRange(label?: string | null): { start: Date | null; end: Da
   const startYear = Number(match[1]);
   // July-to-June academic year convention (matches the promotion default)
   return { start: new Date(startYear, 6, 1), end: new Date(startYear + 1, 6, 1) };
+}
+
+// Validate and canonicalize an academic-year label to "YYYY-YYYY".
+// Accepts "2026-2027", "2026-27", or "2026"; rejects typos like "2024-25" that
+// would silently mismatch stored values. (#18)
+function normalizeAcademicYear(label?: string | null): string | null {
+  if (!label) return null;
+  const s = String(label).trim();
+  const m = s.match(/^(\d{4})\s*[-/–]\s*(\d{2,4})$/);
+  if (m) {
+    const start = Number(m[1]);
+    let end = Number(m[2]);
+    if (String(m[2]).length === 2) end = Math.floor(start / 100) * 100 + end;
+    if (end === start + 1) return `${start}-${end}`;
+    return null;
+  }
+  const just = s.match(/^(\d{4})$/);
+  if (just) {
+    const start = Number(just[1]);
+    return `${start}-${start + 1}`;
+  }
+  return null;
 }
 
 app.post('/students/promote', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
@@ -1392,13 +1414,19 @@ app.post('/exams', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { name, typeId, startDate, endDate, academicYear } = parsed.data;
+  // Validate/canonicalize the academic year so reports keyed on exact strings
+  // don't break on typos. (#18)
+  const canonicalYear = normalizeAcademicYear(academicYear);
+  if (!canonicalYear) {
+    return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+  }
   const exam = await prisma.exam.create({
     data: {
       name,
       typeId,
       startDate: new Date(startDate),
       endDate: new Date(endDate),
-      academicYear
+      academicYear: canonicalYear
     },
     include: { type: true }
   });
@@ -1417,6 +1445,310 @@ app.post('/exams/:id/weight', authMiddleware, checkRole(['Admin']), async (req: 
   } catch (error: any) {
     console.error('Error updating exam weight:', error);
     res.status(500).json({ error: 'Failed to update exam weight', details: error.message });
+  }
+});
+
+// Exam Attendance - Get classes with active schedules for an exam
+app.get('/exams/:examId/attendance/classes', async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+
+    // Get exam schedules for this exam grouped by class
+    const schedules = await prisma.examSchedule.findMany({
+      where: { examId },
+      include: { 
+        class: true,
+        subject: true,
+      },
+    });
+
+    // Get unique classes from schedules with their sections
+    const classSectionsMap = new Map<string, Set<string>>();
+    schedules.forEach(schedule => {
+      if (schedule.classId) {
+        const className = schedule.class?.name || schedule.classId;
+        if (!classSectionsMap.has(className)) {
+          classSectionsMap.set(className, new Set());
+        }
+        classSectionsMap.get(className)!.add(schedule.classId);
+      }
+    });
+
+    // Get students count per class/section from schedules
+    const classData = await Promise.all(
+      Array.from(classSectionsMap.entries()).map(async ([className, classIds]) => {
+        const sections = Array.from(classIds);
+        const students = await prisma.student.findMany({
+          where: { class: className },
+          select: { section: true },
+          distinct: ['section'],
+        });
+        return {
+          name: className,
+          sections: students.map(s => s.section),
+        };
+      })
+    );
+
+    res.json(classData);
+  } catch (error: any) {
+    console.error('Error fetching exam schedule classes:', error);
+    res.status(500).json({ error: 'Failed to fetch classes', details: error.message });
+  }
+});
+
+// Exam Attendance - Get attendance for an exam (with filters)
+app.get('/exams/:examId/attendance', async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const { subjectId, class: className, section, date } = req.query as any;
+
+    // Get exam schedules for this exam (to know which subjects/dates)
+    const schedules = await prisma.examSchedule.findMany({
+      where: { 
+        examId,
+        ...(className && { class: { name: className } }),
+      },
+      include: { subject: true },
+    });
+
+    // Get unique dates from schedules
+    const examDates = [...new Set(schedules.map(s => s.date.toISOString().split('T')[0]))];
+
+    // When a date is selected, scope the subjects/dropdown to only those
+    // scheduled on that date (prevents picking a subject from another day).
+    // Compare using local calendar days, consistent with localDayKey().
+    const dateKey = localDayKey(new Date(date));
+    const effectiveSchedules = date
+      ? schedules.filter(s => localDayKey(s.date) === dateKey)
+      : schedules;
+
+    // Get existing attendance records
+    const whereClause: any = { examId };
+    if (subjectId) whereClause.subjectId = subjectId;
+    if (date) whereClause.date = new Date(date);
+
+    const attendances = await prisma.examAttendance.findMany({
+      where: whereClause,
+      include: { student: true, subject: true },
+    });
+
+    // Get students for the selected class/section
+    let students: any[] = [];
+    if (className && section) {
+      students = await prisma.student.findMany({
+        where: { class: className, section },
+        orderBy: { roll: 'asc' },
+      });
+    }
+
+    // Build response with all students and their attendance status
+    const studentAttendance = students.map(student => {
+      const records = attendances.filter(a => a.studentId === student.id);
+      const attendanceBySubject: Record<string, any> = {};
+
+      effectiveSchedules.forEach(schedule => {
+        const record = records.find(r => r.subjectId === schedule.subjectId && 
+          r.date.toISOString().split('T')[0] === schedule.date.toISOString().split('T')[0]);
+        attendanceBySubject[schedule.subjectId] = {
+          subjectId: schedule.subjectId,
+          subjectName: schedule.subject.name,
+          date: schedule.date.toISOString().split('T')[0],
+          status: record?.status || null,
+          reason: record?.reason || null,
+          notes: record?.notes || null,
+        };
+      });
+
+      return {
+        studentId: student.id,
+        studentName: student.name,
+        roll: student.roll,
+        attendances: attendanceBySubject,
+      };
+    });
+
+    res.json({
+      examId,
+      // Dedupe by subjectId: the same grade can have multiple sections with
+      // identical timetables, which would otherwise yield duplicate dropdown
+      // options with colliding keys.
+      subjects: [...new Map(effectiveSchedules.map(s => [s.subjectId, {
+        id: s.subjectId,
+        name: s.subject.name,
+        date: localDayKey(s.date),
+        startTime: s.startTime,
+        endTime: s.endTime,
+      }])).values()],
+      dates: examDates,
+      students: studentAttendance,
+    });
+  } catch (error: any) {
+    console.error('Error fetching exam attendance:', error);
+    res.status(500).json({ error: 'Failed to fetch exam attendance', details: error.message });
+  }
+});
+
+// Exam Attendance - Save attendance records
+app.post('/exams/:examId/attendance/save', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const schema = z.array(z.object({
+      studentId: z.string().min(1),
+      subjectId: z.string().min(1),
+      date: z.string().min(1),
+      status: z.enum(['PRESENT', 'ABSENT', 'LATE', 'EXCUSED']),
+      reason: z.string().optional(),
+      notes: z.string().optional(),
+    }));
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const records = parsed.data;
+
+    // Validate that every (subjectId, date) being marked is actually scheduled
+    // for this exam. This prevents attendance being saved for subjects/days
+    // that aren't part of the exam timetable. (#13)
+    const schedules = await prisma.examSchedule.findMany({
+      where: { examId },
+      select: { subjectId: true, date: true },
+    });
+    const scheduled = new Set<string>();
+    for (const s of schedules) {
+      scheduled.add(`${s.subjectId}::${localDayKey(new Date(s.date))}`);
+    }
+    const invalid = records.filter(
+      (r) => !scheduled.has(`${r.subjectId}::${localDayKey(new Date(r.date))}`)
+    );
+    if (invalid.length > 0) {
+      return res.status(400).json({
+        error: 'Attendance can only be saved for subjects/dates that are scheduled for this exam',
+        invalid: invalid.map((r) => ({ studentId: r.studentId, subjectId: r.subjectId, date: r.date })),
+      });
+    }
+
+    // Attendance can only be taken on the day the exam is actually scheduled.
+    // Non-admins may only record attendance for *today*; admins may edit any
+    // (past or future) date later if corrections are needed.
+    const actorRole = (req as any).user?.role;
+    const todayKey = localDayKey(new Date());
+    if (actorRole !== 'Admin') {
+      const notToday = records.filter((r) => localDayKey(new Date(r.date)) !== todayKey);
+      if (notToday.length > 0) {
+        return res.status(403).json({
+          error: 'Attendance can only be taken on the day the exam is scheduled (today). Admin can make later corrections.',
+          invalid: notToday.map((r) => ({ studentId: r.studentId, subjectId: r.subjectId, date: r.date })),
+        });
+      }
+    }
+
+    // Use upsert for each record
+    await Promise.all(records.map(record => {
+      const day = new Date(`${localDayKey(new Date(record.date))}T00:00:00.000Z`);
+      return prisma.examAttendance.upsert({
+        where: {
+          examId_studentId_subjectId_date: {
+            examId,
+            studentId: record.studentId,
+            subjectId: record.subjectId,
+            date: day,
+          },
+        },
+        create: {
+          examId,
+          studentId: record.studentId,
+          subjectId: record.subjectId,
+          date: day,
+          status: record.status,
+          reason: record.reason,
+          notes: record.notes,
+        },
+        update: {
+          status: record.status,
+          reason: record.reason,
+          notes: record.notes,
+        },
+      });
+    }));
+
+    res.json({ success: true, count: records.length });
+  } catch (error: any) {
+    console.error('Error saving exam attendance:', error);
+    res.status(500).json({ error: 'Failed to save exam attendance', details: error.message });
+  }
+});
+
+// Exam Attendance - Get report/summary
+app.get('/exams/:examId/attendance/report', async (req: Request, res: Response) => {
+  try {
+    const { examId } = req.params;
+    const { class: className, section } = req.query as any;
+
+    // Build student filter
+    const studentFilter: any = {};
+    if (className) studentFilter.class = className;
+    if (section) studentFilter.section = section;
+
+    // Get all attendance for this exam
+    const attendances = await prisma.examAttendance.findMany({
+      where: {
+        examId,
+        student: studentFilter,
+      },
+      include: { student: true, subject: true },
+    });
+
+    // Get all students
+    const students = await prisma.student.findMany({
+      where: studentFilter,
+      orderBy: { roll: 'asc' },
+    });
+
+    // Calculate stats per student
+    const studentStats = students.map(student => {
+      const records = attendances.filter(a => a.studentId === student.id);
+      const present = records.filter(r => r.status === 'PRESENT').length;
+      const absent = records.filter(r => r.status === 'ABSENT').length;
+      const late = records.filter(r => r.status === 'LATE').length;
+      const excused = records.filter(r => r.status === 'EXCUSED').length;
+      const total = records.length || 1;
+
+      return {
+        studentId: student.id,
+        studentName: student.name,
+        roll: student.roll,
+        class: student.class,
+        section: student.section,
+        present,
+        absent,
+        late,
+        excused,
+        attendanceRate: total > 0 ? Math.round(((present + late) / total) * 100) : 0,
+      };
+    });
+
+    // Overall stats
+    const totalRecords = attendances.length;
+    const overallPresent = attendances.filter(a => a.status === 'PRESENT').length;
+    const overallAbsent = attendances.filter(a => a.status === 'ABSENT').length;
+    const overallLate = attendances.filter(a => a.status === 'LATE').length;
+    const overallExcused = attendances.filter(a => a.status === 'EXCUSED').length;
+
+    res.json({
+      examId,
+      overall: {
+        total: totalRecords,
+        present: overallPresent,
+        absent: overallAbsent,
+        late: overallLate,
+        excused: overallExcused,
+        attendanceRate: totalRecords > 0 ? Math.round(((overallPresent + overallLate) / totalRecords) * 100) : 0,
+      },
+      students: studentStats,
+    });
+  } catch (error: any) {
+    console.error('Error generating exam attendance report:', error);
+    res.status(500).json({ error: 'Failed to generate report', details: error.message });
   }
 });
 
@@ -1456,7 +1788,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
     prisma.examSchedule.findMany({ where: { examId, subjectId }, include: { class: true } }),
     prisma.student.findMany({
       where: { id: { in: marks.map(m => m.studentId) } },
-      select: { id: true, class: true }
+      select: { id: true, class: true, section: true }
     }),
     prisma.result.findMany({
       where: { examId, subjectId }
@@ -1471,41 +1803,59 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
     orderBy: { minPercent: 'desc' }
   });
 
-  const studentMap = new Map(students.map(s => [s.id, s.class]));
-  const resultsByStudent = new Map(existingResults.map(r => [r.studentId, r.totalMarks]));
+  const studentMap = new Map(students.map(s => [s.id, s]));
 
-  // Calculate highest marks for this exam/subject
-  const currentBatchMap = new Map(marks.map(m => [m.studentId, m.written + m.mcq + m.practical]));
-  const allResultsMap = new Map(existingResults.map(r => [r.studentId, r.totalMarks]));
-  currentBatchMap.forEach((total, studentId) => {
-    allResultsMap.set(studentId, total);
-  });
-  const highestMarks = Math.max(...Array.from(allResultsMap.values()), 0);
-
-  // Get pass marks from grading system if available
+  // Determine which components are mandatory in this grading system so MCQ=0
+  // correctly counts as a fail when MCQ is mandatory. (#6)
   const passConfig = grading.length > 0 ? grading[0] : null;
   const wPass = passConfig?.writtenPass ?? 0;
   const mPass = passConfig?.mcqPass ?? 0;
   const tPass = passConfig?.totalPass ?? 0;
+  const mcqMandatory = (passConfig?.mcqPass ?? 0) > 0;
+  const writtenMandatory = (passConfig?.writtenPass ?? 0) > 0;
 
-  // Transaction to upsert results
-  await prisma.$transaction(
-    marks.map(m => {
+  // Map class name -> full marks + pass marks for this subject (per class). (#8)
+  // Avoid positional schedules[0] fallback which is fragile if ordering changes.
+  const fullMarksByClass = new Map<string, number>();
+  for (const s of schedules) {
+    if (s.class?.name) fullMarksByClass.set(s.class.name, s.fullMarks ?? 100);
+  }
+  const defaultFullMarks = schedules.length > 0
+    ? Math.max(...schedules.map(s => s.fullMarks ?? 100), 0)
+    : 100;
+
+  // Precompute per (class) highest marks AFTER this batch = max of existing
+  // results for that class plus this batch's new totals. (#7)
+  const existingByClass = new Map<string, number[]>();
+  const classOfStudent = (id: string) => {
+    const st = studentMap.get(id);
+    return st ? st.class : undefined;
+  };
+  for (const r of existingResults) {
+    const c = classOfStudent(r.studentId);
+    if (!c) continue;
+    if (!existingByClass.has(c)) existingByClass.set(c, []);
+    existingByClass.get(c)!.push(r.totalMarks);
+  }
+
+  // Build the highest marks per class, then update all results in ONE transaction
+  // together with the upserts so both stay consistent even on failure. (#16)
+  const result = await prisma.$transaction(async (tx) => {
+    const classHighest = new Map<string, number>();
+    // First upsert every mark and track per-class best from the batch.
+    for (const m of marks) {
+      const studentClass = studentMap.get(m.studentId)?.class;
+      const fullMarks = fullMarksByClass.get(studentClass ?? '') ?? defaultFullMarks;
       const totalMarks = m.written + m.mcq + m.practical;
 
       // Pass/Fail Logic
-      // Written is mandatory, MCQ is optional (only fails if provided and below threshold)
       let isFail = false;
-      if (m.written < wPass) isFail = true;
-      if (m.mcq > 0 && m.mcq < mPass) isFail = true;
+      if (writtenMandatory && m.written < wPass) isFail = true;
+      if (mcqMandatory && (m.mcq <= 0 || m.mcq < mPass)) isFail = true;
       if (totalMarks < tPass) isFail = true;
 
-      // Get full marks for student's class
-      const studentClass = studentMap.get(m.studentId);
-      const scheduleForClass = schedules.find(s => s.class?.name === studentClass);
-      const fullMarks = scheduleForClass?.fullMarks || (schedules.length > 0 ? schedules[0].fullMarks : 100) || 100;
-
-      const percent = (totalMarks / fullMarks) * 100;
+      // Zero-division guard. (#14)
+      const percent = fullMarks > 0 ? (totalMarks / fullMarks) * 100 : 0;
 
       let gradeInfo;
       if (isFail) {
@@ -1514,7 +1864,12 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
         gradeInfo = grading.find(g => percent >= g.minPercent && percent <= g.maxPercent) || grading[grading.length - 1];
       }
 
-      return prisma.result.upsert({
+      if (studentClass) {
+        const curBest = classHighest.get(studentClass) ?? 0;
+        if (totalMarks > curBest) classHighest.set(studentClass, totalMarks);
+      }
+
+      await tx.result.upsert({
         where: {
           studentId_examId_subjectId: {
             studentId: m.studentId,
@@ -1531,8 +1886,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
           practical: m.practical,
           totalMarks,
           grade: gradeInfo?.grade || 'F',
-          gp: gradeInfo?.gp || 0,
-          highestMarks // Store the calculated highest marks
+          gp: gradeInfo?.gp || 0
         },
         create: {
           studentId: m.studentId,
@@ -1546,21 +1900,34 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
           practical: m.practical,
           totalMarks,
           grade: gradeInfo?.grade || 'F',
-          gp: gradeInfo?.gp || 0,
-          highestMarks
+          gp: gradeInfo?.gp || 0
         }
       });
-    })
-  );
+    }
 
-  // After saving this batch, we should ideally update the highestMarks for ALL results of this exam/subject
-  // to ensure consistency if the new highest mark comes from this batch.
-  await prisma.result.updateMany({
-    where: { examId, subjectId },
-    data: { highestMarks }
+    // Merge existing per-class bests with this batch's, per class. (#7)
+    const classHighestFinal = new Map<string, number>();
+    for (const [c, vals] of existingByClass) {
+      classHighestFinal.set(c, Math.max(...vals, classHighest.get(c) ?? 0));
+    }
+    for (const [c, v] of classHighest) {
+      if (!classHighestFinal.has(c)) classHighestFinal.set(c, v);
+    }
+
+    // Update highestMarks per class within the same transaction.
+    for (const [c, h] of classHighestFinal) {
+      const studentIds = students.filter(s => s.class === c).map(s => s.id);
+      if (studentIds.length === 0) continue;
+      await tx.result.updateMany({
+        where: { examId, subjectId, studentId: { in: studentIds } },
+        data: { highestMarks: h }
+      });
+    }
+
+    return classHighestFinal;
   });
 
-  res.json({ success: true, highestMarks });
+  res.json({ success: true, highestMarks: Object.fromEntries(result) });
 });
 
 // ===== Results reporting (overview / class / student) =====
@@ -1585,9 +1952,11 @@ async function buildExamReport(examId: string) {
   const subjectName = new Map<string, string>();
   const subjectFullMarksByClass = new Map<string, Map<string, number>>();
   const subjectDefaultFullMarks = new Map<string, number>();
+  const subjectCreditHours = new Map<string, number>();
   for (const s of schedules) {
     subjectName.set(s.subjectId, s.subject?.name || s.subjectId);
     if (!subjectDefaultFullMarks.has(s.subjectId)) subjectDefaultFullMarks.set(s.subjectId, s.fullMarks ?? 100);
+    if (!subjectCreditHours.has(s.subjectId)) subjectCreditHours.set(s.subjectId, Number(s.subject?.creditHours ?? 1) || 1);
     if (s.class?.name) {
       if (!subjectFullMarksByClass.has(s.subjectId)) subjectFullMarksByClass.set(s.subjectId, new Map());
       subjectFullMarksByClass.get(s.subjectId)!.set(s.class.name, s.fullMarks ?? 100);
@@ -1603,15 +1972,17 @@ async function buildExamReport(examId: string) {
   const students: any[] = [];
   for (const { student, subjects } of studentMap.values()) {
     if (!subjects.length) continue;
-    let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, failed = false;
+    let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, creditSum = 0, failed = false;
     for (const r of subjects) {
       totalMarks += r.totalMarks || 0;
       const fm = subjectFullMarksByClass.get(r.subjectId)?.get(student.class) ?? subjectDefaultFullMarks.get(r.subjectId) ?? 100;
       fullMarks += fm;
-      if (r.gp != null) { gpSum += r.gp; gpCount++; }
+      const ch = subjectCreditHours.get(r.subjectId) ?? 1;
+      if (r.gp != null) { gpSum += r.gp * ch; gpCount++; creditSum += ch; }
       if (r.grade && failGrades.has(r.grade)) failed = true;
     }
-    const gpa = gpCount ? round2(gpSum / gpCount) : 0;
+    // Credit-weighted GPA: Σ(GP × creditHours) / Σ(creditHours). (#11)
+    const gpa = creditSum > 0 ? round2(gpSum / creditSum) : (gpCount ? round2(gpSum / gpCount) : 0);
     const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
     let grade = '';
     if (failed) {
@@ -1855,6 +2226,8 @@ async function weightedAcademicScoreMap(academicYear: string): Promise<Map<strin
     try {
       students = (await buildExamReport(exam.id)).students;
     } catch (e) {
+      // Don't silently skip exams that fail to build — log why. (#12)
+      console.warn(`weightedAcademicScoreMap: skipping weight for exam ${exam.id} ("${exam.name}")`, (e as Error)?.message);
       continue;
     }
     for (const s of students) {
@@ -1911,6 +2284,17 @@ app.post('/results/:examId/status', authMiddleware, checkRole(['Admin']), async 
         ...(status === 'Published' ? { publishedAt: new Date(), publishedBy: (req as any).user?.email } : {}),
       }
     });
+
+    // Cascade the exam-level status onto every Result row so an exam is never
+    // "Published" while individual results remain at an older stage. (#15)
+    await prisma.result.updateMany({
+      where: { examId },
+      data: {
+        status: status === 'Published' ? 'Published' : 'Finalized',
+        ...(status === 'Published' ? { verifiedAt: new Date() } : {}),
+      },
+    });
+
     res.json({ id: updated.id, status: updated.status, publishedAt: updated.publishedAt, publishedBy: updated.publishedBy });
   } catch (error: any) {
     console.error('Error transitioning result status:', error);
@@ -1990,6 +2374,12 @@ app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async
       data: { status: 'Published', publishedAt: new Date(), publishedBy: adminUser, updatedAt: new Date() }
     });
 
+    // Cascade the Published status onto every Result row (#15).
+    await prisma.result.updateMany({
+      where: { examId },
+      data: { status: 'Published', verifiedAt: new Date() },
+    });
+
     res.json({ examId, status: 'Published', rankBy, publishId: publish.id, ranking });
   } catch (error: any) {
     console.error('Error publishing results:', error);
@@ -2009,6 +2399,11 @@ app.post('/results/:examId/unpublish', authMiddleware, checkRole(['Admin']), asy
     await prisma.exam.update({
       where: { id: examId },
       data: { status: 'Finalized', publishedAt: null, publishedBy: null, updatedAt: new Date() }
+    });
+    // Unpublishing is an edit workflow -> results become editable (Finalized). (#15)
+    await prisma.result.updateMany({
+      where: { examId },
+      data: { status: 'Finalized' },
     });
     res.json({ examId, status: 'Finalized' });
   } catch (error: any) {
@@ -2031,27 +2426,52 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
     ]);
 
     const issues: any[] = [];
-    // Subject list that should have marks.
+    // Subject list that should have marks (only subjects scheduled for this exam).
     const subjectIds = [...new Set(schedules.map((s) => s.subjectId))];
-    const enrolled = students; // all students; schedules may vary per class
+    // A schedule belongs to a grade+section (SchoolClass record). Only the grades AND
+    // sections actually scheduled for this exam count toward the readiness criteria.
+    // A schedule with no class is global (applies to every grade/section).
+    const keyOf = (cl: string, sec: string) => `${cl}|${sec}`;
+    const scheduledClassKeys = new Set(
+      schedules.filter((s) => s.class).map((s) => keyOf(s.class!.name, s.class!.section))
+    );
+    const hasGlobalSchedule = schedules.some((s) => !s.class);
+    const enrolled = hasGlobalSchedule
+      ? students
+      : students.filter((st) => scheduledClassKeys.has(keyOf(st.class, st.section)));
+    // Subjects that must have marks for a grade+section (global schedules count for all).
+    const subjectsForClass = (cl: string, sec: string) =>
+      new Set(
+        schedules.filter((s) => !s.class || keyOf(s.class!.name, s.class!.section) === keyOf(cl, sec)).map((s) => s.subjectId)
+      );
+    // Applicable (student, subject) pairs for this exam — only these count in the criteria.
+    const applicableKeys = new Set<string>();
+    for (const st of enrolled) {
+      for (const sid of subjectsForClass(st.class, st.section)) applicableKeys.add(`${st.id}|${sid}`);
+    }
 
     // Missing marks: students without a result for a scheduled subject applicable to their class.
+    // Counts unique (student, subject) pairs — duplicate schedule rows (e.g. same-named
+    // class records) must not inflate the tally.
     const resultKey = new Set(results.map((r) => `${r.studentId}|${r.subjectId}`));
     let missingMarks = 0;
     for (const st of enrolled) {
-      for (const sch of schedules) {
-        if (sch.class && sch.class.name !== st.class) continue;
-        const key = `${st.id}|${sch.subjectId}`;
+      for (const sid of subjectsForClass(st.class, st.section)) {
+        const key = `${st.id}|${sid}`;
         if (!resultKey.has(key)) {
           missingMarks++;
-          if (issues.length < 20) issues.push({ type: 'missing_marks', message: `${st.name} missing ${sch.subject?.name || sch.subjectId} marks`, studentId: st.id, subjectId: sch.subjectId });
+          if (issues.length < 20) {
+            const subjName = schedules.find((s) => s.subjectId === sid)?.subject?.name || sid;
+            issues.push({ type: 'missing_marks', message: `${st.name} missing ${subjName} marks`, studentId: st.id, subjectId: sid });
+          }
         }
       }
     }
 
-    // Missing practical marks.
+    // Missing practical marks (only for this exam's scheduled student/subject pairs).
     let missingPractical = 0;
     for (const r of results) {
+      if (!applicableKeys.has(`${r.studentId}|${r.subjectId}`)) continue;
       if ((r.practical == null || r.practical === 0) && r.written > 0) {
         missingPractical++;
         if (issues.length < 30) issues.push({ type: 'missing_practical', message: `${r.student?.name || r.studentId} missing practical marks`, studentId: r.studentId, subjectId: r.subjectId });
@@ -2062,12 +2482,13 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
     let overMax = 0;
     const subjectFull = new Map<string, Map<string, number>>();
     for (const sch of schedules) {
-      if (sch.class?.name) {
+      if (sch.class) {
+        const k = keyOf(sch.class.name, sch.class.section);
         if (!subjectFull.has(sch.subjectId)) subjectFull.set(sch.subjectId, new Map());
-        subjectFull.get(sch.subjectId)!.set(sch.class.name, Number(sch.fullMarks ?? 100));
+        subjectFull.get(sch.subjectId)!.set(k, Number(sch.fullMarks ?? 100));
       }
     }
-    const studentClassMap = new Map(students.map((s) => [s.id, s.class]));
+    const studentClassMap = new Map(students.map((s) => [s.id, keyOf(s.class, s.section)]));
     for (const r of results) {
       const cl = studentClassMap.get(r.studentId);
       const fm = cl && subjectFull.get(r.subjectId)?.get(cl);
@@ -2085,28 +2506,57 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
       issues.push({ type: 'attendance', message: 'No attendance records found for enrolled students' });
     }
 
-    const totalChecks = (subjectIds.length > 0 ? Math.max(1, subjectIds.length * enrolled.length) : 1) || 1;
-    const penaltyScore = missingMarks * 2 + missingPractical + overMax;
+    // Real duplicate result detection (#13): count rows sharing the same
+    // (studentId, examId, subjectId) composite key, which the unique index
+    // should prevent but legacy data may still violate.
+    const dupGroups = await prisma.result.groupBy({
+      by: ['studentId', 'examId', 'subjectId'],
+      where: { examId },
+      _count: true,
+      having: { studentId: { _count: { gt: 1 } } },
+    });
+    let duplicateCount = 0;
+    for (const g of dupGroups) {
+      duplicateCount += g._count || 0;
+      if (issues.length < 50) {
+        issues.push({
+          type: 'duplicate',
+          message: `Duplicate result rows (${g._count}) for student ${g.studentId}, subject ${g.subjectId}`,
+          studentId: g.studentId,
+          subjectId: g.subjectId,
+        });
+      }
+    }
+
+    const expectedMarks = enrolled.reduce((sum, st) => sum + subjectsForClass(st.class, st.section).size, 0);
+    const totalChecks = Math.max(1, subjectIds.length > 0 ? expectedMarks : 1);
+    const penaltyScore = missingMarks * 2 + missingPractical + overMax + duplicateCount * 3;
     const health = Math.max(0, Math.min(100, Math.round(100 - (penaltyScore / totalChecks) * 100)));
 
-    // --- Class-wise breakdown: how many marks yet to enter, per class ---
-    const classSet = new Set(students.map((s) => s.class).filter(Boolean));
-    // also include classes that appear only in schedules
-    for (const sch of schedules) if (sch.class?.name) classSet.add(sch.class.name);
-    const classBreakdown = Array.from(classSet).sort().map((clsName) => {
-      const enrolledInClass = students.filter((s) => s.class === clsName);
-      const applicableSchedules = schedules.filter((sch) => !sch.class || sch.class.name === clsName);
+    // --- Class-wise breakdown per grade+section scheduled for this exam ---
+    // Only cover grade+section groups that are scheduled (all sections when a global schedule exists).
+    const classSet = new Set<string>();
+    if (hasGlobalSchedule) {
+      for (const s of students) if (s.class && s.section) classSet.add(keyOf(s.class, s.section));
+    }
+    // also include grade+section groups that appear only in schedules
+    for (const sch of schedules) if (sch.class?.name) classSet.add(keyOf(sch.class.name, sch.class.section));
+    const classBreakdown = Array.from(classSet).sort().map((clsKey) => {
+      const [clsName, secName] = clsKey.split('|');
+      const clsDisplay = secName ? `${clsName} - Section ${secName}` : clsName;
+      const enrolledInClass = students.filter((s) => keyOf(s.class, s.section) === clsKey);
+      const applicableSchedules = schedules.filter((sch) => !sch.class || keyOf(sch.class.name, sch.class.section) === clsKey);
       const applicableSubjectIds = [...new Set(applicableSchedules.map((s) => s.subjectId))];
       const expected = enrolledInClass.length * applicableSubjectIds.length;
       const entered = results.filter((r) => {
         const cl = studentClassMap.get(r.studentId);
-        return cl === clsName && applicableSubjectIds.includes(r.subjectId);
+        return cl === clsKey && applicableSubjectIds.includes(r.subjectId);
       }).length;
       const classMissing = Math.max(0, expected - entered);
       const classOverMax = results.filter((r) => {
         const cl = studentClassMap.get(r.studentId);
-        if (cl !== clsName) return false;
-        const fm = subjectFull.get(r.subjectId)?.get(clsName);
+        if (cl !== clsKey) return false;
+        const fm = subjectFull.get(r.subjectId)?.get(clsKey);
         return fm != null && r.totalMarks > Number(fm);
       }).length;
       // missing per subject for tooltip
@@ -2116,7 +2566,7 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
         return { subjectId: sid, subject: subjName, missing: miss };
       }).filter((x) => x.missing > 0);
       return {
-        class: clsName,
+        class: clsDisplay,
         enrolled: enrolledInClass.length,
         subjects: applicableSubjectIds.length,
         expected,
@@ -2148,11 +2598,11 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
         allStudentsHaveMarks: missingMarks === 0,
         allSubjectsHaveMarks: subjectIds.length > 0 && missingMarks === 0,
         noMarksExceedMax: overMax === 0,
-        noDuplicateResults: true,
+        noDuplicateResults: duplicateCount === 0,
         practicalMarksEntered: missingPractical === 0,
         attendanceAvailable: attCount > 0
       },
-      counts: { missingMarks, missingPractical, overMax },
+      counts: { missingMarks, missingPractical, overMax, duplicateCount },
       // extended for inline verification panel
       remainingMarks,
       classBreakdown,
@@ -2343,7 +2793,7 @@ app.get('/results/:examId/report-card', authMiddleware, checkRole(['Admin']), as
 
     // Attendance percentage.
     const attendance = await prisma.attendance.findMany({ where: { studentId } });
-    const present = attendance.filter((a) => a.status === 'Present').length;
+    const present = attendance.filter((a) => normalizeAttendanceStatus(a.status) === 'Present').length;
     const attendancePct = attendance.length ? Math.round((present / attendance.length) * 100) : 0;
 
     res.json({
@@ -2488,8 +2938,8 @@ app.get('/schedules', async (req: Request, res: Response) => {
 
   const schedules = await prisma.examSchedule.findMany({
     where,
-    include: { subject: true },
-    orderBy: { date: 'asc' }
+    include: { subject: true, class: true },
+    orderBy: [{ date: 'asc' }, { sortOrder: 'asc' }]
   });
   res.json(schedules);
 });
@@ -2504,10 +2954,12 @@ app.post('/schedules', async (req: Request, res: Response) => {
     endTime: z.string().min(1),
     fullMarks: z.number().optional(),
     passMarks: z.number().optional(),
+    roomNo: z.string().optional(),
+    sortOrder: z.number().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks } = parsed.data;
+  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks, roomNo, sortOrder } = parsed.data;
 
   // Note: Using examId_subjectId_classId unique constraint if classId is provided, else examId_subjectId
   // But Prisma update/upsert requires a unique key.
@@ -2526,7 +2978,7 @@ app.post('/schedules', async (req: Request, res: Response) => {
   if (existing) {
     const updated = await prisma.examSchedule.update({
       where: { id: existing.id },
-      data: { date: new Date(date), startTime, endTime, fullMarks, passMarks }
+      data: { date: new Date(date), startTime, endTime, fullMarks, passMarks, roomNo: roomNo ?? null, sortOrder }
     });
     return res.json(updated);
   }
@@ -2534,13 +2986,15 @@ app.post('/schedules', async (req: Request, res: Response) => {
   const schedule = await prisma.examSchedule.create({
     data: {
       examId,
-      classId,
+      classId: classId || null,
       subjectId,
       date: new Date(date),
       startTime,
       endTime,
       fullMarks,
-      passMarks
+      passMarks,
+      roomNo: roomNo ?? null,
+      sortOrder
     }
   });
   res.json(schedule);
@@ -2559,6 +3013,481 @@ app.delete('/schedules/:id', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to delete schedule', details: error.message });
   }
 });
+
+// ---- Bulk schedule upsert (used by preset apply, manual fill, and drag reorder save) ----
+app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      examId: z.string().min(1),
+      items: z.array(z.object({
+        id: z.string().optional(),
+        classId: z.string().nullable().optional(),
+        subjectId: z.string().min(1),
+        date: z.string().optional(),
+        startTime: z.string().optional(),
+        endTime: z.string().optional(),
+        fullMarks: z.number().optional(),
+        passMarks: z.number().optional(),
+        roomNo: z.string().optional(),
+        sortOrder: z.number().optional(),
+      })).min(1),
+      replace: z.boolean().optional(), // if true, delete existing (examId, classId) rows not in items
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { examId, items, replace } = parsed.data;
+
+    const saved: any[] = [];
+    await prisma.$transaction(async (tx) => {
+      for (const item of items) {
+        const data: any = {};
+        if (item.date) data.date = new Date(item.date);
+        if (item.startTime !== undefined) data.startTime = item.startTime;
+        if (item.endTime !== undefined) data.endTime = item.endTime;
+        if (item.fullMarks !== undefined) data.fullMarks = item.fullMarks;
+        if (item.passMarks !== undefined) data.passMarks = item.passMarks;
+        if (item.roomNo !== undefined) data.roomNo = item.roomNo || null;
+        if (item.sortOrder !== undefined) data.sortOrder = item.sortOrder;
+
+        if (item.id) {
+          const row = await tx.examSchedule.update({ where: { id: item.id }, data });
+          saved.push(row);
+          continue;
+        }
+        // idempotent upsert by (examId, subjectId, classId)
+        const where = { examId, subjectId: item.subjectId, classId: item.classId || null };
+        const existing = await tx.examSchedule.findFirst({ where });
+        const base = { examId, subjectId: item.subjectId, classId: item.classId || null, ...data };
+        if (existing) {
+          saved.push(await tx.examSchedule.update({ where: { id: existing.id }, data }));
+        } else {
+          saved.push(await tx.examSchedule.create({ data: base }));
+        }
+      }
+      if (replace) {
+        const keepIds = items.map((i) => i.id).filter(Boolean) as string[];
+        await tx.examSchedule.deleteMany({
+          where: {
+            examId,
+            ...(keepIds.length ? { id: { notIn: keepIds } } : {}),
+          }
+        });
+      }
+    });
+
+    res.json(saved);
+  } catch (error: any) {
+    console.error('Bulk schedule error:', error);
+    res.status(500).json({ error: 'Failed to save schedules', details: error.message });
+  }
+});
+
+// ---- Reorder schedules (set sortOrder; optionally apply recalculated dates/times) ----
+app.post('/schedules/reorder', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      items: z.array(z.object({
+        id: z.string().min(1),
+        sortOrder: z.number().optional(),
+        date: z.string().optional(),
+        startTime: z.string().optional(),
+        endTime: z.string().optional(),
+      })).min(1),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { items } = parsed.data;
+
+    await prisma.$transaction(
+      items.map((item) => {
+        const data: any = {};
+        if (item.sortOrder !== undefined) data.sortOrder = item.sortOrder;
+        if (item.date) data.date = new Date(item.date);
+        if (item.startTime !== undefined) data.startTime = item.startTime;
+        if (item.endTime !== undefined) data.endTime = item.endTime;
+        return prisma.examSchedule.update({ where: { id: item.id }, data });
+      })
+    );
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Reorder schedule error:', error);
+    res.status(500).json({ error: 'Failed to reorder schedules', details: error.message });
+  }
+});
+
+// ---- Exam Presets ----
+app.get('/exam-presets', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const presets = await prisma.examPreset.findMany({
+      orderBy: { name: 'asc' },
+      include: {
+        classes: {
+          orderBy: { className: 'asc' },
+          include: {
+            subjects: {
+              orderBy: { position: 'asc' },
+              include: { presetClass: false },
+            }
+          }
+        }
+      }
+    });
+    res.json(presets);
+  } catch (error: any) {
+    console.error('Error fetching presets:', error);
+    res.status(500).json({ error: 'Failed to fetch presets' });
+  }
+});
+
+app.post('/exam-presets', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      name: z.string().min(1),
+      durationHours: z.number().nullable().optional(),
+      onePerDay: z.boolean().optional(),
+      gapDays: z.number().nullable().optional(),
+      gapAfterSubjects: z.array(z.object({ subjectId: z.string(), gapDays: z.number() })).optional(),
+      excludedWeekdays: z.array(z.number()).optional(),
+      defaultStartTime: z.string().nullable().optional(),
+      defaultEndTime: z.string().nullable().optional(),
+      classes: z.array(z.object({
+        className: z.string().min(1),
+        section: z.string().optional().nullable(),
+        subjects: z.array(z.object({ subjectId: z.string().min(1), position: z.number(), fullMarks: z.number().optional(), passMarks: z.number().optional() })).optional(),
+      })).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const d = parsed.data;
+
+    const preset = await prisma.examPreset.create({
+      data: {
+        name: d.name,
+        durationHours: d.durationHours,
+        onePerDay: d.onePerDay ?? true,
+        gapDays: d.gapDays,
+        gapAfterSubjects: (d.gapAfterSubjects || []) as any,
+        excludedWeekdays: (d.excludedWeekdays || [5, 6]) as any,
+        defaultStartTime: d.defaultStartTime,
+        defaultEndTime: d.defaultEndTime,
+        classes: d.classes?.length ? {
+          create: d.classes.map((c) => ({
+            className: c.className,
+            section: c.section || null,
+            subjects: c.subjects?.length ? {
+              create: c.subjects.map((s) => ({ subjectId: s.subjectId, position: s.position, fullMarks: s.fullMarks, passMarks: s.passMarks }))
+            } : undefined,
+          }))
+        } : undefined,
+      },
+      include: { classes: { include: { subjects: true } } },
+    });
+    res.status(201).json(preset);
+  } catch (error: any) {
+    console.error('Error creating preset:', error);
+    res.status(500).json({ error: 'Failed to create preset', details: error.message });
+  }
+});
+
+app.put('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const schema = z.object({
+      name: z.string().min(1).optional(),
+      durationHours: z.number().optional().nullable(),
+      onePerDay: z.boolean().optional(),
+      gapDays: z.number().optional().nullable(),
+      gapAfterSubjects: z.array(z.object({ subjectId: z.string(), gapDays: z.number() })).optional(),
+      excludedWeekdays: z.array(z.number()).optional(),
+      defaultStartTime: z.string().optional().nullable(),
+      defaultEndTime: z.string().optional().nullable(),
+      classes: z.array(z.object({
+        id: z.string().optional(),
+        className: z.string().min(1),
+        section: z.string().optional().nullable(),
+        subjects: z.array(z.object({ id: z.string().optional(), subjectId: z.string().min(1), position: z.number(), fullMarks: z.number().optional(), passMarks: z.number().optional() })).optional(),
+      })).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const d = parsed.data;
+
+    const existing = await prisma.examPreset.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Preset not found' });
+
+    const preset = await prisma.$transaction(async (tx) => {
+      const data: any = {};
+      if (d.name !== undefined) data.name = d.name;
+      if (d.onePerDay !== undefined) data.onePerDay = d.onePerDay;
+      if (d.durationHours !== undefined) data.durationHours = d.durationHours;
+      if (d.gapDays !== undefined) data.gapDays = d.gapDays;
+      if (d.gapAfterSubjects !== undefined) data.gapAfterSubjects = d.gapAfterSubjects as any;
+      if (d.excludedWeekdays !== undefined) data.excludedWeekdays = d.excludedWeekdays as any;
+      if (d.defaultStartTime !== undefined) data.defaultStartTime = d.defaultStartTime;
+      if (d.defaultEndTime !== undefined) data.defaultEndTime = d.defaultEndTime;
+
+      if (d.classes !== undefined) {
+        // rebuild classes+subjects
+        await tx.examPresetClass.deleteMany({ where: { presetId: id } });
+        if (d.classes.length) {
+          await tx.examPresetClass.createMany({
+            data: d.classes.map((c) => ({ presetId: id, className: c.className, section: c.section || null })),
+          });
+          const created = await tx.examPresetClass.findMany({ where: { presetId: id } });
+          for (const c of d.classes) {
+            const pc = created.find((x) => x.className === c.className && (x.section || null) === (c.section || null));
+            if (pc && c.subjects?.length) {
+              await tx.examPresetSubject.createMany({
+                data: c.subjects.map((s) => ({ presetClassId: pc.id, subjectId: s.subjectId, position: s.position, fullMarks: s.fullMarks, passMarks: s.passMarks })),
+              });
+            }
+          }
+        }
+      }
+
+      return tx.examPreset.update({
+        where: { id },
+        data,
+        include: { classes: { include: { subjects: { orderBy: { position: 'asc' } } } } },
+      });
+    });
+    res.json(preset);
+  } catch (error: any) {
+    console.error('Error updating preset:', error);
+    res.status(500).json({ error: 'Failed to update preset', details: error.message });
+  }
+});
+
+app.delete('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    await prisma.examPreset.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (error: any) {
+    console.error('Error deleting preset:', error);
+    res.status(500).json({ error: 'Failed to delete preset', details: error.message });
+  }
+});
+
+// ---- Apply a preset to an exam to build/refresh its schedule ----
+app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      examId: z.string().min(1),
+      presetId: z.string().min(1),
+      selectedClasses: z.array(z.object({ className: z.string().min(1), section: z.string().optional().nullable() })).optional(),
+      mode: z.enum(['auto', 'manual']).default('manual'),
+      startDate: z.string().nullable().optional(),
+      endDate: z.string().nullable().optional(),
+      startTime: z.string().nullable().optional(),
+      endTime: z.string().nullable().optional(),
+      gapDays: z.number().optional(),
+      excludedWeekdays: z.array(z.number()).optional(),
+      onePerDay: z.boolean().optional(),
+      replace: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const d = parsed.data;
+
+    const preset = await prisma.examPreset.findUnique({
+      where: { id: d.presetId },
+      include: { classes: { include: { subjects: { orderBy: { position: 'asc' } } } } },
+    });
+    if (!preset) return res.status(404).json({ error: 'Preset not found' });
+
+    const exam = await prisma.exam.findUnique({ where: { id: d.examId } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+    // resolve selected classes -> concrete SchoolClass ids (grade name + optional section)
+    const targets = d.selectedClasses && d.selectedClasses.length
+      ? d.selectedClasses
+      : preset.classes.map((c) => ({ className: c.className, section: c.section }));
+
+    const allClasses = await prisma.schoolClass.findMany();
+    const resolved: Array<{ pcId: string; classId: string | null; className: string; section: string | null; subjects: any[] }> = [];
+    for (const t of targets) {
+      const pc = preset.classes.find((c) => c.className === t.className && (c.section || null) === (t.section || null));
+      if (!pc) continue;
+      const matches = allClasses.filter((c) => c.name === t.className && (!pc.section || c.section === pc.section));
+      if (!matches.length) {
+        resolved.push({ pcId: pc.id, classId: null, className: t.className, section: pc.section || null, subjects: [...pc.subjects] });
+      } else {
+        for (const m of matches) {
+          resolved.push({ pcId: pc.id, classId: m.id, className: m.name, section: m.section || null, subjects: [...pc.subjects] });
+        }
+      }
+    }
+
+    // scheduling inputs (fallback to preset defaults)
+    const gapDays = d.gapDays ?? preset.gapDays ?? 0;
+    const excludedWeekdays = d.excludedWeekdays ?? (preset.excludedWeekdays as number[] ?? [5, 6]);
+    const onePerDay = d.onePerDay ?? preset.onePerDay ?? true;
+    const defaultStartTime = d.startTime ?? preset.defaultStartTime ?? '09:00';
+    const defaultEndTime = d.endTime ?? preset.defaultEndTime ?? null;
+
+    // Build output rows
+    const built: any[] = [];
+    for (const r of resolved) {
+      let cursor = d.startDate ? new Date(d.startDate) : new Date(exam.startDate);
+      let globalIdx = 0;
+      for (const subj of r.subjects) {
+        let date: Date | null = null;
+        if (d.mode === 'auto' && d.startDate) {
+          // walk to next allowed weekday
+          let guard = 0;
+          while (guard++ < 400) {
+            const dayOfWeek = cursor.getDay();
+            if (!excludedWeekdays.includes(dayOfWeek)) break;
+            cursor = addDaysLocal(cursor, 1);
+          }
+          date = new Date(cursor);
+          built.push({
+            examId: d.examId,
+            classId: r.classId,
+            subjectId: subj.subjectId,
+            date: date.toISOString(),
+            startTime: defaultStartTime,
+            endTime: defaultEndTime || `${addMinutesLocal(defaultStartTime, (preset.durationHours || 3) * 60)}`,
+            fullMarks: subj.fullMarks,
+            passMarks: subj.passMarks,
+            sortOrder: subj.position,
+          });
+          // advance cursor: one per day; after last subject or gap subject apply extra gap
+          cursor = addDaysLocal(cursor, 1);
+          const special = (preset.gapAfterSubjects as any[] || []).find((g) => g.subjectId === subj.subjectId);
+          const after = special?.gapDays ?? 0;
+          cursor = addDaysLocal(cursor, (onePerDay ? 1 : 0) + gapDays + after);
+          globalIdx++;
+        } else {
+          built.push({
+            examId: d.examId,
+            classId: r.classId,
+            subjectId: subj.subjectId,
+            date: null,
+            startTime: defaultStartTime,
+            endTime: defaultEndTime || '',
+            fullMarks: subj.fullMarks,
+            passMarks: subj.passMarks,
+            sortOrder: subj.position,
+          });
+        }
+      }
+    }
+
+    if (d.mode === 'auto') {
+      // persist computed rows (idempotent per exam/subject/class)
+      const saved: any[] = [];
+      await prisma.$transaction(async (tx) => {
+        if (d.replace) {
+          await tx.examSchedule.deleteMany({ where: { examId: d.examId } });
+        }
+        for (const b of built) {
+          const where = { examId: d.examId, subjectId: b.subjectId, classId: b.classId || null };
+          const data = {
+            date: new Date(b.date),
+            startTime: b.startTime,
+            endTime: b.endTime,
+            fullMarks: b.fullMarks,
+            passMarks: b.passMarks,
+            sortOrder: b.sortOrder,
+          };
+          const existing = await tx.examSchedule.findFirst({ where });
+          if (existing) saved.push(await tx.examSchedule.update({ where: { id: existing.id }, data }));
+          else saved.push(await tx.examSchedule.create({ data: { ...where, ...data } }));
+        }
+      });
+      const full = await prisma.examSchedule.findMany({
+        where: { examId: d.examId },
+        include: { subject: true },
+        orderBy: [{ date: 'asc' }, { sortOrder: 'asc' }],
+      });
+      return res.json({ mode: 'auto', items: built, saved: full });
+    }
+
+    res.json({ mode: 'manual', items: built });
+  } catch (error: any) {
+    console.error('Error applying preset:', error);
+    res.status(500).json({ error: 'Failed to apply preset', details: error.message });
+  }
+});
+
+// ---- Save as Preset from an existing exam schedule ----
+app.post('/exam-presets/save-from-exam', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({ examId: z.string().min(1), name: z.string().min(1) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { examId, name } = parsed.data;
+
+    const schedules = await prisma.examSchedule.findMany({
+      where: { examId },
+      include: { class: true, subject: true },
+      orderBy: [{ date: 'asc' }, { sortOrder: 'asc' }],
+    });
+
+    // group by (class name, section)
+    const groups: Record<string, { className: string; section: string | null; rows: any[] }> = {};
+    for (const s of schedules) {
+      const className = s.class?.name || '_all';
+      const section = s.class?.section || null;
+      const key = `${className}|${section || ''}`;
+      (groups[key] ||= { className: className === '_all' ? '' : className, section, rows: [] }).rows.push(s);
+    }
+
+    const availableClasses = await prisma.schoolClass.findMany({ select: { name: true, section: true } });
+
+    const preset = await prisma.examPreset.create({
+      data: {
+        name,
+        durationHours: 3,
+        onePerDay: true,
+        gapAfterSubjects: [],
+        excludedWeekdays: [5, 6],
+        defaultStartTime: '09:00',
+        defaultEndTime: null,
+        classes: {
+          create: Object.values(groups).map((g) => {
+            // position = index within its own (class,date) ordering
+            const sorted = [...g.rows].sort((a, b) =>
+              (a.date.getTime() - b.date.getTime()) || ((a.sortOrder ?? 0) - (b.sortOrder ?? 0)));
+            const subjects = sorted.map((r, i) => ({
+              subjectId: r.subjectId,
+              position: i + 1,
+              fullMarks: r.fullMarks,
+              passMarks: r.passMarks,
+            }));
+            // If this group represents a grade that has no concrete class row yet, map to grade name; else className
+            const className = g.className || availableClasses[0]?.name || '_all';
+            return {
+              className: className === '_all' ? 'All Classes' : className,
+              section: g.section,
+              subjects: { create: subjects },
+            };
+          }),
+        },
+      },
+      include: { classes: { include: { subjects: true } } },
+    });
+    res.status(201).json(preset);
+  } catch (error: any) {
+    console.error('Error saving preset from exam:', error);
+    res.status(500).json({ error: 'Failed to save preset', details: error.message });
+  }
+});
+
+// date helpers for preset auto-scheduling
+function addDaysLocal(d: Date, n: number): Date {
+  const nd = new Date(d);
+  nd.setDate(nd.getDate() + n);
+  return nd;
+}
+function addMinutesLocal(time: string, mins: number): string {
+  const [h, m] = time.split(':').map(Number);
+  const total = (h || 0) * 60 + (m || 0) + mins;
+  const nh = Math.floor(total / 60) % 24;
+  const nm = total % 60;
+  return `${String(nh).padStart(2, '0')}:${String(nm).padStart(2, '0')}`;
+}
 
 // Institute Profile
 app.get('/institute', async (req: Request, res: Response) => {
@@ -2999,7 +3928,8 @@ app.get('/attendance', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date } = parsed.data as any;
-  const day = new Date(String(date));
+  // Standardize the day to the same UTC-midnight form used at save time.
+  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
   const students = await prisma.student.findMany({ where: { class: className, section }, orderBy: { roll: 'asc' } });
   const records = await prisma.attendance.findMany({
     where: { studentId: { in: students.map((s) => s.id) }, date: day },
@@ -3009,7 +3939,7 @@ app.get('/attendance', async (req: Request, res: Response) => {
     studentId: s.id,
     studentName: s.name,
     roll: s.roll,
-    status: map.get(s.id) ?? 'Present',
+    status: normalizeAttendanceStatus(map.get(s.id)) ,
   }));
   res.json(result);
 });
@@ -3361,7 +4291,7 @@ app.get('/attendance/teachers', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { date } = parsed.data;
-  const day = new Date(String(date));
+  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
 
   const teachers = await prisma.teacher.findMany({ orderBy: { name: 'asc' } });
   const records = await prisma.teacherAttendance.findMany({
@@ -3372,7 +4302,7 @@ app.get('/attendance/teachers', async (req: Request, res: Response) => {
   const result = teachers.map((t) => ({
     teacherId: t.id,
     teacherName: t.name,
-    status: map.get(t.id) ?? 'Present',
+    status: normalizeAttendanceStatus(map.get(t.id)),
   }));
   res.json(result);
 });
@@ -3602,18 +4532,19 @@ app.post('/attendance/save', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date, records } = parsed.data as any;
-  const day = new Date(String(date));
+  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
   const students = await prisma.student.findMany({ where: { class: className, section } });
   const ids = new Set(students.map((s) => s.id));
   const toSave = records.filter((r: any) => ids.has(r.studentId));
   await prisma.$transaction(
-    toSave.map((r: any) =>
-      prisma.attendance.upsert({
+    toSave.map((r: any) => {
+      const status = normalizeAttendanceStatus(r.status);
+      return prisma.attendance.upsert({
         where: { studentId_date: { studentId: r.studentId, date: day } },
-        update: { status: r.status },
-        create: { studentId: r.studentId, date: day, status: r.status },
-      })
-    )
+        update: { status },
+        create: { studentId: r.studentId, date: day, status },
+      });
+    })
   );
   res.status(201).json({ ok: true });
 });
@@ -5138,11 +6069,14 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
     }
 
     const allowed = await teacherAllowedClassIds(teacher, 'attendance');
-    if (!allowed.has(classId as string)) {
+    if (allowed.size === 0) {
+      return res.status(403).json({ error: 'Your attendance permission is not configured' });
+    }
+    if (!allowed.has(String(classId))) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    const classInfo = await prisma.schoolClass.findUnique({ where: { id: classId as string } });
+    const classInfo = await prisma.schoolClass.findUnique({ where: { id: String(classId) } });
     if (!classInfo) {
       return res.status(404).json({ error: 'Class not found' });
     }
@@ -5161,9 +6095,11 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
       orderBy: { roll: 'asc' }
     });
 
-    // Load any existing attendance for this class on the requested date
-    const dayStart = new Date(String(date));
-    const dayEnd = new Date(dayStart.getTime() + 86400000);
+    // Load any existing attendance for this class on the requested date.
+    // Standardize the day to the UTC-midnight form used at save time.
+    const dayStart = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
     const savedRecords = await prisma.attendance.findMany({
       where: {
         date: { gte: dayStart, lt: dayEnd },
@@ -5177,7 +6113,7 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
       studentId: student.id,
       studentName: student.name,
       roll: student.roll,
-      status: statusMap.get(student.id) || 'present'
+      status: statusMap.has(student.id) ? lowerAttendanceStatus(statusMap.get(student.id)) : 'present'
     }));
 
     res.json(studentData);
@@ -5207,17 +6143,20 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
     }
 
     const allowed = await teacherAllowedClassIds(teacher, 'attendance');
-    if (!allowed.has(classId)) {
+    if (allowed.size === 0) {
+      return res.status(403).json({ error: 'Your attendance permission is not configured' });
+    }
+    if (!allowed.has(String(classId))) {
       return res.status(403).json({ error: 'You are not assigned to this class' });
     }
 
-    const classInfo = await prisma.schoolClass.findUnique({ where: { id: classId } });
+    const classInfo = await prisma.schoolClass.findUnique({ where: { id: String(classId) } });
     if (!classInfo) {
       return res.status(404).json({ error: 'Class not found' });
     }
 
     // Save attendance to the Attendance table (same as /attendance/save)
-    const day = new Date(String(date));
+    const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
     const students = await prisma.student.findMany({
       where: { class: classInfo.name, section: classInfo.section }
     });
@@ -5229,13 +6168,14 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
     }
 
     await prisma.$transaction(
-      toSave.map((r: any) =>
-        prisma.attendance.upsert({
+      toSave.map((r: any) => {
+        const status = normalizeAttendanceStatus(r.status);
+        return prisma.attendance.upsert({
           where: { studentId_date: { studentId: r.studentId, date: day } },
-          update: { status: String(r.status) },
-          create: { studentId: r.studentId, date: day, status: String(r.status) }
-        })
-      )
+          update: { status },
+          create: { studentId: r.studentId, date: day, status }
+        });
+      })
     );
 
     res.json({ success: true, message: 'Attendance saved successfully', count: toSave.length });
@@ -5698,6 +6638,24 @@ function localDayKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Canonical attendance statuses. Storage + kept titlecased so every consumer
+// (admin page, teacher page, dashboards, matrix) sees one consistent value.
+const ATTENDANCE_STATUSES = ['Present', 'Absent', 'Late', 'Leave'] as const;
+// Normalize any stored/ingested status string to the canonical titlecase form.
+// Handles legacy mixed-case values ('present', 'PRESENT', 'P', 'A', 'L', 'LV').
+function normalizeAttendanceStatus(raw: unknown): string {
+  const s = String(raw ?? '').trim().toUpperCase();
+  if (s === 'P' || s === 'PRESENT') return 'Present';
+  if (s === 'A' || s === 'ABSENT' || s === 'N/A') return 'Absent';
+  if (s === 'L' || s === 'LATE') return 'Late';
+  if (s === 'LV' || s === 'LEAVE' || s === 'ON LEAVE' || s === 'ON-LEAVE' || s === 'HALF-DAY' || s === 'H') return 'Leave';
+  return 'Present';
+}
+// Same as normalizeAttendanceStatus but lowercase (teacher page expects this).
+function lowerAttendanceStatus(raw: unknown): string {
+  return normalizeAttendanceStatus(raw).toLowerCase();
+}
+
 // Day key from a stored attendance date (UTC), e.g. "2026-08-21".
 function utcDayKeyOf(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
@@ -5761,7 +6719,7 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
       (s) => (classRecord && s.classId === classRecord.id) || s.classId === null
     );
 
-    const present = attendance.filter((a) => a.status === 'Present').length;
+    const present = attendance.filter((a) => normalizeAttendanceStatus(a.status) === 'Present').length;
     const total = attendance.length;
     const attendancePct = total ? Math.round((present / total) * 100) : 0;
 
@@ -5934,14 +6892,16 @@ app.get('/student/results', async (req: Request, res: Response) => {
 
       const totalMarks = list.reduce((s, r) => s + (r.totalMarks || 0), 0);
       let fullMarks = 0;
-      let gpSum = 0, gpCount = 0, failed = false;
+      let gpSum = 0, gpCount = 0, creditSum = 0, failed = false;
       for (const r of list) {
         const sc = examSchedules.find((s) => s.subjectId === r.subjectId && s.class?.name === student.class);
         fullMarks += Number(sc?.fullMarks ?? 100);
-        if (r.gp != null) { gpSum += r.gp; gpCount++; }
+        const ch = Number(sc?.subject?.creditHours ?? 1) || 1;
+        if (r.gp != null) { gpSum += r.gp * ch; gpCount++; creditSum += ch; }
         if (r.grade && failGrades.has(r.grade)) failed = true;
       }
-      const avgGpa = gpCount ? round2(gpSum / gpCount) : 0;
+      // Credit-weighted GPA: Σ(GP × creditHours) / Σ(creditHours). (#11)
+      const avgGpa = creditSum > 0 ? round2(gpSum / creditSum) : (gpCount ? round2(gpSum / gpCount) : 0);
       const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
       let grade = '—';
       if (failed) {
@@ -6070,7 +7030,7 @@ app.get('/student/attendance', async (req: Request, res: Response) => {
       percentage: total ? Math.round((present / total) * 100) : 0,
       totalClasses: total,
       present,
-      absent: attendance.filter((a) => a.status === 'Absent').length,
+      absent: attendance.filter((a) => normalizeAttendanceStatus(a.status) === 'Absent').length,
     };
 
     const records = attendance.map((r) => ({

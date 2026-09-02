@@ -82,6 +82,7 @@ model Student {
   fees          StudentFee[]
   attendance    Attendance[]
   results       Result[]
+  examAttendances ExamAttendance[]
   invoices      Invoice[]
   assignments   StudentFeeAssignment[]
   sales         Sale[]
@@ -449,14 +450,16 @@ model StudentFeeAssignment {
 }
 
 model Subject {
-  id        String   @id @default(cuid())
-  name      String
-  code      String   @unique
-  type      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id @default(cuid())
+  name        String
+  code        String   @unique
+  type        String
+  creditHours Float    @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   schedules ExamSchedule[]
   classSubjects ClassSubjectTeacher[]
+  examAttendances ExamAttendance[]
 }
 
 model Attendance {
@@ -469,7 +472,7 @@ model Attendance {
   student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, date])
-  @@index([date])
+  @@index([date, status])
 }
 
 model TeacherAttendance {
@@ -496,7 +499,7 @@ model ExamType {
 model Exam {
   id          String    @id @default(cuid())
   name        String
-  typeId      String    @default("") // Link to ExamType
+  typeId      String // Link to ExamType (required, no empty-string default)
   type        ExamType  @relation(fields: [typeId], references: [id])
   startDate   DateTime
   endDate     DateTime
@@ -513,6 +516,31 @@ model Exam {
   schedules     ExamSchedule[]
   publish        ResultPublish?
   validationRuns ResultValidationRun[]
+  attendances   ExamAttendance[]
+
+  @@index([academicYear, status])
+}
+
+model ExamAttendance {
+  id          String    @id @default(cuid())
+  examId      String
+  studentId   String
+  subjectId   String
+  date        DateTime
+  status      String    @default("PRESENT") // PRESENT, ABSENT, LATE, EXCUSED
+  
+  // Optional: for EXCUSED status
+  reason      String?
+  notes       String?
+  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  exam        Exam      @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student     Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject     Subject   @relation(fields: [subjectId], references: [id])
+
+  @@unique([examId, studentId, subjectId, date])
 }
 
 model Result {
@@ -544,6 +572,7 @@ model Result {
   exam      Exam     @relation(fields: [examId], references: [id])
 
   @@unique([studentId, examId, subjectId])
+  @@index([examId, studentId])
 }
 
 model ResultPublish {
@@ -579,6 +608,7 @@ model ExamSchedule {
   fullMarks Int?
   passMarks Int?
   roomNo    String?
+  sortOrder Int?     // ordinal within a class/day for drag-rearrange
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   exam      Exam     @relation(fields: [examId], references: [id])
@@ -586,6 +616,42 @@ model ExamSchedule {
   class     SchoolClass? @relation(fields: [classId], references: [id])
 
   @@unique([examId, subjectId, classId])
+}
+
+model ExamPreset {
+  id                 String   @id @default(cuid())
+  name               String
+  durationHours      Int?
+  onePerDay          Boolean  @default(true)
+  gapDays            Int?                          // global gap between consecutive exams
+  gapAfterSubjects   Json     @default("[]")       // [{subjectId, gapDays}] special gaps
+  excludedWeekdays   Json     @default("[5,6]")    // e.g. [5,6] = Fri/Sat
+  defaultStartTime   String?
+  defaultEndTime     String?
+  classes            ExamPresetClass[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model ExamPresetClass {
+  id           String   @id @default(cuid())
+  presetId     String
+  className    String   // grade NAME only (not id) so presets are reusable across years
+  section      String?  // e.g. "Science" | "Commerce" | null = all sections of that grade
+  subjects     ExamPresetSubject[]
+  preset       ExamPreset @relation(fields: [presetId], references: [id], onDelete: Cascade)
+
+  @@unique([presetId, className, section])
+}
+
+model ExamPresetSubject {
+  id            String  @id @default(cuid())
+  presetClassId String
+  subjectId     String
+  position      Int
+  fullMarks     Int?
+  passMarks     Int?
+  presetClass   ExamPresetClass @relation(fields: [presetClassId], references: [id], onDelete: Cascade)
 }
 
 model GradingSystem {
@@ -596,7 +662,7 @@ model GradingSystem {
   gp           Float    @default(0) // Grade Point
   status       String   // 'PASS' or 'FAIL'
   
-  examTypeId   String   @default("")
+  examTypeId   String   // Link to ExamType (required, no empty-string default)
   examType     ExamType @relation(fields: [examTypeId], references: [id])
   
   writtenPass  Float?
