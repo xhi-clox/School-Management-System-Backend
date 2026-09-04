@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { authMiddleware } from './auth';
 import { checkRole } from './checkRole';
+import { validateGradingBands, defaultComponentConfig } from './grading-validation';
 
 
 const prisma = new PrismaClient();
@@ -1408,6 +1409,23 @@ app.post('/exam-types', async (req: Request, res: Response) => {
   }
 });
 
+app.patch('/exam-types/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const schema = z.object({ name: z.string().min(1).max(100) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const type = await prisma.examType.update({ where: { id }, data: { name: parsed.data.name } });
+    res.json(type);
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Exam type not found' });
+    }
+    console.error('Rename exam type error:', error);
+    res.status(500).json({ error: 'Failed to rename exam type', details: error.message });
+  }
+});
+
 app.delete('/exam-types/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -1785,6 +1803,65 @@ app.get('/exams/:examId/attendance/report', async (req: Request, res: Response) 
   }
 });
 
+// Build a FROZEN grading snapshot (bands + template reference) for a schedule at
+// scheduling time. Later edits to the grading template never affect schedules
+// that already carry this snapshot (non-retroactivity safeguard). Returns null
+// when there is no usable grading template to snapshot.
+async function buildGradingSnapshot(
+  gradingTypeId: string | null | undefined,
+  fullMarks: number | null | undefined,
+  db: Prisma.TransactionClient | PrismaClient = prisma,
+  snapshotDate: Date = new Date()
+): Promise<any> {
+  const tplId = gradingTypeId;
+  if (!tplId) return null;
+  const [bands, examType] = await Promise.all([
+    db.gradingSystem.findMany({
+      where: { examTypeId: tplId },
+      orderBy: { minPercent: 'asc' },
+      select: { grade: true, minPercent: true, maxPercent: true, gp: true, status: true, totalFull: true },
+    }),
+    db.examType.findUnique({ where: { id: tplId }, select: { name: true } }),
+  ]);
+  if (!bands || bands.length === 0) return null;
+  // The template's own totalFull defines the reference scale for its mark-based
+  // bands (e.g. 50 for the "50 Marks" template). It is authoritative over any
+  // client-supplied fullMarks so marks-based scales snapshot correctly.
+  const templateTotalFull = bands.find(b => (b as any).totalFull && (b as any).totalFull > 0)?.totalFull;
+  return {
+    templateId: tplId,
+    templateName: examType?.name || 'Grading Template',
+    snapshotDate: snapshotDate.toISOString(),
+    totalFull: (templateTotalFull && templateTotalFull > 0) ? templateTotalFull : (fullMarks && fullMarks > 0 ? fullMarks : 100),
+    bands,
+  };
+}
+
+// Return the authoritative full-marks scale for a resolved grading template
+// (the template's own totalFull), or null when none resolves.
+async function fetchTemplateTotalFull(
+  gradingTypeId: string | null | undefined,
+  db: Prisma.TransactionClient | PrismaClient = prisma
+): Promise<number | null> {
+  const tplId = gradingTypeId;
+  if (!tplId) return null;
+  const row = await db.gradingSystem.findFirst({
+    where: { examTypeId: tplId, totalFull: { gt: 0 } },
+    select: { totalFull: true },
+    orderBy: { totalFull: 'desc' },
+  });
+  return row && (row.totalFull ?? 0) > 0 ? row.totalFull : null;
+}
+
+// Resolve which grading template id a schedule should use (explicit override ->
+// exam type). Used by both snapshot capture and grade calculation.
+function resolveGradingTypeId(
+  scheduleGradingTypeId: string | null | undefined,
+  examTypeId: string | null | undefined
+): string | null {
+  return scheduleGradingTypeId || examTypeId || null;
+}
+
 // Results
 app.get('/results', async (req: Request, res: Response) => {
   const { examId, subjectId, studentIds } = req.query as any;
@@ -1830,24 +1907,116 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
+  // Check if exam is published (prevent editing)
+  if (exam.status === 'Published') {
+    return res.status(403).json({
+      error: 'Cannot edit marks for published results',
+      message: 'Please unpublish the exam first to make corrections',
+      examStatus: exam.status
+    });
+  }
+
   // Fetch all grading systems for per-subject grading support (gradingTypeId per ExamSchedule)
   const allGrading = await prisma.gradingSystem.findMany({ orderBy: { minPercent: 'desc' } });
   const gradingByType = new Map<string, typeof allGrading>();
   for (const g of allGrading) {
-    if (!gradingByType.has(g.examTypeId)) gradingByType.set(g.examTypeId, []);
-    gradingByType.get(g.examTypeId)!.push(g);
+    const key = g.examTypeId ?? '__template__';
+    if (!gradingByType.has(key)) gradingByType.set(key, []);
+    gradingByType.get(key)!.push(g);
   }
-  const defaultGrading = gradingByType.get(exam.typeId) || [];
+  const defaultGrading = gradingByType.get(exam.typeId ?? '') || [];
   const grading = defaultGrading; // keep for backwards compat
 
   const studentMap = new Map(students.map(s => [s.id, s]));
 
-  // Default pass config (when schedule has no override) — 0 means not included / optional
+  // STRICT COMPONENT VALIDATION - Check each student's marks against schedule configuration
+  for (const m of marks) {
+    const studentClass = studentMap.get(m.studentId)?.class;
+    const schedule = schedules.find(s => s.class?.name === studentClass && s.subjectId === subjectId);
+    
+    if (!schedule) {
+      return res.status(400).json({
+        error: `No schedule found for student ${m.studentId} (class: ${studentClass})`
+      });
+    }
+    
+    const { writtenFullMarks: sW, mcqFullMarks: sM, practicalFullMarks: sP } = schedule;
+    // Resolve component full marks. Prefer the schedule's own snapshot, but fall
+    // back to the grading template referenced by the schedule's gradingTypeId
+    // (or the exam type) when the schedule has no component split stored.
+    const gradingForSched = gradingByType.get(schedule.gradingTypeId || exam.typeId) || defaultGrading;
+    const tpl = gradingForSched[0] as any;
+    const writtenFullMarks = (sW || 0) > 0 ? sW : (tpl?.writtenFull ?? 0);
+    const mcqFullMarks = (sM || 0) > 0 ? sM : (tpl?.mcqFull ?? 0);
+    const practicalFullMarks = (sP || 0) > 0 ? sP : (tpl?.practicalFull ?? 0);
+    
+    // Check written marks
+    if ((writtenFullMarks || 0) === 0 && m.written !== 0) {
+      return res.status(400).json({
+        error: `Written marks must be 0 (component disabled)`,
+        studentId: m.studentId
+      });
+    }
+    if (m.written > (writtenFullMarks || 0)) {
+      return res.status(400).json({
+        error: `Written marks (${m.written}) exceed maximum (${writtenFullMarks})`,
+        studentId: m.studentId
+      });
+    }
+    
+    // Check MCQ marks
+    if ((mcqFullMarks || 0) === 0 && m.mcq !== 0) {
+      return res.status(400).json({
+        error: `MCQ marks must be 0 (component disabled)`,
+        studentId: m.studentId
+      });
+    }
+    if (m.mcq > (mcqFullMarks || 0)) {
+      return res.status(400).json({
+        error: `MCQ marks (${m.mcq}) exceed maximum (${mcqFullMarks})`,
+        studentId: m.studentId
+      });
+    }
+    
+    // Check Practical marks
+    if ((practicalFullMarks || 0) === 0 && m.practical !== 0) {
+      return res.status(400).json({
+        error: `Practical marks must be 0 (component disabled)`,
+        studentId: m.studentId
+      });
+    }
+    if (m.practical > (practicalFullMarks || 0)) {
+      return res.status(400).json({
+        error: `Practical marks (${m.practical}) exceed maximum (${practicalFullMarks})`,
+        studentId: m.studentId
+      });
+    }
+    
+    // Check absence
+    const attendance = await prisma.examAttendance.findFirst({
+      where: { examId, studentId: m.studentId, subjectId }
+    });
+    
+    if (attendance && attendance.status === 'ABSENT') {
+      return res.status(400).json({
+        error: `Cannot enter marks for absent student`,
+        studentId: m.studentId,
+        studentName: studentMap.get(m.studentId)?.class
+      });
+    }
+    
+    // Validate total
+    const totalMarks = m.written + m.mcq + m.practical;
+    if (totalMarks > (schedule.fullMarks || 100)) {
+      return res.status(400).json({
+        error: `Total marks (${totalMarks}) exceed full marks (${schedule.fullMarks})`,
+        studentId: m.studentId
+      });
+    }
+  }
+
+  // Default pass config (when schedule has no override) — used as fallback for template config
   const passConfig = defaultGrading.length > 0 ? defaultGrading[0] : null;
-  const wPassDefault = passConfig?.writtenPass ?? 0;
-  const mPassDefault = passConfig?.mcqPass ?? 0;
-  const pPassDefault = (passConfig as any)?.practicalPass ?? 0;
-  const tPassDefault = passConfig?.totalPass ?? 0;
 
   // Map class name -> full marks + pass marks for this subject (per class). (#8)
   // Avoid positional schedules[0] fallback which is fragile if ordering changes.
@@ -1885,16 +2054,52 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
       // Per-subject grading: use schedule's gradingTypeId if set, otherwise exam's type
       const scheduleForStudent = schedules.find(s => (s.class?.name === studentClass) && s.subjectId === subjectId) as any;
-      const gradingTypeIdForThis = scheduleForStudent?.gradingTypeId || exam.typeId;
-      const gradingForThis = gradingByType.get(gradingTypeIdForThis) || defaultGrading;
-      const passCfg = gradingForThis.length > 0 ? gradingForThis[0] : passConfig;
-      const wPass = passCfg?.writtenPass ?? wPassDefault;
-      const mPass = passCfg?.mcqPass ?? mPassDefault;
-      const pPass = (passCfg as any)?.practicalPass ?? pPassDefault;
-      const tPass = passCfg?.totalPass ?? tPassDefault;
-      const writtenMandatory = (wPass ?? 0) > 0;
-      const mcqMandatory = (mPass ?? 0) > 0;
-      const practicalMandatory = (pPass ?? 0) > 0;
+      const gradingTypeIdForThis = resolveGradingTypeId(scheduleForStudent?.gradingTypeId, exam.typeId);
+      const gradingForThis = gradingByType.get(gradingTypeIdForThis || '') || defaultGrading;
+
+      // Snapshot-first: if this schedule carries a frozen grading snapshot, use its
+      // bands so later template edits never change already-scheduled exams. Fall
+      // back to the live GradingSystem rows for schedules created before snapshots.
+      let gradingBandsForThis = gradingForThis;
+      // Reference full marks baked into the snapshot. Band bounds are stored as
+      // marks relative to this reference; we rebase them to percentages below so
+      // both marks-based (50-scale) and percentage-based (100-scale) templates
+      // grade consistently (e.g. CT A+ [40,50] out of 50 -> 80%-100%).
+      let snapTotalFull = 0;
+      if (scheduleForStudent?.gradingSnapshot) {
+        try {
+          const snap = JSON.parse(scheduleForStudent.gradingSnapshot);
+          if (snap?.bands && Array.isArray(snap.bands) && snap.bands.length > 0) {
+            gradingBandsForThis = snap.bands;
+            if (typeof snap.totalFull === 'number' && snap.totalFull > 0) {
+              snapTotalFull = snap.totalFull;
+            }
+          }
+        } catch (e) {
+          console.error('Failed to parse grading snapshot, falling back to live grading:', e);
+        }
+      }
+      const tplCfg = (gradingForThis[0] || passConfig) as any;
+      const wFull = (scheduleForStudent?.writtenFullMarks ?? 0) > 0 ? scheduleForStudent.writtenFullMarks : (tplCfg?.writtenFull ?? 0);
+      const mFull = (scheduleForStudent?.mcqFullMarks ?? 0) > 0 ? scheduleForStudent.mcqFullMarks : (tplCfg?.mcqFull ?? 0);
+      const pFull = (scheduleForStudent?.practicalFullMarks ?? 0) > 0 ? scheduleForStudent.practicalFullMarks : (tplCfg?.practicalFull ?? 0);
+      const effFull = (scheduleForStudent?.fullMarks ?? 0) > 0 ? scheduleForStudent.fullMarks : ((tplCfg?.totalFull ?? 0) || ((wFull || 0) + (mFull || 0) + (pFull || 0)));
+
+      // Use defaultComponentConfig as the single source of truth for pass marks.
+      // Grading band rows often carry stale pass values (e.g. totalPass=40 from a
+      // 100-mark default) that become absurdly high when the exam is 50 marks.
+      const effDefs = defaultComponentConfig(effFull, {
+        mcqIncluded: (mFull || 0) > 0,
+        practicalIncluded: (pFull || 0) > 0,
+      });
+      const wPass = effDefs.writtenPass;
+      const mPass = effDefs.mcqPass;
+      const pPass = effDefs.practicalPass;
+      const tPass = effDefs.totalPass;
+
+      const writtenMandatory = (wFull || 0) > 0 && (effDefs.writtenPass > 0);
+      const mcqMandatory = (mFull || 0) > 0 && (effDefs.mcqPass > 0);
+      const practicalMandatory = (pFull || 0) > 0 && (effDefs.practicalPass > 0);
 
       let isFail = false;
       if (writtenMandatory && m.written < wPass) isFail = true;
@@ -1903,13 +2108,37 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       if (totalMarks < tPass) isFail = true;
 
       // Zero-division guard. (#14)
-      const percent = fullMarks > 0 ? (totalMarks / fullMarks) * 100 : 0;
+      const percent = effFull > 0 ? (totalMarks / effFull) * 100 : 0;
 
       let gradeInfo;
       if (isFail) {
-        gradeInfo = gradingForThis.find(g => g.status === 'FAIL') || { grade: 'F', gp: 0 };
+        gradeInfo = gradingBandsForThis.find((g: any) => g.status === 'FAIL') || { grade: 'F', gp: 0 };
       } else {
-        gradeInfo = gradingForThis.find(g => percent >= g.minPercent && percent <= g.maxPercent) || gradingForThis[gradingForThis.length - 1];
+        // Match percentage. Band bounds are stored as marks relative to a
+        // reference full (snapshot's totalFull for frozen data, the template's
+        // totalFull for live grading). Rebase each bound to a percentage so both
+        // marks-based (50-scale, e.g. CT A+ [40,50] -> 80%-100%) and
+        // percentage-based (100-scale, e.g. Semester A+ [80,100] -> 80%-100%)
+        // templates grade identically. Min is inclusive. We pick the highest band
+        // whose rebased min <= the student's percentage; this is robust at exact
+        // band boundaries (e.g. marks-based A [35,39] vs A+ [40,50] out of 50: a
+        // mark of 39 = 78% belongs in A, 40 = 80% in A+) and avoids the gaps that
+        // an exclusive-max rule would introduce on integer marks scales.
+        const bandRefFull = snapTotalFull || ((tplCfg as any)?.totalFull ?? 0) || 100;
+        // Derive the reference scale from the bands themselves: the highest maxPercent
+        // in the bands equals the total full marks those bands were designed for.
+        // This is more reliable than bandRefFull which may come from the exam/schedule
+        // and could mismatch the bands' own scale (e.g. 50-mark CT bands used for a
+        // 100-mark exam).
+        const bandMax = Math.max(...gradingBandsForThis.map((g: any) => Number(g.maxPercent) || 0));
+        const asPctRef = (bandMax > 0 && bandRefFull > 0) ? Math.min(bandMax, bandRefFull) : (bandMax || bandRefFull || 100);
+        const asPct = (v: any) => ((Number(v) || 0) / asPctRef) * 100;
+        const sorted = [...gradingBandsForThis].sort((a: any, b: any) => asPct(a.minPercent) - asPct(b.minPercent));
+        let matched: any = null;
+        for (const g of sorted) {
+          if (asPct(g.minPercent) <= percent + 0.0001) matched = g;
+        }
+        gradeInfo = matched || sorted[sorted.length - 1];
       }
 
       if (studentClass) {
@@ -1926,29 +2155,63 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
           }
         },
         update: {
-          ct: 0,
-          cwhw: 0,
-          dgc: 0,
           written: m.written,
           mcq: m.mcq,
           practical: m.practical,
           totalMarks,
           grade: gradeInfo?.grade || 'F',
-          gp: gradeInfo?.gp || 0
+          gp: gradeInfo?.gp || 0,
+          isAbsent: false
         },
         create: {
           studentId: m.studentId,
           examId,
           subjectId,
-          ct: 0,
-          cwhw: 0,
-          dgc: 0,
           written: m.written,
           mcq: m.mcq,
           practical: m.practical,
           totalMarks,
           grade: gradeInfo?.grade || 'F',
-          gp: gradeInfo?.gp || 0
+          gp: gradeInfo?.gp || 0,
+          isAbsent: false
+        }
+      });
+    }
+
+    // Handle absent students - auto-create absent result records
+    const absentStudents = await tx.examAttendance.findMany({
+      where: { examId, subjectId, status: 'ABSENT' }
+    });
+
+    for (const absent of absentStudents) {
+      await tx.result.upsert({
+        where: {
+          studentId_examId_subjectId: {
+            studentId: absent.studentId,
+            examId,
+            subjectId
+          }
+        },
+        update: {
+          isAbsent: true,
+          written: 0,
+          mcq: 0,
+          practical: 0,
+          totalMarks: 0,
+          grade: 'ABSENT',
+          gp: 0
+        },
+        create: {
+          studentId: absent.studentId,
+          examId,
+          subjectId,
+          isAbsent: true,
+          written: 0,
+          mcq: 0,
+          practical: 0,
+          totalMarks: 0,
+          grade: 'ABSENT',
+          gp: 0
         }
       });
     }
@@ -2020,8 +2283,40 @@ async function buildExamReport(examId: string) {
   const students: any[] = [];
   for (const { student, subjects } of studentMap.values()) {
     if (!subjects.length) continue;
-    let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, creditSum = 0, failed = false;
+    
+    // Check if ALL subjects are absent
+    const allAbsent = subjects.every(r => r.isAbsent);
+    if (allAbsent) {
+      students.push({
+        studentId: student.id,
+        name: student.name,
+        admissionNo: student.admissionNo,
+        avatar: student.avatar,
+        class: student.class,
+        section: student.section,
+        roll: student.roll,
+        status: 'ABSENT',
+        totalMarks: 0,
+        fullMarks: 0,
+        percentage: 0,
+        gpa: 0,
+        grade: 'ABSENT',
+        passed: false,
+        failed: false,
+        isAbsent: true,
+        subjectCount: subjects.length
+      });
+      continue;
+    }
+    
+    // Calculate marks only for non-absent subjects
+    let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, creditSum = 0, failed = false, hasAbsence = false;
     for (const r of subjects) {
+      if (r.isAbsent) {
+        hasAbsence = true;
+        failed = true; // Any absence = overall fail
+        continue;
+      }
       totalMarks += r.totalMarks || 0;
       const fm = subjectFullMarksByClass.get(r.subjectId)?.get(student.class) ?? subjectDefaultFullMarks.get(r.subjectId) ?? 100;
       fullMarks += fm;
@@ -2034,7 +2329,7 @@ async function buildExamReport(examId: string) {
     const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
     let grade = '';
     if (failed) {
-      grade = 'F';
+      grade = hasAbsence ? 'ABSENT' : 'F';
     } else if (grading.length) {
       const g = grading.find((x) => percentage >= x.minPercent && percentage <= x.maxPercent);
       grade = g ? g.grade : (grading[grading.length - 1]?.grade || '');
@@ -2054,6 +2349,7 @@ async function buildExamReport(examId: string) {
       grade,
       passed: !failed,
       failed,
+      hasAbsence,
       subjectCount: subjects.length
     });
   }
@@ -2741,9 +3037,6 @@ app.get('/student/:id/performance', authMiddleware, checkRole(['Admin']), async 
         written: r.written,
         mcq: r.mcq,
         practical: r.practical,
-        ct: r.ct,
-        cwhw: r.cwhw,
-        dgc: r.dgc,
         total: r.totalMarks,
         grade: r.grade,
         gpa: r.gp,
@@ -2822,14 +3115,12 @@ app.get('/results/:examId/report-card', authMiddleware, checkRole(['Admin']), as
         written: r.written,
         mcq: r.mcq,
         practical: r.practical,
-        ct: r.ct,
-        cwhw: r.cwhw,
-        dgc: r.dgc,
         total: r.totalMarks,
         fullMarks: report.subjectDefaultFullMarks.get(r.subjectId) ?? 100,
         grade: r.grade || '',
         gp: r.gp ?? 0,
-        highestMarks: r.highestMarks
+        highestMarks: r.highestMarks,
+        isAbsent: !!r.isAbsent
       }))
       .sort((a: any, b: any) => a.subject.localeCompare(b.subject));
 
@@ -3000,34 +3291,120 @@ app.post('/schedules', async (req: Request, res: Response) => {
     date: z.string().min(1),
     startTime: z.string().min(1),
     endTime: z.string().min(1),
-    fullMarks: z.number().optional(),
-    passMarks: z.number().optional(),
+    fullMarks: z.number().min(0),
+    passMarks: z.number().min(0).optional(),
+    // Component full marks
+    writtenFullMarks: z.number().min(0).default(0),
+    mcqFullMarks: z.number().min(0).default(0),
+    practicalFullMarks: z.number().min(0).default(0),
+    // Component pass marks
+    writtenPassMarks: z.number().min(0).default(0),
+    mcqPassMarks: z.number().min(0).default(0),
+    practicalPassMarks: z.number().min(0).default(0),
     gradingTypeId: z.string().optional().nullable(),
     roomNo: z.string().optional(),
     sortOrder: z.number().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks, gradingTypeId, roomNo, sortOrder } = parsed.data;
+  const { examId, classId, subjectId, date, startTime, endTime, fullMarks, passMarks, 
+          writtenFullMarks, mcqFullMarks, practicalFullMarks,
+          writtenPassMarks, mcqPassMarks, practicalPassMarks,
+          gradingTypeId, roomNo, sortOrder } = parsed.data;
 
-  // Note: Using examId_subjectId_classId unique constraint if classId is provided, else examId_subjectId
-  // But Prisma update/upsert requires a unique key.
-  // The schema defines @@unique([examId, subjectId, classId])
-  // If classId is null, unique constraint might treat it differently depending on DB.
-  // For now, let's just use create or findFirst+update logic if upsert is tricky with nullable fields in composite key.
-  // Or just create new schedule.
+  // Validate component marks sum equals fullMarks
+  const componentSum = writtenFullMarks + mcqFullMarks + practicalFullMarks;
+  if (componentSum !== fullMarks) {
+    return res.status(400).json({
+      error: 'Component marks must sum to total full marks',
+      details: {
+        written: writtenFullMarks,
+        mcq: mcqFullMarks,
+        practical: practicalFullMarks,
+        sum: componentSum,
+        expected: fullMarks
+      }
+    });
+  }
 
-  // Actually, upsert with composite unique key where one part is nullable is tricky.
-  // Let's use simple findFirst -> update or create logic.
+  // At least one component must be non-zero
+  if (componentSum === 0) {
+    return res.status(400).json({
+      error: 'At least one component (written/mcq/practical) must have full marks > 0'
+    });
+  }
 
   const existing = await prisma.examSchedule.findFirst({
     where: { examId, subjectId, classId: classId || null }
   });
 
+  // Resolve the grading template for this schedule (explicit override -> exam type).
+  const resolvedGradingTypeId = resolveGradingTypeId(
+    gradingTypeId,
+    (await prisma.exam.findUnique({ where: { id: examId }, select: { typeId: true } }))?.typeId
+  );
+
+  // The grading template defines the mark scale for marks entry and grading.
+  // When a template resolves, its totalFull (e.g. 50 for "50 Marks") is the
+  // authoritative full marks — it overrides any client-supplied fullMarks that
+  // assumed the wrong scale. Component full marks are re-derived to match.
+  const tplTotalFull = await fetchTemplateTotalFull(resolvedGradingTypeId);
+  const {
+    fullMarks: effFull,
+    writtenFullMarks: effWrittenFull,
+    mcqFullMarks: effMcqFull,
+    practicalFullMarks: effPracticalFull,
+  } = tplTotalFull
+    ? (() => {
+        const cfg = defaultComponentConfig(tplTotalFull, {
+          mcqIncluded: mcqFullMarks > 0,
+          practicalIncluded: practicalFullMarks > 0,
+        });
+        return {
+          fullMarks: tplTotalFull,
+          writtenFullMarks: cfg.writtenFull,
+          mcqFullMarks: cfg.mcqFull,
+          practicalFullMarks: cfg.practicalFull,
+        };
+      })()
+    : { fullMarks, writtenFullMarks, mcqFullMarks, practicalFullMarks };
+
+  // Universal default grading scheme (100 / pass 33). When per-component pass
+  // marks or the overall pass mark are not supplied, derive them from which
+  // components are present so the resulting schedule follows the scheme.
+  const defs = defaultComponentConfig(effFull, { mcqIncluded: effMcqFull > 0, practicalIncluded: effPracticalFull > 0 });
+  const effPassMarks = (passMarks ?? 0) > 0 ? passMarks : defs.totalPass;
+  const effWrittenPass = writtenPassMarks > 0 ? writtenPassMarks : defs.writtenPass;
+  const effMcqPass = mcqPassMarks > 0 ? mcqPassMarks : defs.mcqPass;
+  const effPracticalPass = practicalPassMarks > 0 ? practicalPassMarks : defs.practicalPass;
+
+  // Capture the frozen grading snapshot at scheduling time. This is taken for
+  // both the initial create and any subsequent upsert-by-update so that the
+  // schedule always reflects the template as it was when it was (re)scheduled.
+  const gradingSnapshot = await buildGradingSnapshot(resolvedGradingTypeId, effFull);
+
+  const scheduleData = {
+    date: new Date(date),
+    startTime,
+    endTime,
+    fullMarks: effFull,
+    passMarks: effPassMarks,
+    writtenFullMarks: effWrittenFull,
+    mcqFullMarks: effMcqFull,
+    practicalFullMarks: effPracticalFull,
+    writtenPassMarks: effWrittenPass,
+    mcqPassMarks: effMcqPass,
+    practicalPassMarks: effPracticalPass,
+    gradingTypeId: resolvedGradingTypeId || null,
+    gradingSnapshot: gradingSnapshot as any,
+    roomNo: roomNo ?? null,
+    sortOrder
+  };
+
   if (existing) {
     const updated = await prisma.examSchedule.update({
       where: { id: existing.id },
-      data: { date: new Date(date), startTime, endTime, fullMarks, passMarks, gradingTypeId: gradingTypeId || null, roomNo: roomNo ?? null, sortOrder }
+      data: scheduleData
     });
     return res.json(updated);
   }
@@ -3037,14 +3414,7 @@ app.post('/schedules', async (req: Request, res: Response) => {
       examId,
       classId: classId || null,
       subjectId,
-      date: new Date(date),
-      startTime,
-      endTime,
-      fullMarks,
-      passMarks,
-      gradingTypeId: gradingTypeId || null,
-      roomNo: roomNo ?? null,
-      sortOrder
+      ...scheduleData
     }
   });
   res.json(schedule);
@@ -3078,6 +3448,12 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         endTime: z.string().optional(),
         fullMarks: z.number().optional(),
         passMarks: z.number().optional(),
+        writtenFullMarks: z.number().optional(),
+        mcqFullMarks: z.number().optional(),
+        practicalFullMarks: z.number().optional(),
+        writtenPassMarks: z.number().optional(),
+        mcqPassMarks: z.number().optional(),
+        practicalPassMarks: z.number().optional(),
         gradingTypeId: z.string().optional().nullable(),
         roomNo: z.string().optional(),
         sortOrder: z.number().optional(),
@@ -3091,27 +3467,95 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
     const saved: any[] = [];
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
+        // Validate component sum if provided
+        if (item.fullMarks !== undefined && item.writtenFullMarks !== undefined) {
+          const componentSum = (item.writtenFullMarks || 0) + (item.mcqFullMarks || 0) + (item.practicalFullMarks || 0);
+          if (componentSum !== item.fullMarks && componentSum > 0) {
+            throw new Error(`Component marks sum (${componentSum}) must equal fullMarks (${item.fullMarks}) for subject ${item.subjectId}`);
+          }
+        }
+
         const data: any = {};
         if (item.date) data.date = new Date(item.date);
         if (item.startTime !== undefined) data.startTime = item.startTime;
         if (item.endTime !== undefined) data.endTime = item.endTime;
         if (item.fullMarks !== undefined) data.fullMarks = item.fullMarks;
         if (item.passMarks !== undefined) data.passMarks = item.passMarks;
+        if (item.writtenFullMarks !== undefined) data.writtenFullMarks = item.writtenFullMarks;
+        if (item.mcqFullMarks !== undefined) data.mcqFullMarks = item.mcqFullMarks;
+        if (item.practicalFullMarks !== undefined) data.practicalFullMarks = item.practicalFullMarks;
+        if (item.writtenPassMarks !== undefined) data.writtenPassMarks = item.writtenPassMarks;
+        if (item.mcqPassMarks !== undefined) data.mcqPassMarks = item.mcqPassMarks;
+        if (item.practicalPassMarks !== undefined) data.practicalPassMarks = item.practicalPassMarks;
         if (item.gradingTypeId !== undefined) data.gradingTypeId = item.gradingTypeId || null;
         if (item.roomNo !== undefined) data.roomNo = item.roomNo || null;
         if (item.sortOrder !== undefined) data.sortOrder = item.sortOrder;
 
+        // Resolve the grading template for this item and let its totalFull define
+        // the mark scale. When a template resolves, its totalFull (e.g. 50 for the
+        // "50 Marks" template) overrides any client-supplied fullMarks/component
+        // fulls that assumed the wrong scale, so marks entry, grading and display
+        // all use the template's scale.
+        let resolvedGradingTypeId: string | null = null;
+        if (item.gradingTypeId) {
+          resolvedGradingTypeId = resolveGradingTypeId(
+            item.gradingTypeId,
+            (await tx.exam.findUnique({ where: { id: examId }, select: { typeId: true } }))?.typeId
+          );
+        }
+        const tplTotalFull = await fetchTemplateTotalFull(resolvedGradingTypeId);
+        if (tplTotalFull) {
+          const cfg = defaultComponentConfig(tplTotalFull, {
+            mcqIncluded: (data.mcqFullMarks ?? 0) > 0 || (item.mcqFullMarks ?? 0) > 0,
+            practicalIncluded: (data.practicalFullMarks ?? 0) > 0 || (item.practicalFullMarks ?? 0) > 0,
+          });
+          data.fullMarks = tplTotalFull;
+          data.writtenFullMarks = cfg.writtenFull;
+          data.mcqFullMarks = cfg.mcqFull;
+          data.practicalFullMarks = cfg.practicalFull;
+        }
+
+        // Fill omitted pass marks from the universal default scheme (100 / pass 33),
+        // derived from which components are present.
+        if (data.fullMarks !== undefined) {
+          const defs = defaultComponentConfig(data.fullMarks, {
+            mcqIncluded: (data.mcqFullMarks ?? 0) > 0,
+            practicalIncluded: (data.practicalFullMarks ?? 0) > 0,
+          });
+          if (data.passMarks === undefined || data.passMarks == null) data.passMarks = defs.totalPass;
+          if (data.writtenPassMarks === undefined || data.writtenPassMarks == null) data.writtenPassMarks = defs.writtenPass;
+          if (data.mcqPassMarks === undefined || data.mcqPassMarks == null) data.mcqPassMarks = defs.mcqPass;
+          if (data.practicalPassMarks === undefined || data.practicalPassMarks == null) data.practicalPassMarks = defs.practicalPass;
+        }
+
+        // Build a fresh frozen grading snapshot whenever a grading template id is
+        // explicitly provided on the item (covers preset apply / manual fill that
+        // re-schedules with a grading template). When none is provided here, keep
+        // any existing snapshot below.
+        let gradingSnapshot: any = undefined;
+        if (resolvedGradingTypeId) {
+          gradingSnapshot = await buildGradingSnapshot(resolvedGradingTypeId, data.fullMarks, tx);
+          if (gradingSnapshot) data.gradingSnapshot = gradingSnapshot;
+        }
+
         if (item.id) {
-          const row = await tx.examSchedule.update({ where: { id: item.id }, data });
-          saved.push(row);
-          continue;
+          try {
+            const row = await tx.examSchedule.update({ where: { id: item.id }, data });
+            saved.push(row);
+            continue;
+          } catch (e: any) {
+            // Stale/deleted id — fall back to the idempotent upsert below.
+            if (e?.code !== 'P2025') throw e;
+          }
         }
         // idempotent upsert by (examId, subjectId, classId)
         const where = { examId, subjectId: item.subjectId, classId: item.classId || null };
         const existing = await tx.examSchedule.findFirst({ where });
         const base = { examId, subjectId: item.subjectId, classId: item.classId || null, ...data };
         if (existing) {
-          saved.push(await tx.examSchedule.update({ where: { id: existing.id }, data }));
+          // Preserve the existing snapshot when this item did not supply a grading template.
+          const updateData = gradingSnapshot ? data : { ...data, gradingSnapshot: existing.gradingSnapshot ?? undefined };
+          saved.push(await tx.examSchedule.update({ where: { id: existing.id }, data: updateData }));
         } else {
           saved.push(await tx.examSchedule.create({ data: base }));
         }
@@ -5305,22 +5749,28 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
     maxPercent: z.number(),
     gp: z.number().default(0),
     status: z.string(),
-    examTypeId: z.string(),
+    examTypeId: z.string().optional().nullable(),
     writtenPass: z.number().optional().nullable(),
     mcqPass: z.number().optional().nullable(),
     practicalPass: z.number().optional().nullable(),
     totalPass: z.number().optional().nullable(),
+    writtenFull: z.number().optional().nullable(),
+    mcqFull: z.number().optional().nullable(),
+    practicalFull: z.number().optional().nullable(),
+    totalFull: z.number().optional().nullable(),
   }));
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
   const incoming = parsed.data;
-  const typeIds = [...new Set(incoming.map(i => i.examTypeId))];
+  const typeIds = [...new Set(incoming.map(i => i.examTypeId).filter(Boolean))] as string[];
 
   await prisma.$transaction(async (tx) => {
-    await tx.gradingSystem.deleteMany({
-      where: { examTypeId: { in: typeIds } }
-    });
+    if (typeIds.length > 0) {
+      await tx.gradingSystem.deleteMany({
+        where: { examTypeId: { in: typeIds } }
+      });
+    }
     await tx.gradingSystem.createMany({
       data: incoming.map(i => ({
         grade: i.grade,
@@ -5328,16 +5778,146 @@ app.post('/grading/bulk', async (req: Request, res: Response) => {
         maxPercent: i.maxPercent,
         gp: i.gp,
         status: i.status,
-        examTypeId: i.examTypeId,
+        examTypeId: i.examTypeId || null,
         writtenPass: i.writtenPass,
         mcqPass: i.mcqPass,
         practicalPass: i.practicalPass,
-        totalPass: i.totalPass
+        totalPass: i.totalPass,
+        writtenFull: i.writtenFull,
+        mcqFull: i.mcqFull,
+        practicalFull: i.practicalFull,
+        totalFull: i.totalFull
       }))
     });
   });
 
   res.json({ success: true });
+});
+
+// Get grading bands for a single grading template (for the editable bands UI).
+app.get('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examTypeId } = req.params;
+    const bands = await prisma.gradingSystem.findMany({
+      where: { examTypeId },
+      orderBy: { minPercent: 'asc' },
+      select: {
+        id: true,
+        grade: true,
+        minPercent: true,
+        maxPercent: true,
+        gp: true,
+        status: true,
+      },
+    });
+    res.json(bands);
+  } catch (error: any) {
+    console.error('Error fetching grading bands:', error);
+    res.status(500).json({ error: 'Failed to fetch grading bands', details: error.message });
+  }
+});
+
+// Save grading bands for a single grading template (atomic replace) with strict
+// server-side validation. CRITICAL: changes apply ONLY to new schedules — existing
+// schedules keep their frozen gradingSnapshot.
+app.post('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { examTypeId } = req.params;
+
+    // Determine the grading scale (full marks) for this template. Percentage
+    // templates use 100; marks-based templates (e.g. "50 Marks") use their own
+    // reference full. Falls back to the existing bands' totalFull or 100.
+    const existingBands = await prisma.gradingSystem.findMany({
+      where: { examTypeId },
+      select: { totalFull: true },
+    });
+    const scale = (existingBands[0]?.totalFull ?? 100) > 0 ? (existingBands[0]?.totalFull ?? 100) : 100;
+
+    // Accept optional totalFull from the client to persist the grading scale
+    // (e.g. 50 for a "50 Marks" template). When not supplied, preserve the
+    // existing bands' totalFull so re-saves don't lose the scale.
+    const bodySchema = z.object({
+      bands: z.array(z.object({
+        grade: z.string().min(1).max(20).trim(),
+        minPercent: z.number().min(0).max(scale),
+        maxPercent: z.number().min(0).max(scale),
+        gp: z.number().min(0),
+        status: z.enum(['PASS', 'FAIL']),
+      })),
+      totalFull: z.number().min(0).optional(),
+    });
+    // Support both { bands, totalFull } wrapper and plain array for backwards compat.
+    let bands: z.infer<typeof bodySchema>['bands'];
+    let totalFull: number | undefined;
+    const rawBody = req.body;
+    if (Array.isArray(rawBody)) {
+      const arrSchema = z.array(z.object({
+        grade: z.string().min(1).max(20).trim(),
+        minPercent: z.number().min(0).max(scale),
+        maxPercent: z.number().min(0).max(scale),
+        gp: z.number().min(0),
+        status: z.enum(['PASS', 'FAIL']),
+      }));
+      const arrParsed = arrSchema.safeParse(rawBody);
+      if (!arrParsed.success) {
+        return res.status(400).json({ error: 'Invalid band data', details: arrParsed.error.flatten() });
+      }
+      bands = arrParsed.data;
+    } else {
+      const parsed = bodySchema.safeParse(rawBody);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid band data', details: parsed.error.flatten() });
+      }
+      bands = parsed.data.bands;
+      totalFull = parsed.data.totalFull;
+    }
+
+    const validation = validateGradingBands(bands, scale);
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        errors: validation.errors,
+        warnings: validation.warnings,
+      });
+    }
+
+    // Ensure the template belongs to this exam type (or is a standalone template).
+    const template = await prisma.examType.findUnique({ where: { id: examTypeId } });
+    if (!template) {
+      // Allow saving to a template only if an ExamType exists for it.
+      return res.status(404).json({ error: 'Grading template (exam type) not found' });
+    }
+
+    // The totalFull to persist: prefer client-supplied, else keep existing, else
+    // fall back to the derived scale.
+    const persistedTotalFull = (totalFull != null && totalFull > 0)
+      ? totalFull
+      : (existingBands[0]?.totalFull ?? scale);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.gradingSystem.deleteMany({ where: { examTypeId } });
+      await tx.gradingSystem.createMany({
+        data: bands.map((b) => ({
+          examTypeId,
+          grade: b.grade,
+          minPercent: b.minPercent,
+          maxPercent: b.maxPercent,
+          gp: b.gp,
+          status: b.status,
+          totalFull: persistedTotalFull,
+        })),
+      });
+    });
+
+    res.json({
+      success: true,
+      message: 'Grading bands updated. Changes apply to new schedules only; existing schedules keep their saved grading.',
+      warnings: validation.warnings,
+    });
+  } catch (error: any) {
+    console.error('Error saving grading bands:', error);
+    res.status(500).json({ error: 'Failed to save grading bands', details: error.message });
+  }
 });
 
 // Fee Particulars

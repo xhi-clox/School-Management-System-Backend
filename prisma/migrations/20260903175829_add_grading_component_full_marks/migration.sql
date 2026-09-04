@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "GradingSystem" ADD COLUMN     "mcqFull" DOUBLE PRECISION,
+ADD COLUMN     "practicalFull" DOUBLE PRECISION,
+ADD COLUMN     "totalFull" DOUBLE PRECISION,
+ADD COLUMN     "writtenFull" DOUBLE PRECISION;
