@@ -11,6 +11,30 @@ import bcrypt from 'bcryptjs';
 import { authMiddleware } from './auth';
 import { checkRole } from './checkRole';
 import { validateGradingBands, defaultComponentConfig } from './grading-validation';
+import {
+  netPaid,
+  invoiceBalance,
+  getFeeState,
+  lockInvoice,
+  recalcInvoiceTx,
+  logAudit,
+  nextPaymentNumber,
+  nextInvoiceNumber,
+  academicYearForDate,
+  academicYearForMonth,
+  billingMonthStr,
+  isVoided,
+  PAYMENT_METHODS,
+  roundMoney as feeRoundMoney,
+} from './fees/shared';
+import { buildMonthlyBlueprint, runMonthlyTuitionGeneration } from './fees/monthly-generation';
+
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
 
 
 const prisma = new PrismaClient();
@@ -398,14 +422,42 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   });
 
   const feeInvoices = await prisma.invoice.findMany({
-    select: { totalAmount: true, payments: { select: { amount: true } } }
+    select: {
+      totalAmount: true,
+      dueDate: true,
+      billingMonth: true,
+      payments: { select: { amount: true, status: true, date: true } }
+    }
   });
+  // Void-aware fee stats (mirrors /finance/fees/summary). Invoices are the
+  // single source of truth; feesDue = total outstanding, feeOverdue is the
+  // subset past dueDate, feeExpectedMonth = outstanding on the current
+  // billing month's generated invoices, feeCollectedToday + todayTransactions
+  // = non-voided payments received today.
   let feesDue = money(0);
   let feesCollected = money(0);
+  let feeOverdue = money(0);
+  let feeExpectedMonth = money(0);
+  let feeCollectedToday = money(0);
+  let feeTodayTransactions = 0;
+  const todayKey = localDayKey(now);
+  const currentMonthKey = billingMonthStr(now.getFullYear(), now.getMonth() + 1);
   for (const inv of feeInvoices) {
-    const paid = inv.payments.reduce((s, p) => s.plus(p.amount), money(0));
+    const paid = netPaid(inv.payments);
     feesCollected = feesCollected.plus(paid);
-    feesDue = feesDue.plus(inv.totalAmount.minus(paid));
+    const balance = money(inv.totalAmount).minus(paid);
+    if (balance.gt(0)) {
+      feesDue = feesDue.plus(balance);
+      if (getFeeState(balance, inv.dueDate, now) === 'OVERDUE') feeOverdue = feeOverdue.plus(balance);
+      if (inv.billingMonth === currentMonthKey) feeExpectedMonth = feeExpectedMonth.plus(balance);
+    }
+    for (const p of inv.payments) {
+      if (isVoided(p)) continue;
+      if (localDayKey(new Date(p.date)) === todayKey) {
+        feeCollectedToday = feeCollectedToday.plus(p.amount);
+        feeTodayTransactions += 1;
+      }
+    }
   }
 
   const allTimeIncome = await prisma.ledgerEntry.aggregate({
@@ -518,6 +570,10 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       todayExpense: money(todayExpense._sum.amount),
       feesDue,
       feesCollected,
+      feeOverdue: feeOverdue.toNumber(),
+      feeExpectedMonth: feeExpectedMonth.toNumber(),
+      feeCollectedToday: feeCollectedToday.toNumber(),
+      todayTransactions: feeTodayTransactions,
       history: {
         income: historyIncome.map(h => ({ date: h.date, amount: h.amount })),
         expense: historyExpense.map(h => ({ date: h.date, amount: h.amount })),
@@ -4446,6 +4502,26 @@ app.get('/tuition/structures', async (_req: Request, res: Response) => {
   res.json(items);
 });
 
+// Class -> assigned monthly tuition view (used by the fee assignment menu)
+app.get('/tuition/class-fees', async (_req: Request, res: Response) => {
+  const classes = await prisma.schoolClass.findMany({ orderBy: [{ name: 'asc' }, { section: 'asc' }] });
+  const structures = await prisma.feeStructure.findMany({
+    where: { isActive: true },
+    include: { class: true },
+  });
+  const global = structures.find((s) => !s.classId);
+  const rows = classes.map((c) => ({
+    classId: c.id,
+    className: c.name,
+    section: c.section,
+    structure:
+      structures.find((s) => s.classId === c.id) ??
+      structures.find((s) => s.class && s.class.name === c.name && s.class.section === c.section) ??
+      (global ?? null),
+  }));
+  res.json({ rows, global: global ?? null });
+});
+
 app.post('/tuition/structures', async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
@@ -4542,127 +4618,43 @@ app.delete('/tuition/assignments/:id', async (req: Request, res: Response) => {
   res.status(204).send();
 });
 
-// Tuition Invoice Generation
+// Tuition Invoice Generation (preview first, then idempotent generate)
 app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
   const schema = z.object({
     month: z.number().int().min(1).max(12),
     year: z.number().int(),
-    prorate: z.boolean().optional().default(false),
     dueDay: z.number().int().min(1).max(28).optional().default(10),
+    prorate: z.boolean().optional().default(false),
+    classId: z.string().optional(),
+    academicYear: z.string().optional(),
+    preview: z.boolean().optional().default(false),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { month, year, prorate, dueDay } = parsed.data;
+  const { preview, ...input } = parsed.data;
 
-  const billingMonth = `${year}-${String(month).padStart(2, '0')}`;
-  const totalDaysInMonth = new Date(year, month, 0).getDate();
+  try {
+    if (preview) {
+      const { rows, summary } = await buildMonthlyBlueprint(prisma, input);
+      return res.json({ preview: true, rows, summary });
+    }
 
-  // 1. Get all active students
-  const activeStudents = await prisma.student.findMany({
-    where: { status: 'Active' }
-  });
-
-  // 2. Get all fee assignments for these students
-  const assignments = await prisma.studentFeeAssignment.findMany({
-    where: {
-      isActive: true,
-      studentId: { in: activeStudents.map(s => s.id) }
-    },
-    include: { feeStructure: true }
-  });
-
-  // 3. Get all admission packages to infer tuition if no assignment exists
-  const admissionPackages = await prisma.admissionPackage.findMany({
-    include: { feeItems: true }
-  });
-
-  let created = 0;
-  let skipped = 0;
-
-  for (const student of activeStudents) {
-    // Check for existing tuition invoice for this month
-    const existing = await prisma.invoice.findFirst({
-      where: {
-        studentId: student.id,
-        type: 'tuition',
-        billingMonth: billingMonth
-      }
+    const result = await runMonthlyTuitionGeneration(prisma, input, {
+      actor: (req as any).user?.email ?? (req as any).user?.name,
     });
 
-    if (existing) {
-      skipped++;
-      continue;
-    }
-
-    // Determine Tuition Amount
-    let tuitionAmount = money(0);
-
-    // Priority 1: Student-specific tuition assignment
-    const studentAssignment = assignments.find((a: any) => {
-      const startsBeforeOrEqual = a.startYear < year || (a.startYear === year && a.startMonth <= month);
-      const endsAfterOrNull = !a.endYear || a.endYear > year || (a.endYear === year && (!a.endMonth || a.endMonth >= month));
-      return a.studentId === student.id && startsBeforeOrEqual && endsAfterOrNull;
+    res.json({
+      ...result,
+      checked: result.totalStudents,
+      message: result.message,
     });
-
-    if (studentAssignment) {
-      const base = money(studentAssignment.customAmount ?? studentAssignment.feeStructure.amount);
-      tuitionAmount = base;
-      if (studentAssignment.discountPercent > 0) {
-        tuitionAmount = base.minus(base.times(studentAssignment.discountPercent).div(100)).toDecimalPlaces(2);
-      }
+  } catch (error: any) {
+    console.error('Tuition generation error:', error);
+    if (error?.message === 'Class not found') {
+      return res.status(404).json({ error: 'Class not found' });
     }
-    // Priority 2: Class tuition fee from admission package
-    else {
-      const studentClass = await prisma.schoolClass.findFirst({
-        where: { name: student.class, section: student.section }
-      });
-      if (studentClass) {
-        const pkg = admissionPackages.find(p => p.classId === studentClass.id);
-        const tuitionItem = pkg?.feeItems.find(fi => fi.name && fi.name.toLowerCase().includes('tuition'));
-        if (tuitionItem) {
-          tuitionAmount = money(tuitionItem.amount);
-        }
-      }
-    }
-
-    if (tuitionAmount.lte(0)) {
-      skipped++; // Or handle as "No tuition defined"
-      continue;
-    }
-
-    // Apply Proration if requested
-    let finalAmount = tuitionAmount;
-    if (prorate) {
-      const admissionDate = student.admissionDate;
-      if (admissionDate && admissionDate.getFullYear() === year && (admissionDate.getMonth() + 1) === month) {
-        const remainingDays = totalDaysInMonth - admissionDate.getDate() + 1;
-        finalAmount = tuitionAmount.div(totalDaysInMonth).times(remainingDays).toDecimalPlaces(2);
-      }
-    }
-
-    // Create Invoice
-    await prisma.invoice.create({
-      data: {
-        studentId: student.id,
-        type: 'tuition',
-        totalAmount: finalAmount.toDecimalPlaces(0),
-        status: 'unpaid',
-        billingMonth: billingMonth,
-        dueDate: new Date(year, month - 1, dueDay),
-        items: {
-          create: [{ name: `Monthly Tuition - ${billingMonth}`, amount: finalAmount.toDecimalPlaces(0) }]
-        }
-      }
-    });
-    created++;
+    res.status(500).json({ error: 'Failed to generate monthly tuition', details: error.message });
   }
-
-  res.json({
-    message: "Monthly Tuition Generated",
-    checked: activeStudents.length,
-    created,
-    skipped
-  });
 });
 // Monthly Attendance Matrix
 app.get('/attendance/matrix', async (req: Request, res: Response) => {
@@ -5362,67 +5354,176 @@ app.post('/payments', async (req: Request, res: Response) => {
     amount: z.number().positive(),
     method: z.string(),
     transactionRef: z.string().optional(),
-    receivedBy: z.string().optional()
+    receivedBy: z.string().optional(),
+    date: z.string().optional(),
   });
 
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { invoiceId, amount, method, transactionRef, receivedBy } = parsed.data;
+  const { invoiceId, amount, method, transactionRef, receivedBy, date } = parsed.data;
+  const methodNormalized = (PAYMENT_METHODS as readonly string[]).includes(method) ? method : 'cash';
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const invoice = await tx.invoice.findUnique({ where: { id: invoiceId } });
-      if (!invoice) throw new Error('Invoice not found');
+      await lockInvoice(tx, invoiceId);
+      const invoice = await tx.invoice.findUnique({
+        where: { id: invoiceId },
+        select: {
+          id: true,
+          studentId: true,
+          totalAmount: true,
+          paidAmount: true,
+          status: true,
+          type: true,
+          academicYear: true,
+        },
+      });
+      if (!invoice) throw new HttpError(404, 'Invoice not found');
 
-      const newPaidAmount = money(invoice.paidAmount).plus(amount);
-      const newStatus = newPaidAmount.gte(invoice.totalAmount) ? 'paid' : 'partial';
+      const totalPaidAfter = money(invoice.paidAmount).plus(amount);
+      if (totalPaidAfter.gt(invoice.totalAmount)) {
+        throw new HttpError(400, `Payment exceeds remaining balance (can pay at most ${round2(Number(invoice.totalAmount) - Number(invoice.paidAmount))}).`);
+      }
 
-      // 1. Create Payment
+      const academicYear = invoice.academicYear ?? academicYearForDate(new Date());
+      const { paymentNo } = await nextPaymentNumber(tx, academicYear);
+      const paymentDate = date ? new Date(date) : new Date();
+
       const payment = await tx.payment.create({
         data: {
           invoiceId,
           amount: money(amount).toDecimalPlaces(2),
-          method,
+          method: methodNormalized,
           transactionRef,
-          receivedBy
-        }
+          receivedBy,
+          paymentNo,
+          date: paymentDate,
+        },
       });
 
-      // 2. Update Invoice
-      await tx.invoice.update({
-        where: { id: invoiceId },
-        data: {
-          paidAmount: newPaidAmount,
-          status: newStatus
-        }
-      });
+      await recalcInvoiceTx(tx, invoiceId);
 
-      // 3. Update Student Status if fully paid and admission
-      if (invoice.type === 'admission' && newStatus === 'paid') {
-        await tx.student.update({
-          where: { id: invoice.studentId },
-          data: { status: 'Active' }
+      if (invoice.type === 'admission') {
+        const updated = await tx.invoice.findUnique({
+          where: { id: invoiceId },
+          select: { status: true },
         });
+        if (updated?.status === 'paid') {
+          await tx.student.update({
+            where: { id: invoice.studentId },
+            data: { status: 'Active' },
+          });
+        }
       }
 
-      // 4. Create Ledger Entry
       await tx.ledgerEntry.create({
         data: {
           type: 'income',
           category: invoice.type === 'admission' ? 'admission_fee' : 'fee_collection',
           amount: money(amount).toDecimalPlaces(2),
-          referenceInvoice: invoiceId
-        }
+          referenceInvoice: invoiceId,
+          paymentId: payment.id,
+          studentId: invoice.studentId,
+          date: paymentDate,
+        },
+      });
+
+      await logAudit(tx, {
+        action: 'payment.create',
+        entity: 'Payment',
+        entityId: paymentNo ?? payment.id,
+        actor: receivedBy ?? (req as any).user?.email ?? (req as any).user?.name,
+        reason: `Payment of ${amount} on invoice ${invoiceId}`,
+        meta: { invoiceId, amount, method: methodNormalized },
       });
 
       return payment;
     });
 
     res.json(result);
-  } catch (error) {
-    console.error(error);
+  } catch (error: any) {
+    if (error instanceof HttpError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error('Payment error:', error);
     res.status(500).json({ error: 'Payment failed' });
+  }
+});
+
+// Void / refund — payments are immutable. Voiding keeps the row (status='voided')
+// + audit trail, recalculates the invoice, and writes a reversing ledger entry.
+const reversePayment = async (paymentId: string, opts: { reason: string; actor?: string }) => {
+  return prisma.$transaction(async (tx) => {
+    const payment = await tx.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) throw new HttpError(404, 'Payment not found');
+    if (isVoided(payment)) throw new HttpError(400, 'Payment already voided');
+
+    await lockInvoice(tx, payment.invoiceId);
+    const invoice = await tx.invoice.findUnique({
+      where: { id: payment.invoiceId },
+      select: { studentId: true },
+    });
+
+    const updatedPayment = await tx.payment.update({
+      where: { id: payment.id },
+      data: { status: 'voided', voidedAt: new Date(), voidedBy: opts.actor ?? null, voidReason: opts.reason },
+    });
+
+    await recalcInvoiceTx(tx, payment.invoiceId);
+
+    await tx.ledgerEntry.create({
+      data: {
+        type: 'expense',
+        category: 'payment_void',
+        amount: payment.amount,
+        referenceInvoice: payment.invoiceId,
+        paymentId: payment.id,
+        studentId: invoice?.studentId ?? null,
+        date: new Date(),
+      },
+    });
+
+    await logAudit(tx, {
+      action: 'payment.void',
+      entity: 'Payment',
+      entityId: payment.paymentNo ?? payment.id,
+      actor: opts.actor,
+      reason: opts.reason,
+      meta: { invoiceId: payment.invoiceId, amount: payment.amount, reversal: true },
+    });
+
+    return { ...updatedPayment };
+  });
+};
+
+app.post('/payments/:id/void', async (req: Request, res: Response) => {
+  const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
+  const parsed = schema.safeParse(req.body ?? {});
+  const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Voided';
+  const actor = parsed.success ? parsed.data.actor : undefined;
+  try {
+    const result = await reversePayment(req.params.id, { reason, actor: actor ?? (req as any).user?.email ?? (req as any).user?.name });
+    res.json(result);
+  } catch (error: any) {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
+    console.error('Void payment error:', error);
+    res.status(500).json({ error: 'Failed to void payment' });
+  }
+});
+
+app.post('/payments/:id/refund', async (req: Request, res: Response) => {
+  const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
+  const parsed = schema.safeParse(req.body ?? {});
+  const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Refund';
+  const actor = parsed.success ? parsed.data.actor : undefined;
+  try {
+    const result = await reversePayment(req.params.id, { reason, actor: actor ?? (req as any).user?.email ?? (req as any).user?.name });
+    res.json(result);
+  } catch (error: any) {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
+    console.error('Refund payment error:', error);
+    res.status(500).json({ error: 'Failed to refund payment' });
   }
 });
 
@@ -5436,7 +5537,15 @@ app.get('/invoices', async (req: Request, res: Response) => {
     include: { items: true, payments: true, student: true },
     orderBy: { createdAt: 'desc' }
   });
-  res.json(invoices);
+  res.json(invoices.map((inv: any) => {
+    const balance = invoiceBalance(inv, inv.payments);
+    return {
+      ...inv,
+      paid: netPaid(inv.payments).toNumber(),
+      balance: balance.toNumber(),
+      feeState: getFeeState(balance, inv.dueDate),
+    };
+  }));
 });
 
 app.post('/invoices/from-package', async (req: Request, res: Response) => {
@@ -5483,27 +5592,45 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string(),
     type: z.string().default('fee'),
-    totalAmount: z.number().positive(),
+    totalAmount: z.number().positive().optional(),
     items: z.array(z.object({ name: z.string(), amount: z.number().positive() })).min(1),
     initialPayment: z.number().min(0).optional().default(0),
     method: z.string().optional().default('cash'),
     billingMonth: z.string().optional(),
+    academicYear: z.string().optional(),
     date: z.string().optional(),
+    dueDate: z.string().optional(),
+    receivedBy: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { studentId, type, totalAmount, items, initialPayment, method, billingMonth, date } = parsed.data;
+  const { studentId, type, items, initialPayment, method, billingMonth, academicYear, date, dueDate, receivedBy } = parsed.data;
 
   try {
     const result = await prisma.$transaction(async (tx) => {
+      // totalAmount is ALWAYS derived from items server-side — never trusted from the client.
+      const computedTotal = items.reduce((s, i) => s.plus(money(i.amount)), money(0));
+      if (computedTotal.lte(0)) throw new HttpError(400, 'Invoice total must be positive');
+
+      const acYear = academicYear ?? (billingMonth ? (() => {
+        const m = /^(\d{4})-(\d{2})$/.exec(billingMonth);
+        return m ? academicYearForMonth(Number(m[1]), Number(m[2])) : academicYearForDate(new Date());
+      })() : academicYearForDate(date ? new Date(date) : new Date()));
+
+      const invoiceDate = date ? new Date(date) : new Date();
+      const { invoiceNo } = await nextInvoiceNumber(tx, acYear);
+
       const invoice = await tx.invoice.create({
         data: {
           studentId,
           type,
-          totalAmount: roundMoney(totalAmount),
+          totalAmount: roundMoney(computedTotal),
           status: 'unpaid',
-          billingMonth,
-          createdAt: date ? new Date(date) : undefined,
+          billingMonth: billingMonth ?? null,
+          academicYear: acYear,
+          invoiceNo,
+          dueDate: dueDate ? new Date(dueDate) : null,
+          createdAt: invoiceDate,
           items: {
             create: items.map(i => ({ name: i.name, amount: roundMoney(i.amount) }))
           }
@@ -5511,35 +5638,50 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
         include: { items: true, payments: true }
       });
 
-      if (initialPayment && initialPayment > 0) {
-        const newPaidAmount = money(invoice.paidAmount).plus(initialPayment);
-        const newStatus = newPaidAmount.gte(invoice.totalAmount) ? 'paid' : 'partial';
+      // Never accept an initial payment larger than the invoice itself.
+      const capped = Math.min(initialPayment, Number(computedTotal));
+
+      if (capped > 0) {
+        const methodNormalized = (PAYMENT_METHODS as readonly string[]).includes(method) ? method : 'cash';
+        const { paymentNo } = await nextPaymentNumber(tx, acYear);
         await tx.payment.create({
           data: {
             invoiceId: invoice.id,
-            amount: money(initialPayment).toDecimalPlaces(2),
-            method
+            amount: money(capped).toDecimalPlaces(2),
+            method: methodNormalized,
+            receivedBy,
+            paymentNo,
+            date: invoiceDate,
           }
         });
-        await tx.invoice.update({
-          where: { id: invoice.id },
-          data: { paidAmount: newPaidAmount, status: newStatus }
-        });
+        await recalcInvoiceTx(tx, invoice.id);
         await tx.ledgerEntry.create({
           data: {
             type: 'income',
             category: type === 'admission' ? 'admission_fee' : 'fee_collection',
-            amount: money(initialPayment).toDecimalPlaces(2),
-            referenceInvoice: invoice.id
+            amount: money(capped).toDecimalPlaces(2),
+            referenceInvoice: invoice.id,
+            paymentId: (await tx.payment.findFirst({ where: { invoiceId: invoice.id }, select: { id: true } }))?.id ?? null,
+            studentId,
+            date: invoiceDate,
           }
+        });
+        await logAudit(tx, {
+          action: 'invoice.create',
+          entity: 'Invoice',
+          entityId: invoiceNo,
+          actor: receivedBy ?? undefined,
+          reason: `Invoice created with initial payment ${capped}`,
+          meta: { studentId, type, amount: capped },
         });
       }
 
       return await tx.invoice.findUnique({ where: { id: invoice.id }, include: { items: true, payments: true } });
     });
     res.status(201).json(result);
-  } catch (e) {
-    console.error(e);
+  } catch (e: any) {
+    if (e instanceof HttpError) return res.status(e.status).json({ error: e.message });
+    console.error('Create simple invoice error:', e);
     res.status(500).json({ error: 'Failed to create invoice' });
   }
 });
@@ -5553,7 +5695,8 @@ app.get('/invoices/:id', async (req: Request, res: Response) => {
   });
   console.log(`[GET /invoices/:id] Result:`, invoice ? 'Found' : 'NULL');
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  res.json(invoice);
+  const balance = invoiceBalance(invoice, invoice.payments);
+  res.json({ ...invoice, paid: netPaid(invoice.payments).toNumber(), balance: balance.toNumber(), feeState: getFeeState(balance, invoice.dueDate) });
 });
 
 // Staff
@@ -5700,24 +5843,81 @@ app.get('/finance/reports/summary', async (req: Request, res: Response) => {
 // Fee Reports
 app.get('/finance/reports/fees', async (req: Request, res: Response) => {
   const invoices = await prisma.invoice.findMany({
-    include: { payments: true, student: true }
+    include: { payments: true, student: true },
+    orderBy: [{ createdAt: 'desc' }]
   });
 
   const report = invoices.map(inv => {
-    const paid = inv.payments.reduce((s, p) => s.plus(p.amount), money(0));
+    const paid = netPaid(inv.payments);
+    const due = invoiceBalance(inv, inv.payments);
     return {
+      id: inv.id,
+      invoiceNo: inv.invoiceNo ?? null,
+      academicYear: inv.academicYear ?? null,
+      billingMonth: inv.billingMonth ?? null,
       studentName: inv.student.name,
       class: inv.student.class,
+      section: inv.student.section,
       type: inv.type,
       total: inv.totalAmount,
       paid,
-      due: inv.totalAmount.minus(paid),
+      due,
+      balance: due,
+      feeState: getFeeState(due, inv.dueDate),
       status: inv.status,
       date: inv.createdAt
     };
   });
 
   res.json(report);
+});
+
+// Fee summary (derived from invoices — never a parallel source of truth)
+app.get('/finance/fees/summary', async (_req: Request, res: Response) => {
+  try {
+    const today = new Date();
+    const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const startMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const endMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+
+    const [invoices, payments] = await Promise.all([
+      prisma.invoice.findMany({ include: { payments: true } }),
+      prisma.payment.findMany({ where: { date: { gte: startToday, lt: endMonth } } }),
+    ]);
+
+    let totalOutstanding = money(0);
+    let overdue = money(0);
+    let dueSoon = money(0); // balance > 0, dueDate >= today
+    let collectedToday = money(0);
+    let collectedThisMonth = money(0);
+
+    for (const inv of invoices) {
+      const balance = invoiceBalance(inv, inv.payments);
+      if (balance.lte(0)) continue;
+      totalOutstanding = totalOutstanding.plus(balance);
+      const state = getFeeState(balance, inv.dueDate, today);
+      if (state === 'OVERDUE') overdue = overdue.plus(balance);
+      else dueSoon = dueSoon.plus(balance);
+    }
+
+    for (const p of payments) {
+      if (isVoided(p)) continue;
+      if (p.date >= startToday && p.date < endMonth) collectedThisMonth = collectedThisMonth.plus(p.amount);
+      if (p.date >= startToday && p.date < endMonth && p.date.getTime() >= startToday.getTime()) collectedToday = collectedToday.plus(p.amount);
+    }
+
+    res.json({
+      totalOutstanding: totalOutstanding.toNumber(),
+      overdue: overdue.toNumber(),
+      dueSoon: dueSoon.toNumber(),
+      collectedToday: collectedToday.toNumber(),
+      collectedThisMonth: collectedThisMonth.toNumber(),
+      asOf: today,
+    });
+  } catch (error) {
+    console.error('Fee summary error:', error);
+    res.status(500).json({ error: 'Failed to compute fee summary' });
+  }
 });
 
 // Grading System
@@ -7598,44 +7798,63 @@ app.get('/student/fees', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const [fees, invoices] = await Promise.all([
-      prisma.studentFee.findMany({ where: { studentId: student.id }, orderBy: { createdAt: 'desc' } }),
-      prisma.invoice.findMany({
-        where: { studentId: student.id },
-        include: { payments: true },
-        orderBy: { createdAt: 'desc' },
-      }),
-    ]);
+    // Single source of truth: invoices + their (non-voided) payments.
+    const invoices = await prisma.invoice.findMany({
+      where: { studentId: student.id },
+      include: { payments: true },
+      orderBy: { createdAt: 'desc' },
+    });
 
-    const invoiceTotal = invoices.reduce((s, inv) => s + Number(inv.totalAmount), 0);
-    const invoicePaid = invoices.reduce((s, inv) => {
-      const paySum = inv.payments.reduce((a: number, p: any) => a + Number(p.amount), 0);
-      return s + (paySum || Number((inv as any).paidAmount || 0));
-    }, 0);
-    const feeTotal = fees.reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
-    const feePaid = fees.filter((f) => f.status === 'Paid').reduce((s, f) => s + (Number(f.amount) - Number(f.discount || 0)), 0);
-    const totalFee = invoiceTotal + feeTotal;
-    const paid = invoicePaid + feePaid;
-    const due = totalFee - paid;
+    const today = new Date();
+
+    const invoiceTotal = invoices.reduce((s, inv) => s.plus(inv.totalAmount), money(0));
+    const invoicePaid = invoices.reduce((s, inv) => s.plus(netPaid(inv.payments)), money(0));
 
     const feeStats = {
-      totalFee: Math.round(totalFee * 100) / 100,
-      paid: Math.round(paid * 100) / 100,
-      due: Math.round(due * 100) / 100,
+      totalFee: round2(invoiceTotal.toNumber()),
+      paid: round2(invoicePaid.toNumber()),
+      due: round2(invoiceTotal.minus(invoicePaid).toNumber()),
     };
 
     const normalizeStatus = (s?: string) =>
       s === 'paid' || s === 'Paid' ? 'Paid' : s === 'partial' || s === 'Partial' ? 'Partial' : 'Due';
 
-    const invoiceList = invoices.map((inv) => ({
-      id: inv.id.slice(-8).toUpperCase(),
-      type: inv.type,
-      date: toDateStr(inv.createdAt),
-      amount: Number(inv.totalAmount),
-      status: normalizeStatus(inv.status),
-    }));
+    let currentDue = 0;
+    let overdueDue = 0;
 
-    res.json({ feeStats, invoices: invoiceList });
+    const invoiceList = invoices.map((inv) => {
+      const paid = netPaid(inv.payments);
+      const balance = money(inv.totalAmount).minus(paid);
+      const state = getFeeState(balance, inv.dueDate, today);
+      const displayNo = inv.invoiceNo || `INV-${inv.id.slice(-8).toUpperCase()}`;
+      if (balance.gt(0)) {
+        if (state === 'OVERDUE') overdueDue += balance.toNumber();
+        else currentDue += balance.toNumber();
+      }
+      return {
+        id: inv.id,
+        invoiceNo: displayNo,
+        type: inv.type,
+        date: toDateStr(inv.createdAt),
+        billingMonth: inv.billingMonth ?? null,
+        dueDate: inv.dueDate ? toDateStr(inv.dueDate) : null,
+        amount: Number(inv.totalAmount),
+        paid: paid.toNumber(),
+        balance: balance.toNumber(),
+        status: normalizeStatus(inv.status),
+        feeState: state,
+      };
+    });
+
+    res.json({
+      feeStats,
+      aging: {
+        currentDue: round2(currentDue),
+        overdueDue: round2(overdueDue),
+        totalOutstanding: round2(currentDue + overdueDue),
+      },
+      invoices: invoiceList,
+    });
   } catch (error) {
     console.error('Error fetching student fees:', error);
     res.status(500).json({ error: 'Failed to fetch fees data' });

@@ -175,12 +175,17 @@ model Invoice {
   status       String // 'unpaid', 'partial', 'paid'
   dueDate      DateTime?
   billingMonth String? // 'YYYY-MM'
+  academicYear String? // '2026-27'
+  invoiceNo    String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   student  Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
   items    InvoiceItem[]
   payments Payment[]
+
+  @@index([type, billingMonth])
+  @@index([studentId, billingMonth])
 }
 
 model InvoiceItem {
@@ -195,17 +200,24 @@ model InvoiceItem {
 }
 
 model Payment {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   invoiceId      String
   amount         Decimal
   method         String
   transactionRef String?
   receivedBy     String?
-  date           DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  status         String    @default("active") // 'active' | 'voided'
+  paymentNo      String?
+  voidedAt       DateTime?
+  voidedBy       String?
+  voidReason     String?
+  date           DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, status])
 }
 
 model LedgerEntry {
@@ -214,8 +226,34 @@ model LedgerEntry {
   category         String
   amount           Decimal
   referenceInvoice String?
+  paymentId        String?
+  studentId        String?
+  date             DateTime @default(now())
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  @@index([date])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  entity    String?
+  entityId  String?
+  actor     String?
+  reason    String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+model NumberSequence {
+  id        String   @id @default(cuid())
+  scope     String   @unique // e.g. 'invoice-2026-27'
+  last      Int      @default(0)
+  updatedAt DateTime @updatedAt
 }
 
 model Product {
