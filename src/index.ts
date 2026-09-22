@@ -142,10 +142,8 @@ app.use(async (req: Request, res: Response, next: NextFunction) => {
             );
           }
           if (!isCloudinaryConfigured()) {
-            throw new ImageUploadGuardError(
-              'Photo uploads are not configured: set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET in the server environment.',
-              400
-            );
+            // No Cloudinary configured: keep the data URL so uploads still work locally.
+            return node;
           }
           return await uploadBase64Image(node);
         }
@@ -977,26 +975,42 @@ app.put('/students/:id', authMiddleware, checkRole(['Admin']), async (req: Reque
     name: z.string().min(1).optional(),
     admissionNo: z.string().min(1).optional(),
     class: z.string().min(1).optional(),
-    section: z.string().min(1).optional(),
-    roll: z.number().int().optional(),
+    section: z.string().optional(),
+    roll: z.coerce.number().int().optional(),
     gender: z.string().optional(),
-    bloodGroup: z.string().optional(),
-    religion: z.string().optional(),
-    banglaName: z.string().optional(),
-    dob: z.preprocess((v) => (typeof v === 'string' ? new Date(v) : undefined), z.date().optional()),
+    bloodGroup: z.string().optional().nullable(),
+    religion: z.string().optional().nullable(),
+    banglaName: z.string().optional().nullable(),
+    dob: z.preprocess((v) => (typeof v === 'string' && v ? new Date(v) : v === null ? null : undefined), z.date().optional().nullable()),
+    email: z.string().email().optional().nullable().or(z.literal('')),
+    phone: z.string().optional().nullable(),
+    nationality: z.string().optional().nullable(),
+    medicalNote: z.string().optional().nullable(),
+    additionalNote: z.string().optional().nullable(),
+    birthCertNo: z.string().optional().nullable(),
+    siblingsCount: z.coerce.number().int().optional().nullable(),
     guardianPhone: z.string().optional().nullable(),
-    guardianEmail: z.string().email().optional().or(z.literal('')),
-    fatherName: z.string().optional(),
-    motherName: z.string().optional(),
-    address: z.string().optional(),
-    academicYear: z.string().optional(),
-    shift: z.string().optional(),
+    guardianEmail: z.string().email().optional().nullable().or(z.literal('')),
+    fatherName: z.string().optional().nullable(),
+    motherName: z.string().optional().nullable(),
+    address: z.string().optional().nullable(),
+    academicYear: z.string().optional().nullable(),
+    shift: z.string().optional().nullable(),
+    admissionDate: z.preprocess((v) => (typeof v === 'string' && v ? new Date(v) : v === null ? null : undefined), z.date().optional().nullable()),
     avatar: z.string().optional().nullable(),
     status: z.string().optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const student = await prisma.student.update({ where: { id }, data: parsed.data });
+
+  if (parsed.data.avatar === '') parsed.data.avatar = null;
+
+  // Prisma rejects null for DateTime fields - remove them so the value is left unchanged.
+  const data: any = { ...parsed.data };
+  if (data.dob === null) delete data.dob;
+  if (data.admissionDate === null) delete data.admissionDate;
+
+  const student = await prisma.student.update({ where: { id }, data });
   res.json(student);
 });
 
@@ -3162,7 +3176,10 @@ app.get('/results/:examId/report-card', authMiddleware, checkRole(['Admin']), as
     if (!agg) return res.status(404).json({ error: 'No results for this student in this exam' });
 
     const student = await prisma.student.findUnique({ where: { id: studentId } });
-    const institute = await prisma.institute.findFirst();
+    const user = (req as any).user;
+    const institute =
+      (user?.email ? await prisma.institute.findUnique({ where: { email: user.email } }) : null) ??
+      (await prisma.institute.findFirst());
 
     const rows = report.results
       .filter((r: any) => r.studentId === studentId)
@@ -5225,7 +5242,6 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         }
       } else {
         const rows = await (tx as any).student.findMany({
-          where: { admissionNo: { not: null } },
           select: { admissionNo: true }
         });
         let max = 0;
@@ -5251,6 +5267,12 @@ app.post('/students/admission', async (req: Request, res: Response) => {
           throw new Error(`Roll ${student.roll} already exists in this class/section`);
         }
       }
+
+      // A package with no payable fees (e.g. an existing student who already paid
+      // their fees) has nothing to collect, so activate the student right away
+      // instead of leaving them stuck in 'pending_payment'.
+      const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
+      const fullyCovered = totalAmount.lte(0);
 
       const studentData: any = {
         name: student.name,
@@ -5278,7 +5300,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         guardianEmail: guardian.guardianEmail,
         address: guardian.address || guardian.guardianAddress,
         admissionNo,
-        status: 'pending_payment'
+        status: fullyCovered ? 'Active' : 'pending_payment'
       };
 
       const newStudent = await (tx as any).student.create({
@@ -5316,14 +5338,12 @@ app.post('/students/admission', async (req: Request, res: Response) => {
       });
 
       // 3. Create Invoice
-      const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
-
       const invoice = await tx.invoice.create({
         data: {
           studentId: newStudent.id,
           type: 'admission',
           totalAmount,
-          status: 'unpaid',
+          status: fullyCovered ? 'paid' : 'unpaid',
           items: {
             create: pkg.feeItems.map(item => ({
               name: item.name,
