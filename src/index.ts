@@ -857,6 +857,99 @@ app.get('/students/rolls/used', authMiddleware, async (req: Request, res: Respon
   }
 });
 
+// Student Logins
+// NOTE: these must stay ABOVE `app.get('/students/:id')` below — Express matches
+// routes in registration order, so a later `/students/:id` would swallow
+// `/students/logins` and answer 404 "Student not found".
+app.get('/students/logins', async (_req: Request, res: Response) => {
+  const logins = await prisma.studentLogin.findMany({
+    include: { student: true },
+    orderBy: { createdAt: 'desc' }
+  });
+
+  res.json(
+    logins.map((l: any) => ({
+      id: l.id,
+      studentId: l.studentId,
+      username: l.username,
+      password: l.password,
+      role: l.role,
+      status: l.status,
+      lastLogin: l.lastLogin,
+    }))
+  );
+});
+
+app.post('/students/logins', async (req: Request, res: Response) => {
+  const schema = z.object({
+    studentId: z.string().min(1),
+    username: z.string().min(3),
+    password: z.string().min(4),
+    role: z.string().optional(),
+    status: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const { studentId, username, password, role, status } = parsed.data;
+
+  try {
+    const login = await prisma.studentLogin.create({
+      data: {
+        studentId,
+        username,
+        password,
+        role: role || 'Student',
+        status: status || 'Active',
+      },
+    });
+    res.status(201).json(login);
+  } catch (e: any) {
+    console.error('Create student login error:', e);
+    res.status(500).json({ error: 'Failed to create student login', details: e.message });
+  }
+});
+
+app.put('/students/logins/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const schema = z.object({
+    username: z.string().min(3).optional(),
+    password: z.string().min(4).optional(),
+    status: z.string().optional(),
+    lastLogin: z.preprocess(
+      (v) => (typeof v === 'string' ? new Date(v) : undefined),
+      z.date().optional()
+    ),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const login = await prisma.studentLogin.update({
+      where: { id },
+      data: parsed.data,
+    });
+    res.json(login);
+  } catch (e: any) {
+    console.error('Update student login error:', e);
+    res.status(500).json({ error: 'Failed to update student login', details: e.message });
+  }
+});
+
+app.delete('/students/logins/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    await prisma.studentLogin.delete({ where: { id } });
+    res.status(204).send();
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Login record not found' });
+    }
+    console.error('Delete student login error:', error);
+    res.status(500).json({ error: 'Failed to delete student login', details: error.message });
+  }
+});
+
 app.get('/students/:id', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -1393,96 +1486,6 @@ app.get('/promotions/archive', authMiddleware, checkRole(['Admin']), async (req:
   }
 });
 
-// Student Logins
-app.get('/students/logins', async (_req: Request, res: Response) => {
-  const logins = await prisma.studentLogin.findMany({
-    include: { student: true },
-    orderBy: { createdAt: 'desc' }
-  });
-
-  res.json(
-    logins.map((l: any) => ({
-      id: l.id,
-      studentId: l.studentId,
-      username: l.username,
-      password: l.password,
-      role: l.role,
-      status: l.status,
-      lastLogin: l.lastLogin,
-    }))
-  );
-});
-
-app.post('/students/logins', async (req: Request, res: Response) => {
-  const schema = z.object({
-    studentId: z.string().min(1),
-    username: z.string().min(3),
-    password: z.string().min(4),
-    role: z.string().optional(),
-    status: z.string().optional(),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-  const { studentId, username, password, role, status } = parsed.data;
-
-  try {
-    const login = await prisma.studentLogin.create({
-      data: {
-        studentId,
-        username,
-        password,
-        role: role || 'Student',
-        status: status || 'Active',
-      },
-    });
-    res.status(201).json(login);
-  } catch (e: any) {
-    console.error('Create student login error:', e);
-    res.status(500).json({ error: 'Failed to create student login', details: e.message });
-  }
-});
-
-app.put('/students/logins/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const schema = z.object({
-    username: z.string().min(3).optional(),
-    password: z.string().min(4).optional(),
-    status: z.string().optional(),
-    lastLogin: z.preprocess(
-      (v) => (typeof v === 'string' ? new Date(v) : undefined),
-      z.date().optional()
-    ),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-
-  try {
-    const login = await prisma.studentLogin.update({
-      where: { id },
-      data: parsed.data,
-    });
-    res.json(login);
-  } catch (e: any) {
-    console.error('Update student login error:', e);
-    res.status(500).json({ error: 'Failed to update student login', details: e.message });
-  }
-});
-
-app.delete('/students/logins/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  try {
-    await prisma.studentLogin.delete({ where: { id } });
-    res.status(204).send();
-  } catch (error: any) {
-    if (error.code === 'P2025') {
-      return res.status(404).json({ error: 'Login record not found' });
-    }
-    console.error('Delete student login error:', error);
-    res.status(500).json({ error: 'Failed to delete student login', details: error.message });
-  }
-});
-
 // Exam Types
 app.get('/exam-types', async (_req: Request, res: Response) => {
   try {
@@ -1580,6 +1583,136 @@ app.post('/exams', async (req: Request, res: Response) => {
     include: { type: true }
   });
   res.status(201).json(exam);
+});
+
+// Edit an existing exam (name, type, academic year, date range).
+app.put('/exams/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const schema = z.object({
+      name: z.string().min(1).optional(),
+      typeId: z.string().min(1).optional(),
+      startDate: z.string().min(1).optional(),
+      endDate: z.string().min(1).optional(),
+      academicYear: z.string().min(1).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const existing = await prisma.exam.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Exam not found' });
+
+    const { name, typeId, startDate, endDate, academicYear } = parsed.data;
+
+    let canonicalYear: string = existing.academicYear;
+    if (academicYear) {
+      const normalized = normalizeAcademicYear(academicYear);
+      if (!normalized) {
+        return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+      }
+      canonicalYear = normalized;
+    }
+
+    if (typeId) {
+      const type = await prisma.examType.findUnique({ where: { id: typeId } });
+      if (!type) return res.status(400).json({ error: 'Exam type not found' });
+    }
+
+    const nextStart = startDate ? new Date(startDate) : existing.startDate;
+    const nextEnd = endDate ? new Date(endDate) : existing.endDate;
+    if (nextEnd < nextStart) {
+      return res.status(400).json({ error: 'End date cannot be before start date' });
+    }
+
+    const updated = await prisma.exam.update({
+      where: { id },
+      data: {
+        ...(name !== undefined ? { name } : {}),
+        ...(typeId !== undefined ? { typeId } : {}),
+        ...(startDate !== undefined ? { startDate: nextStart } : {}),
+        ...(endDate !== undefined ? { endDate: nextEnd } : {}),
+        ...(academicYear !== undefined ? { academicYear: canonicalYear } : {}),
+      },
+      include: { type: true }
+    });
+    res.json(updated);
+  } catch (error: any) {
+    console.error('Error updating exam:', error);
+    res.status(500).json({ error: 'Failed to update exam', details: error.message });
+  }
+});
+
+// Dependent-record counts for an exam, so the client can warn before deleting.
+app.get('/exams/:id/dependents', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const exam = await prisma.exam.findUnique({ where: { id } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+    const [schedules, results, publish, validationRuns, attendances] = await Promise.all([
+      prisma.examSchedule.count({ where: { examId: id } }),
+      prisma.result.count({ where: { examId: id } }),
+      prisma.resultPublish.count({ where: { examId: id } }),
+      prisma.resultValidationRun.count({ where: { examId: id } }),
+      prisma.examAttendance.count({ where: { examId: id } }),
+    ]);
+
+    const dependents: Record<string, number> = {};
+    if (schedules > 0) dependents.schedules = schedules;
+    if (results > 0) dependents.results = results;
+    if (publish > 0) dependents.resultsPublished = publish;
+    if (validationRuns > 0) dependents.validationRuns = validationRuns;
+    if (attendances > 0) dependents.examAttendance = attendances;
+
+    res.json({ id, dependents });
+  } catch (error: any) {
+    console.error('Error fetching exam dependents:', error);
+    res.status(500).json({ error: 'Failed to load related records', details: error.message });
+  }
+});
+
+// Delete an exam and everything attached to it. Related records are removed in
+// the same transaction (most FKs here are ON DELETE RESTRICT, so Prisma will not
+// cascade them on its own). The client confirms against /exams/:id/dependents.
+app.delete('/exams/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const exam = await prisma.exam.findUnique({ where: { id } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+
+    const [schedules, results, publish, validationRuns, attendances] = await Promise.all([
+      prisma.examSchedule.count({ where: { examId: id } }),
+      prisma.result.count({ where: { examId: id } }),
+      prisma.resultPublish.count({ where: { examId: id } }),
+      prisma.resultValidationRun.count({ where: { examId: id } }),
+      prisma.examAttendance.count({ where: { examId: id } }),
+    ]);
+
+    const blockers: Record<string, number> = {};
+    if (schedules > 0) blockers.schedules = schedules;
+    if (results > 0) blockers.results = results;
+    if (publish > 0) blockers.resultsPublished = publish;
+    if (validationRuns > 0) blockers.validationRuns = validationRuns;
+    if (attendances > 0) blockers.examAttendance = attendances;
+
+    const hasBlockers = Object.keys(blockers).length > 0;
+    if (hasBlockers) {
+      // Order matters: children first, since most FKs are ON DELETE RESTRICT.
+      await prisma.$transaction([
+        prisma.resultPublish.deleteMany({ where: { examId: id } }),
+        prisma.resultValidationRun.deleteMany({ where: { examId: id } }),
+        prisma.result.deleteMany({ where: { examId: id } }),
+        prisma.examAttendance.deleteMany({ where: { examId: id } }),
+        prisma.examSchedule.deleteMany({ where: { examId: id } }),
+      ]);
+    }
+
+    await prisma.exam.delete({ where: { id } });
+    res.json({ success: true, id, deletedDependents: hasBlockers ? blockers : {} });
+  } catch (error: any) {
+    console.error('Error deleting exam:', error);
+    res.status(500).json({ error: 'Failed to delete exam', details: error.message });
+  }
 });
 
 // Admin-configurable exam weight (used in Weighted Academic Score ranking).
@@ -2861,10 +2994,11 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
-    const [schedules, results, students] = await Promise.all([
+    const [schedules, results, students, allGrading] = await Promise.all([
       prisma.examSchedule.findMany({ where: { examId }, include: { subject: true, class: true } }),
       prisma.result.findMany({ where: { examId }, include: { student: true } }),
-      prisma.student.findMany({ select: { id: true, name: true, class: true, section: true } })
+      prisma.student.findMany({ select: { id: true, name: true, class: true, section: true } }),
+      prisma.gradingSystem.findMany({ orderBy: { minPercent: 'desc' } })
     ]);
 
     const issues: any[] = [];
@@ -2910,10 +3044,44 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
       }
     }
 
-    // Missing practical marks (only for this exam's scheduled student/subject pairs).
+    // A practical component is only "required" for a (class, subject) when the
+    // schedule actually configures one. Resolve it exactly the way marks entry
+    // does: prefer the schedule's own snapshot, else the grading template
+    // referenced by the schedule's gradingTypeId (or the exam type).
+    // Without this, subjects with no practical exam were still reported as
+    // "missing practical marks".
+    const gradingByType = new Map<string, typeof allGrading>();
+    for (const g of allGrading) {
+      const key = g.examTypeId ?? '__template__';
+      if (!gradingByType.has(key)) gradingByType.set(key, []);
+      gradingByType.get(key)!.push(g);
+    }
+    const defaultGrading = gradingByType.get(exam.typeId ?? '') || [];
+    const practicalRequiredFor = (schedule: { practicalFullMarks?: number | null; gradingTypeId?: string | null }) => {
+      const tpl = (gradingByType.get(schedule.gradingTypeId || exam.typeId || '') || defaultGrading)[0] as any;
+      const practicalFull = (schedule.practicalFullMarks || 0) > 0 ? schedule.practicalFullMarks : (tpl?.practicalFull ?? 0);
+      return (practicalFull || 0) > 0;
+    };
+    const scheduleByClassSubject = new Map<string, (typeof schedules)[number]>();
+    const globalScheduleBySubject = new Map<string, (typeof schedules)[number]>();
+    for (const s of schedules) {
+      if (s.class) scheduleByClassSubject.set(`${keyOf(s.class.name, s.class.section)}|${s.subjectId}`, s);
+      else if (!globalScheduleBySubject.has(s.subjectId)) globalScheduleBySubject.set(s.subjectId, s);
+    }
+    const studentById = new Map(students.map((s) => [s.id, s]));
+
+    // Missing practical marks — only for pairs whose subject really has a
+    // practical component in this exam.
     let missingPractical = 0;
     for (const r of results) {
       if (!applicableKeys.has(`${r.studentId}|${r.subjectId}`)) continue;
+      const st = studentById.get(r.studentId);
+      if (!st) continue;
+      // Class-specific schedule wins; a global schedule (no class) applies to
+      // every grade and decides the component split for that subject.
+      const effective = scheduleByClassSubject.get(`${keyOf(st.class, st.section)}|${r.subjectId}`)
+        || globalScheduleBySubject.get(r.subjectId);
+      if (!effective || !practicalRequiredFor(effective)) continue;
       if ((r.practical == null || r.practical === 0) && r.written > 0) {
         missingPractical++;
         if (issues.length < 30) issues.push({ type: 'missing_practical', message: `${r.student?.name || r.studentId} missing practical marks`, studentId: r.studentId, subjectId: r.subjectId });
