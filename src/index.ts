@@ -388,20 +388,22 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const mStart = new Date(currentYear, currentMonth, 1);
   const mEnd = new Date(currentYear, currentMonth + 1, 1);
 
-  const ledgerIncome = await prisma.ledgerEntry.aggregate({
-    _sum: { amount: true },
-    where: {
-      type: 'income',
-      createdAt: { gte: mStart, lt: mEnd }
-    }
-  });
-  const ledgerExpense = await prisma.ledgerEntry.aggregate({
-    _sum: { amount: true },
-    where: {
-      type: 'expense',
-      createdAt: { gte: mStart, lt: mEnd }
-    }
-  });
+  const [ledgerIncome, ledgerExpense] = await Promise.all([
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: {
+        type: 'income',
+        createdAt: { gte: mStart, lt: mEnd }
+      }
+    }),
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: {
+        type: 'expense',
+        createdAt: { gte: mStart, lt: mEnd }
+      }
+    }),
+  ]);
 
   const [todayIncome, todayExpense] = await Promise.all([
     prisma.ledgerEntry.aggregate({
@@ -458,14 +460,16 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     }
   }
 
-  const allTimeIncome = await prisma.ledgerEntry.aggregate({
-    _sum: { amount: true },
-    where: { type: 'income' }
-  });
-  const allTimeExpense = await prisma.ledgerEntry.aggregate({
-    _sum: { amount: true },
-    where: { type: 'expense' }
-  });
+  const [allTimeIncome, allTimeExpense] = await Promise.all([
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'income' }
+    }),
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { type: 'expense' }
+    }),
+  ]);
 
   const incomeTotal = money(allTimeIncome._sum.amount);
   const expenseTotal = money(allTimeExpense._sum.amount);
@@ -494,60 +498,84 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       guardianPhone: r.student?.guardianPhone || ''
     }));
 
-  // Build 6-month history for chart
-  const historyIncome: Array<{ date: Date; amount: number }> = [];
-  const historyExpense: Array<{ date: Date; amount: number }> = [];
-  for (let i = 5; i >= 0; i--) {
-    const histStart = new Date(currentYear, currentMonth - i, 1);
-    const histEnd = new Date(currentYear, currentMonth - i + 1, 1);
-    const li = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'income', createdAt: { gte: histStart, lt: histEnd } }
-    });
-    const le = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'expense', createdAt: { gte: histStart, lt: histEnd } }
-    });
-    historyIncome.push({ date: histStart, amount: money(li._sum.amount).toNumber() });
-    historyExpense.push({ date: histStart, amount: money(le._sum.amount).toNumber() });
-  }
+  // Build 6-month history for chart (batched — sequential awaits here
+  // cost ~1 RTT per query, ~12 RTTs total, on every dashboard load)
+  const historyRanges = Array.from({ length: 6 }, (_, k) => {
+    const i = 5 - k;
+    return {
+      histStart: new Date(currentYear, currentMonth - i, 1),
+      histEnd: new Date(currentYear, currentMonth - i + 1, 1),
+    };
+  });
+  const historyResults = await Promise.all(
+    historyRanges.map(async ({ histStart, histEnd }) => {
+      const [li, le] = await Promise.all([
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'income', createdAt: { gte: histStart, lt: histEnd } }
+        }),
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'expense', createdAt: { gte: histStart, lt: histEnd } }
+        }),
+      ]);
+      return {
+        income: { date: histStart, amount: money(li._sum.amount).toNumber() },
+        expense: { date: histStart, amount: money(le._sum.amount).toNumber() },
+      };
+    }),
+  );
+  const historyIncome = historyResults.map((r) => r.income);
+  const historyExpense = historyResults.map((r) => r.expense);
 
-  // Daily history for the current month (day 1 -> today)
-  const dailyIncome: Array<{ date: Date; amount: number }> = [];
-  const dailyExpense: Array<{ date: Date; amount: number }> = [];
+  // Daily history for the current month (day 1 -> today), batched
   const todayDay = new Date().getDate();
-  for (let d = 1; d <= todayDay; d++) {
-    const dStart = new Date(currentYear, currentMonth, d);
-    const dEnd = new Date(currentYear, currentMonth, d + 1);
-    const dli = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'income', createdAt: { gte: dStart, lt: dEnd } }
-    });
-    const dle = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'expense', createdAt: { gte: dStart, lt: dEnd } }
-    });
-    dailyIncome.push({ date: dStart, amount: money(dli._sum.amount).toNumber() });
-    dailyExpense.push({ date: dStart, amount: money(dle._sum.amount).toNumber() });
-  }
+  const dailyResults = await Promise.all(
+    Array.from({ length: todayDay }, (_, k) => k + 1).map(async (d) => {
+      const dStart = new Date(currentYear, currentMonth, d);
+      const dEnd = new Date(currentYear, currentMonth, d + 1);
+      const [dli, dle] = await Promise.all([
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'income', createdAt: { gte: dStart, lt: dEnd } }
+        }),
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'expense', createdAt: { gte: dStart, lt: dEnd } }
+        }),
+      ]);
+      return {
+        income: { date: dStart, amount: money(dli._sum.amount).toNumber() },
+        expense: { date: dStart, amount: money(dle._sum.amount).toNumber() },
+      };
+    }),
+  );
+  const dailyIncome = dailyResults.map((r) => r.income);
+  const dailyExpense = dailyResults.map((r) => r.expense);
 
-  // Yearly history for the current year (Jan -> current month)
-  const yearlyIncome: Array<{ date: Date; amount: number }> = [];
-  const yearlyExpense: Array<{ date: Date; amount: number }> = [];
-  for (let m = 0; m <= currentMonth; m++) {
-    const mStart = new Date(currentYear, m, 1);
-    const mEnd = new Date(currentYear, m + 1, 1);
-    const mli = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'income', createdAt: { gte: mStart, lt: mEnd } }
-    });
-    const mle = await prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'expense', createdAt: { gte: mStart, lt: mEnd } }
-    });
-    yearlyIncome.push({ date: mStart, amount: money(mli._sum.amount).toNumber() });
-    yearlyExpense.push({ date: mStart, amount: money(mle._sum.amount).toNumber() });
-  }
+  // Yearly history for the current year (Jan -> current month), batched
+  const yearlyResults = await Promise.all(
+    Array.from({ length: currentMonth + 1 }, (_, m) => m).map(async (m) => {
+      const mStart = new Date(currentYear, m, 1);
+      const mEnd = new Date(currentYear, m + 1, 1);
+      const [mli, mle] = await Promise.all([
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'income', createdAt: { gte: mStart, lt: mEnd } }
+        }),
+        prisma.ledgerEntry.aggregate({
+          _sum: { amount: true },
+          where: { type: 'expense', createdAt: { gte: mStart, lt: mEnd } }
+        }),
+      ]);
+      return {
+        income: { date: mStart, amount: money(mli._sum.amount).toNumber() },
+        expense: { date: mStart, amount: money(mle._sum.amount).toNumber() },
+      };
+    }),
+  );
+  const yearlyIncome = yearlyResults.map((r) => r.income);
+  const yearlyExpense = yearlyResults.map((r) => r.expense);
 
   res.json({
     counts: {
