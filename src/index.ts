@@ -320,9 +320,18 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const todayEnd = new Date(todayStart);
   todayEnd.setDate(todayEnd.getDate() + 1);
 
-  // Attendance.date is stored at UTC midnight of the local day, so use UTC
-  // boundaries for the attendance query (ledger queries below keep local time).
-  const attStart = utcMidnight(localDayKey(now));
+  // Attendance.date is a date-only key stored at UTC midnight. Use the day
+  // displayed by the client when supplied; otherwise fall back to server-local today.
+  const requestedAttendanceDay = req.query.date === undefined
+    ? localDayKey(now)
+    : String(req.query.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedAttendanceDay)) {
+    return res.status(400).json({ error: 'Attendance date must use YYYY-MM-DD format' });
+  }
+  const attStart = utcMidnight(requestedAttendanceDay);
+  if (Number.isNaN(attStart.getTime()) || attStart.toISOString().slice(0, 10) !== requestedAttendanceDay) {
+    return res.status(400).json({ error: 'Attendance date is invalid' });
+  }
   const attEnd = new Date(attStart);
   attEnd.setUTCDate(attEnd.getUTCDate() + 1);
 
@@ -724,20 +733,24 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
       select: { date: true, status: true },
     });
 
-    const dayMap = new Map<string, { present: number; absent: number; late: number }>();
+    // `marked` counts every attendance row saved that day (including Leave), so
+    // clients can tell "nobody was marked" apart from "everyone was marked absent".
+    const dayMap = new Map<string, { present: number; absent: number; late: number; marked: number }>();
     for (const r of records) {
       const key = utcDayKeyOf(r.date);
-      const entry = dayMap.get(key) || { present: 0, absent: 0, late: 0 };
-      if (normalizeAttendanceStatus(r.status) === 'Present') entry.present++;
-      else if (normalizeAttendanceStatus(r.status) === 'Absent') entry.absent++;
-      else if (normalizeAttendanceStatus(r.status) === 'Late') entry.late++;
+      const entry = dayMap.get(key) || { present: 0, absent: 0, late: 0, marked: 0 };
+      entry.marked++;
+      const status = normalizeAttendanceStatus(r.status);
+      if (status === 'Present') entry.present++;
+      else if (status === 'Absent') entry.absent++;
+      else if (status === 'Late') entry.late++;
       dayMap.set(key, entry);
     }
 
-    const result: Array<{ date: string; present: number; absent: number; late: number }> = [];
+    const result: Array<{ date: string; present: number; absent: number; late: number; marked: number }> = [];
     for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
       const key = utcDayKeyOf(d);
-      result.push({ date: key, ...(dayMap.get(key) || { present: 0, absent: 0, late: 0 }) });
+      result.push({ date: key, ...(dayMap.get(key) || { present: 0, absent: 0, late: 0, marked: 0 }) });
     }
 
     res.json(result);
@@ -4644,6 +4657,7 @@ app.get('/subjects', async (_req: Request, res: Response) => {
 app.post('/subjects', async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
+    banglaName: z.string().optional().nullable(),
     code: z.string().min(1),
     type: z.string().min(1),
   });
@@ -4657,13 +4671,25 @@ app.put('/subjects/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
+    banglaName: z.string().optional().nullable(),
     code: z.string().optional(),
     type: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const subject = await prisma.subject.update({ where: { id }, data: parsed.data });
-  res.json(subject);
+  try {
+    const subject = await prisma.subject.update({ where: { id }, data: parsed.data });
+    res.json(subject);
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Subject not found' });
+    }
+    if (error.code === 'P2002') {
+      return res.status(409).json({ error: 'Subject code already exists' });
+    }
+    console.error('Update subject error:', error);
+    res.status(500).json({ error: 'Failed to update subject', details: error.message });
+  }
 });
 
 app.delete('/subjects/:id', async (req: Request, res: Response) => {
@@ -4694,7 +4720,7 @@ app.get('/attendance', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date } = parsed.data as any;
   // Standardize the day to the same UTC-midnight form used at save time.
-  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+  const day = utcMidnight(attendanceDayKey(String(date)));
   const students = await prisma.student.findMany({ where: { class: className, section }, orderBy: { roll: 'asc' } });
   const records = await prisma.attendance.findMany({
     where: { studentId: { in: students.map((s) => s.id) }, date: day },
@@ -4992,7 +5018,7 @@ app.get('/attendance/teachers', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { date } = parsed.data;
-  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+  const day = utcMidnight(attendanceDayKey(String(date)));
 
   const teachers = await prisma.teacher.findMany({ orderBy: { name: 'asc' } });
   const records = await prisma.teacherAttendance.findMany({
@@ -5233,7 +5259,7 @@ app.post('/attendance/save', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date, records } = parsed.data as any;
-  const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+  const day = utcMidnight(attendanceDayKey(String(date)));
   const students = await prisma.student.findMany({ where: { class: className, section } });
   const ids = new Set(students.map((s) => s.id));
   const toSave = records.filter((r: any) => ids.has(r.studentId));
@@ -7147,7 +7173,7 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
 
     // Load any existing attendance for this class on the requested date.
     // Standardize the day to the UTC-midnight form used at save time.
-    const dayStart = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+    const dayStart = utcMidnight(attendanceDayKey(String(date)));
     const dayEnd = new Date(dayStart);
     dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
     const savedRecords = await prisma.attendance.findMany({
@@ -7206,7 +7232,7 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
     }
 
     // Save attendance to the Attendance table (same as /attendance/save)
-    const day = new Date(`${localDayKey(new Date(String(date)))}T00:00:00.000Z`);
+    const day = utcMidnight(attendanceDayKey(String(date)));
     const students = await prisma.student.findMany({
       where: { class: classInfo.name, section: classInfo.section }
     });
@@ -7686,6 +7712,10 @@ function utcMidnight(dayKey: string): Date {
 // Calendar day key in the server's LOCAL timezone, e.g. "2026-08-21".
 function localDayKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function attendanceDayKey(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : localDayKey(new Date(value));
 }
 
 // Canonical attendance statuses. Storage + kept titlecased so every consumer

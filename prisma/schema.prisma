@@ -490,6 +490,9 @@ model StudentFeeAssignment {
 model Subject {
   id              String                @id @default(cuid())
   name            String
+  /// Bengali name, same convention as Student.banglaName. Used by the admit card
+  /// generator's bilingual schedule toggle.
+  banglaName      String?
   code            String                @unique
   type            String
   creditHours     Float                 @default(1)
