@@ -182,6 +182,34 @@ export const nextInvoiceNumber = async (
   return { invoiceNo: `INV-${academicYear}-${String(seq.last).padStart(5, '0')}`, seq: seq.last };
 };
 
+/**
+ * Allocate `count` consecutive invoice numbers in one round trip.
+ *
+ * Bulk generation would otherwise spend one upsert per student just to number its
+ * invoice, which is hundreds of extra queries to Postgres. A single increment by
+ * `count` hands out the whole block; the caller consumes it in order.
+ */
+export const nextInvoiceNumberBlock = async (
+  tx: Tx,
+  academicYear: string,
+  count: number,
+): Promise<{ invoiceNos: string[]; start: number }> => {
+  if (count <= 0) return { invoiceNos: [], start: 0 };
+  const scope = `invoice-${academicYear}`;
+  const seq = await tx.numberSequence.upsert({
+    where: { scope },
+    update: { last: { increment: count } },
+    create: { scope, last: count },
+  });
+  const end = seq.last;
+  const start = end - count + 1;
+  const invoiceNos: string[] = [];
+  for (let n = start; n <= end; n += 1) {
+    invoiceNos.push(`INV-${academicYear}-${String(n).padStart(5, '0')}`);
+  }
+  return { invoiceNos, start };
+};
+
 export const nextPaymentNumber = async (
   tx: Tx,
   academicYear: string,

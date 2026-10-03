@@ -39,6 +39,20 @@ model Notification {
   @@index([createdAt])
 }
 
+model Announcement {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  author    String   @default("Admin")
+  role      String   @default("Admin")
+  target    String   @default("All")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([target])
+}
+
 model Parent {
   id        String    @id @default(cuid())
   userId    String    @unique
@@ -79,6 +93,11 @@ model Student {
   admissionDate   DateTime                @default(now())
   createdAt       DateTime                @default(now())
   updatedAt       DateTime                @updatedAt
+  
+  // Admission tracking (New Fee System)
+  admissionStatus       String              @default("pending") // "pending" | "completed" | "exempted"
+  admissionFeeRecordId  String?             // Link to admission FeeRecord once created
+  
   fees            StudentFee[]
   attendance      Attendance[]
   results         Result[]
@@ -91,6 +110,10 @@ model Student {
   parentId        String?
   parent          Parent?                 @relation(fields: [parentId], references: [id])
   academicHistory StudentAcademicRecord[]
+  
+  // New Fee System Relations
+  feeRecords      FeeRecord[]
+  feeOverrides    StudentFeeOverride[]
 }
 
 model Guardian {
@@ -174,11 +197,17 @@ model Invoice {
   paidAmount   Decimal   @default(0)
   status       String // 'unpaid', 'partial', 'paid'
   dueDate      DateTime?
-  billingMonth String? // 'YYYY-MM'
+  billingMonth String? // 'YYYY-MM', or 'YYYY-ADM' for an admission fee
   academicYear String? // '2026-27'
   invoiceNo    String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
+  
+  // Category fee system bridge. Exactly one Invoice per FeeRecord, which is what
+  // makes a generated/added FeeRecord collectable through the normal payment flow
+  // (Payment.invoiceId is required, so an Invoice has to exist to take money).
+  migrationFeeRecordId String?     @unique
+  migrationFeeRecord   FeeRecord?  @relation(fields: [migrationFeeRecordId], references: [id], onDelete: Cascade)
 
   student  Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
   items    InvoiceItem[]
@@ -214,10 +243,15 @@ model Payment {
   date           DateTime  @default(now())
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+  
+  // New Fee System linkage (FeeRecord is the owning side of this one-to-many)
+  feeRecordId    String?
+  feeRecord      FeeRecord? @relation("FeeRecordPayments", fields: [feeRecordId], references: [id], onDelete: SetNull)
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId, status])
+  @@index([feeRecordId])
 }
 
 model LedgerEntry {
@@ -225,14 +259,38 @@ model LedgerEntry {
   type             String // 'income', 'expense'
   category         String
   amount           Decimal
+  // Not unique: several ledger rows can legitimately point at one invoice, e.g. a
+  // partial payment and later a second instalment. paymentId is the per-transaction
+  // link. A voided payment keeps its original row with reversedAt set rather than
+  // gaining a cancelling row, so income nets out without a phantom expense.
   referenceInvoice String?
   paymentId        String?
   studentId        String?
+  
+  // New Fee System linkage
+  feeRecordId      String?  // Link to FeeRecord
+  feeCategoryId    String?  // Store fee category id for reporting
+  billingPeriod    String?  // Store billing period for reporting
+  
   date             DateTime @default(now())
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
+  // Set when a void/refund cancels this row out. A reversed row is retained for
+  // audit but must be excluded from every income/expense/profit total, otherwise
+  // voiding a payment would leave the original income counted in full.
+  reversedAt       DateTime?
+
+  feeRecord        FeeRecord? @relation(fields: [feeRecordId], references: [id], onDelete: SetNull)
+  feeCategoryModel FeeCategory? @relation(fields: [feeCategoryId], references: [id], onDelete: SetNull)
+
   @@index([date])
+  @@index([createdAt])
+  @@index([type, category])
+  @@index([reversedAt])
+  @@index([referenceInvoice])
+  @@index([feeRecordId])
+  @@index([feeCategoryId, billingPeriod])
 }
 
 model AuditLog {
@@ -414,6 +472,11 @@ model TeacherSalary {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   teacher     Teacher  @relation(fields: [teacherId], references: [id])
+
+  @@index([teacherId])
+  @@index([status])
+  @@index([paymentDate])
+  @@index([createdAt])
 }
 
 model StaffSalary {
@@ -428,6 +491,11 @@ model StaffSalary {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   staff       Staff    @relation(fields: [staffId], references: [id])
+
+  @@index([staffId])
+  @@index([status])
+  @@index([paymentDate])
+  @@index([createdAt])
 }
 
 model SchoolExpense {
@@ -438,6 +506,10 @@ model SchoolExpense {
   notes     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([category])
+  @@index([date])
+  @@index([createdAt])
 }
 
 model SchoolClass {
@@ -449,10 +521,13 @@ model SchoolClass {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  packages      AdmissionPackage[]
-  feeStructures FeeStructure[]
-  examSchedules ExamSchedule[]
-  classSubjects ClassSubjectTeacher[]
+  packages         AdmissionPackage[]
+  feeStructures    FeeStructure[]
+  examSchedules    ExamSchedule[]
+  classSubjects    ClassSubjectTeacher[]
+  
+  // New Fee System
+  feeAssignments   FeeAssignment[]
 }
 
 model FeeStructure {
@@ -833,3 +908,140 @@ model RoutinePeriod {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ============================================================================
+// NEW FEE SYSTEM MODELS (Category-Driven Architecture)
+// ============================================================================
+
+model FeeCategory {
+  id              String   @id @default(cuid())
+  name            String   // "Monthly Tuition", "Transport", "Admission", etc.
+  code            String   @unique // "TUITION", "TRANSPORT", "ADMISSION" (for deduplication)
+  description     String?
+  
+  // Billing Configuration
+  isRecurring     Boolean  @default(true) // Recurring (monthly, annual) vs. One-time
+  frequency       String   @default("monthly") // "monthly", "annual", "term", "once"
+  isGeneratable   Boolean  @default(true) // Can be bulk-generated via /fees/generate
+  
+  // Status
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  assignments     FeeAssignment[]
+  records         FeeRecord[]
+  overrides       StudentFeeOverride[]
+  ledgerEntries   LedgerEntry[]
+  
+  @@index([code])
+  @@index([isActive, isGeneratable])
+}
+
+model FeeAssignment {
+  id              String   @id @default(cuid())
+  categoryId      String
+  classId         String
+  amount          Decimal  // Default amount for this category in this class
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  category        FeeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  class           SchoolClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  records         FeeRecord[] // Fee records that used this assignment
+  
+  @@unique([categoryId, classId]) // One assignment per category per class
+  @@index([categoryId])
+  @@index([classId])
+  @@index([isActive])
+}
+
+model FeeRecord {
+  id              String   @id @default(cuid())
+  studentId       String
+  categoryId      String
+  billingPeriod   String   // "2026-10" (YYYY-MM) or "2026-ADM" for admission
+  
+  // Amount Calculation
+  assignmentAmount Decimal? // Original assigned amount (for audit)
+  amount          Decimal   // Final charge (after discounts/overrides)
+  
+  // Discount Structure
+  discountType    String?   // "percentage" | "fixed" | null
+  discountValue   Decimal?  // 10 (for 10%) or 300 (for ৳300)
+  discountAmount  Decimal   @default(0) // Calculated: finalAmount = amount - discount
+  
+  // Proration & Overrides
+  prorationType   String?   // "admission_day" | "mid_semester" | null
+  proratedDays    Int?      // Days charged for
+  totalDays       Int?      // Days in period (for calculation)
+  
+  // Metadata
+  notes           String?
+  source          String    @default("manual") // "manual" | "bulk_generation" | "package"
+  status          String    @default("due") // "due" | "partial" | "paid"
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  student         Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  category        FeeCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  assignment      FeeAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  assignmentId    String?
+  payments        Payment[] @relation("FeeRecordPayments")
+  ledgerEntries   LedgerEntry[]
+  invoice         Invoice?
+  override        StudentFeeOverride? @relation("FeeRecordOverride", fields: [overrideId], references: [id], onDelete: SetNull)
+  overrideId      String?   @unique
+  
+  @@unique([studentId, categoryId, billingPeriod]) // CRITICAL: Prevent duplicates
+  @@index([studentId])
+  @@index([categoryId])
+  @@index([billingPeriod])
+  @@index([status])
+  @@index([source])
+  @@index([createdAt])
+}
+
+model StudentFeeOverride {
+  id              String   @id @default(cuid())
+  studentId       String
+  categoryId      String
+  billingPeriod   String?  // "2026-10" or null = "applies to all periods for this category"
+  
+  // Override Values
+  overrideAmount  Decimal? // Override the assignment amount; null = waive fee
+  overrideDiscount Decimal? // Override the discount
+  discountType    String?   // "percentage" | "fixed"
+  overrideReason  String   // "Scholarship", "Hardship", "Sibling discount", etc.
+  
+  // Audit
+  approvedBy      String?  // Admin user ID who created override
+  validFrom       DateTime @default(now())
+  validTo         DateTime? // null = no end date
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  student         Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  category        FeeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  usedByRecord    FeeRecord? @relation("FeeRecordOverride")
+  feeRecordId     String?   @unique
+
+  @@index([studentId])
+  @@index([categoryId])
+  @@index([validFrom, validTo]) // Check if active
+}
+
+// Partial unique index for period-scoped overrides lives in the SQL migration.
+// Prisma cannot express "unique only when billingPeriod IS NOT NULL", so
+// standing overrides (NULL period) are de-duplicated in the service layer.
+
+// ============================================================================
+// NEW FEE SYSTEM MODELS (Category-Driven Architecture)
+// ============================================================================

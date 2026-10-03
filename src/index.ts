@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { authMiddleware } from './auth';
 import { checkRole } from './checkRole';
+import errorHandler from './middleware/errorHandler';
 import { validateGradingBands, defaultComponentConfig } from './grading-validation';
 import {
   netPaid,
@@ -28,6 +29,8 @@ import {
   roundMoney as feeRoundMoney,
 } from './fees/shared';
 import { buildMonthlyBlueprint, runMonthlyTuitionGeneration } from './fees/monthly-generation';
+import { refreshRecordStatus } from './fees/records';
+import feesRouter from './fees/routes';
 
 class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -52,6 +55,14 @@ app.set('json replacer', (_key: string, value: unknown) =>
 const money = (v: any): Prisma.Decimal => new Prisma.Decimal(v ?? 0);
 const roundMoney = (v: any): Prisma.Decimal => money(v).toDecimalPlaces(2);
 const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * Every income/expense/profit total must ignore ledger rows that a void has
+ * cancelled. A reversed row is kept for audit but no longer represents money
+ * that came in or went out. Spread this into the `where` of *all* LedgerEntry
+ * reads and aggregates; omitting it silently reinstates the double-count.
+ */
+const ACTIVE_LEDGER = { reversedAt: null } as const;
 
 // Before helmet/cors/body parsers so platform health probes always get a fast 200
 app.get('/health', (_req: Request, res: Response) => {
@@ -109,6 +120,11 @@ app.use(
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use(morgan('dev'));
+
+// Handle unhandled rejections at process level
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 import {
   isCloudinaryConfigured,
@@ -311,10 +327,13 @@ app.post('/notifications/read-all', authMiddleware, async (req: Request, res: Re
 });
 
 // Dashboard Stats
+// Short-lived per-user cache: this endpoint fans out to dozens of queries,
+// so repeat loads within the TTL skip all of them and return instantly.
+const DASH_STATS_TTL_MS = 60_000;
+const dashStatsCache = new Map<string, { at: number; body: any }>();
 app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) => {
   try {
-  const user = (req as any).user;
-  const now = new Date();
+  const user = (req as any).user;  const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
   const todayEnd = new Date(todayStart);
@@ -334,6 +353,12 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   }
   const attEnd = new Date(attStart);
   attEnd.setUTCDate(attEnd.getUTCDate() + 1);
+
+  const dashCacheKey = `${user?.role ?? ''}:${user?.id ?? ''}:${requestedAttendanceDay}`;
+  const dashCached = dashStatsCache.get(dashCacheKey);
+  if (dashCached && Date.now() - dashCached.at < DASH_STATS_TTL_MS) {
+    return res.json(dashCached.body);
+  }
 
   // Scope student counts to the teacher's head-teacher classes so the
   // dashboard matches what the teacher sees on the Students page.
@@ -397,33 +422,83 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const mStart = new Date(currentYear, currentMonth, 1);
   const mEnd = new Date(currentYear, currentMonth + 1, 1);
 
-  const [ledgerIncome, ledgerExpense] = await Promise.all([
-    prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: {
-        type: 'income',
-        createdAt: { gte: mStart, lt: mEnd }
-      }
+  // All ledger sums (month / today / 6-month / daily / yearly) come from ONE
+  // bounded read + JS bucketing. ledgerEntry has no createdAt index, so the
+  // old per-bucket aggregates (~100 full table scans per load) were the main
+  // dashboard bottleneck.
+  const histFloor = new Date(currentYear, currentMonth - 5, 1);
+  const [recentEntries, allTimeIncome, allTimeExpense] = await Promise.all([
+    prisma.ledgerEntry.findMany({
+      where: { ...ACTIVE_LEDGER, createdAt: { gte: histFloor } },
+      select: { type: true, amount: true, createdAt: true },
     }),
     prisma.ledgerEntry.aggregate({
       _sum: { amount: true },
-      where: {
-        type: 'expense',
-        createdAt: { gte: mStart, lt: mEnd }
-      }
+      where: { ...ACTIVE_LEDGER, type: 'income' }
+    }),
+    prisma.ledgerEntry.aggregate({
+      _sum: { amount: true },
+      where: { ...ACTIVE_LEDGER, type: 'expense' }
     }),
   ]);
 
-  const [todayIncome, todayExpense] = await Promise.all([
-    prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'income', createdAt: { gte: todayStart, lt: todayEnd } }
-    }),
-    prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'expense', createdAt: { gte: todayStart, lt: todayEnd } }
-    })
-  ]);
+  const num = (v: any) => money(v).toNumber();
+  let monthIncomeAmt = 0;
+  let monthExpenseAmt = 0;
+  let todayIncomeAmt = 0;
+  let todayExpenseAmt = 0;
+  // Build 6-month history buckets (oldest -> newest).
+  const historyRanges = Array.from({ length: 6 }, (_, k) => {
+    const i = 5 - k;
+    return {
+      histStart: new Date(currentYear, currentMonth - i, 1),
+      histEnd: new Date(currentYear, currentMonth - i + 1, 1),
+    };
+  });
+  const histIncByKey = new Map<number, number>(historyRanges.map((r) => [r.histStart.getTime(), 0]));
+  const histExpByKey = new Map<number, number>(historyRanges.map((r) => [r.histStart.getTime(), 0]));
+  // Daily history for the current month (day 1 -> today).
+  const todayDay = new Date().getDate();
+  const dailyInc = new Array<number>(todayDay).fill(0);
+  const dailyExp = new Array<number>(todayDay).fill(0);
+  // Yearly history for the current year (Jan -> current month).
+  const yearlyInc = new Array<number>(currentMonth + 1).fill(0);
+  const yearlyExp = new Array<number>(currentMonth + 1).fill(0);
+
+  const mStartT = mStart.getTime();
+  const mEndT = mEnd.getTime();
+  const todayStartT = todayStart.getTime();
+  const todayEndT = todayEnd.getTime();
+  for (const e of recentEntries) {
+    const amt = num(e.amount);
+    const d = new Date(e.createdAt);
+    const t = d.getTime();
+    const isInc = e.type === 'income';
+    if (t >= mStartT && t < mEndT) {
+      if (isInc) monthIncomeAmt += amt; else monthExpenseAmt += amt;
+    }
+    if (t >= todayStartT && t < todayEndT) {
+      if (isInc) todayIncomeAmt += amt; else todayExpenseAmt += amt;
+    }
+    const monthKey = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    if (histIncByKey.has(monthKey)) {
+      if (isInc) histIncByKey.set(monthKey, (histIncByKey.get(monthKey) ?? 0) + amt);
+      else histExpByKey.set(monthKey, (histExpByKey.get(monthKey) ?? 0) + amt);
+    }
+    if (d.getFullYear() === currentYear && d.getMonth() === currentMonth && d.getDate() >= 1 && d.getDate() <= todayDay) {
+      if (isInc) dailyInc[d.getDate() - 1] += amt; else dailyExp[d.getDate() - 1] += amt;
+    }
+    if (d.getFullYear() === currentYear && d.getMonth() <= currentMonth) {
+      if (isInc) yearlyInc[d.getMonth()] += amt; else yearlyExp[d.getMonth()] += amt;
+    }
+  }
+
+  const historyIncome = historyRanges.map((r) => ({ date: r.histStart, amount: round2(histIncByKey.get(r.histStart.getTime()) ?? 0) }));
+  const historyExpense = historyRanges.map((r) => ({ date: r.histStart, amount: round2(histExpByKey.get(r.histStart.getTime()) ?? 0) }));
+  const dailyIncome = dailyInc.map((amount, idx) => ({ date: new Date(currentYear, currentMonth, idx + 1), amount: round2(amount) }));
+  const dailyExpense = dailyExp.map((amount, idx) => ({ date: new Date(currentYear, currentMonth, idx + 1), amount: round2(amount) }));
+  const yearlyIncome = yearlyInc.map((amount, m) => ({ date: new Date(currentYear, m, 1), amount: round2(amount) }));
+  const yearlyExpense = yearlyExp.map((amount, m) => ({ date: new Date(currentYear, m, 1), amount: round2(amount) }));
 
   const studentsPerClass = await prisma.student.groupBy({
     by: ['class'],
@@ -469,17 +544,6 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     }
   }
 
-  const [allTimeIncome, allTimeExpense] = await Promise.all([
-    prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'income' }
-    }),
-    prisma.ledgerEntry.aggregate({
-      _sum: { amount: true },
-      where: { type: 'expense' }
-    }),
-  ]);
-
   const incomeTotal = money(allTimeIncome._sum.amount);
   const expenseTotal = money(allTimeExpense._sum.amount);
   const totalBalance = incomeTotal.minus(expenseTotal);
@@ -507,86 +571,10 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       guardianPhone: r.student?.guardianPhone || ''
     }));
 
-  // Build 6-month history for chart (batched — sequential awaits here
-  // cost ~1 RTT per query, ~12 RTTs total, on every dashboard load)
-  const historyRanges = Array.from({ length: 6 }, (_, k) => {
-    const i = 5 - k;
-    return {
-      histStart: new Date(currentYear, currentMonth - i, 1),
-      histEnd: new Date(currentYear, currentMonth - i + 1, 1),
-    };
-  });
-  const historyResults = await Promise.all(
-    historyRanges.map(async ({ histStart, histEnd }) => {
-      const [li, le] = await Promise.all([
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'income', createdAt: { gte: histStart, lt: histEnd } }
-        }),
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'expense', createdAt: { gte: histStart, lt: histEnd } }
-        }),
-      ]);
-      return {
-        income: { date: histStart, amount: money(li._sum.amount).toNumber() },
-        expense: { date: histStart, amount: money(le._sum.amount).toNumber() },
-      };
-    }),
-  );
-  const historyIncome = historyResults.map((r) => r.income);
-  const historyExpense = historyResults.map((r) => r.expense);
+  // History series (6-month / daily / yearly) were bucketed above from the
+  // single bounded ledger read.
 
-  // Daily history for the current month (day 1 -> today), batched
-  const todayDay = new Date().getDate();
-  const dailyResults = await Promise.all(
-    Array.from({ length: todayDay }, (_, k) => k + 1).map(async (d) => {
-      const dStart = new Date(currentYear, currentMonth, d);
-      const dEnd = new Date(currentYear, currentMonth, d + 1);
-      const [dli, dle] = await Promise.all([
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'income', createdAt: { gte: dStart, lt: dEnd } }
-        }),
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'expense', createdAt: { gte: dStart, lt: dEnd } }
-        }),
-      ]);
-      return {
-        income: { date: dStart, amount: money(dli._sum.amount).toNumber() },
-        expense: { date: dStart, amount: money(dle._sum.amount).toNumber() },
-      };
-    }),
-  );
-  const dailyIncome = dailyResults.map((r) => r.income);
-  const dailyExpense = dailyResults.map((r) => r.expense);
-
-  // Yearly history for the current year (Jan -> current month), batched
-  const yearlyResults = await Promise.all(
-    Array.from({ length: currentMonth + 1 }, (_, m) => m).map(async (m) => {
-      const mStart = new Date(currentYear, m, 1);
-      const mEnd = new Date(currentYear, m + 1, 1);
-      const [mli, mle] = await Promise.all([
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'income', createdAt: { gte: mStart, lt: mEnd } }
-        }),
-        prisma.ledgerEntry.aggregate({
-          _sum: { amount: true },
-          where: { type: 'expense', createdAt: { gte: mStart, lt: mEnd } }
-        }),
-      ]);
-      return {
-        income: { date: mStart, amount: money(mli._sum.amount).toNumber() },
-        expense: { date: mStart, amount: money(mle._sum.amount).toNumber() },
-      };
-    }),
-  );
-  const yearlyIncome = yearlyResults.map((r) => r.income);
-  const yearlyExpense = yearlyResults.map((r) => r.expense);
-
-  res.json({
+  const dashboardBody = {
     counts: {
       students: totalStudents,
       activeStudents,
@@ -601,8 +589,8 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       expense: expenseTotal,
       profit: incomeTotal.minus(expenseTotal),
       totalBalance,
-      todayIncome: money(todayIncome._sum.amount),
-      todayExpense: money(todayExpense._sum.amount),
+      todayIncome: money(todayIncomeAmt),
+      todayExpense: money(todayExpenseAmt),
       feesDue,
       feesCollected,
       feeOverdue: feeOverdue.toNumber(),
@@ -643,7 +631,15 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       message: `${a.name} joined Class ${a.class}`,
       date: a.createdAt
     }))
-  });
+  };
+
+  // Cache briefly so repeat dashboard loads return instantly.
+  if (dashStatsCache.size > 500) {
+    const oldest = dashStatsCache.keys().next();
+    if (!oldest.done) dashStatsCache.delete(oldest.value);
+  }
+  dashStatsCache.set(dashCacheKey, { at: Date.now(), body: dashboardBody });
+  res.json(dashboardBody);
   } catch (error: any) {
     console.error('Dashboard stats error:', error);
     res.status(500).json({ error: 'Failed to load dashboard stats' });
@@ -651,8 +647,15 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
 });
 
 // Admin - Reset Data (Danger Zone: Clear All Data)
-app.delete('/admin/reset-data', async (_req: Request, res: Response) => {
+app.delete('/admin/reset-data', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Verify the reset token matches environment variable
+    const resetToken = req.query.token ? String(req.query.token) : '';
+    const expectedToken = process.env.RESET_DATA_TOKEN;
+    
+    if (!expectedToken || resetToken !== expectedToken) {
+      return res.status(403).json({ error: 'Invalid or missing reset token' });
+    }
     // Delete in FK-safe order: leaves -> roots. Keep User/Admin accounts + Institute profile.
     // Any failure is logged with details so frontend can show why.
     await prisma.$transaction(async (tx) => {
@@ -779,11 +782,11 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
     if (type === 'profit') {
       const income = await prisma.ledgerEntry.aggregate({
         _sum: { amount: true },
-        where: { type: 'income', ...dateFilter }
+        where: { ...ACTIVE_LEDGER, type: 'income', ...dateFilter }
       });
       const expense = await prisma.ledgerEntry.aggregate({
         _sum: { amount: true },
-        where: { type: 'expense', ...dateFilter }
+        where: { ...ACTIVE_LEDGER, type: 'expense', ...dateFilter }
       });
       const incomeTotal = money(income._sum.amount);
       const expenseTotal = money(expense._sum.amount);
@@ -794,7 +797,7 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
       });
     }
 
-    const where = { type, ...dateFilter };
+    const where = { ...ACTIVE_LEDGER, type, ...dateFilter };
     const [grouped, entries] = await Promise.all([
       prisma.ledgerEntry.groupBy({
         by: ['category'],
@@ -3374,65 +3377,73 @@ app.get('/student/:id/performance', authMiddleware, checkRole(['Admin']), async 
 });
 
 // ---- Report card data ----
+/** Shared report-card builder used by the admin and student endpoints. */
+async function buildStudentReportCard(examId: string, studentId: string, userEmail?: string) {
+  const report = await buildExamReport(examId);
+  const agg = report.students.find((s) => s.studentId === studentId);
+  if (!agg) return null;
+
+  const student = await prisma.student.findUnique({ where: { id: studentId } });
+  const institute =
+    (userEmail ? await prisma.institute.findUnique({ where: { email: userEmail } }) : null) ??
+    (await prisma.institute.findFirst());
+
+  const rows = report.results
+    .filter((r: any) => r.studentId === studentId)
+    .map((r: any) => ({
+      subject: report.subjectName.get(r.subjectId) || r.subjectId,
+      written: r.written,
+      mcq: r.mcq,
+      practical: r.practical,
+      total: r.totalMarks,
+      fullMarks: report.subjectDefaultFullMarks.get(r.subjectId) ?? 100,
+      grade: r.grade || '',
+      gp: r.gp ?? 0,
+      highestMarks: r.highestMarks,
+      isAbsent: !!r.isAbsent
+    }))
+    .sort((a: any, b: any) => a.subject.localeCompare(b.subject));
+
+  // Rank within class.
+  const clsRanked = report.students
+    .filter((s: any) => s.class === agg.class)
+    .sort((a: any, b: any) => b.gpa - a.gpa || b.percentage - a.percentage);
+  const position = clsRanked.findIndex((s: any) => s.studentId === studentId) + 1;
+
+  // Attendance percentage.
+  const attendance = await prisma.attendance.findMany({ where: { studentId } });
+  const present = attendance.filter((a) => normalizeAttendanceStatus(a.status) === 'Present').length;
+  const attendancePct = attendance.length ? Math.round((present / attendance.length) * 100) : 0;
+
+  return {
+    institute: { name: institute?.name, logo: institute?.logo, address: institute?.address, phone: institute?.phone, email: institute?.email, targetLine: institute?.targetLine },
+    student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, roll: student?.roll, class: student?.class, section: student?.section },
+    exam: { id: report.exam.id, name: report.exam.name, academicYear: report.exam.academicYear, type: report.exam.type?.name || '' },
+    rows,
+    totals: {
+      totalMarks: agg.totalMarks,
+      fullMarks: agg.fullMarks,
+      percentage: agg.percentage,
+      gpa: agg.gpa,
+      grade: agg.grade,
+      passed: agg.passed
+    },
+    position,
+    attendance: { present, total: attendance.length, percentage: attendancePct }
+  };
+}
+
 app.get('/results/:examId/report-card', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
     const { studentId } = req.query as any;
     if (!studentId) return res.status(400).json({ error: 'studentId is required' });
 
-    const report = await buildExamReport(examId);
-    const agg = report.students.find((s) => s.studentId === studentId);
-    if (!agg) return res.status(404).json({ error: 'No results for this student in this exam' });
-
-    const student = await prisma.student.findUnique({ where: { id: studentId } });
     const user = (req as any).user;
-    const institute =
-      (user?.email ? await prisma.institute.findUnique({ where: { email: user.email } }) : null) ??
-      (await prisma.institute.findFirst());
+    const body = await buildStudentReportCard(examId, studentId, user?.email);
+    if (!body) return res.status(404).json({ error: 'No results for this student in this exam' });
 
-    const rows = report.results
-      .filter((r: any) => r.studentId === studentId)
-      .map((r: any) => ({
-        subject: report.subjectName.get(r.subjectId) || r.subjectId,
-        written: r.written,
-        mcq: r.mcq,
-        practical: r.practical,
-        total: r.totalMarks,
-        fullMarks: report.subjectDefaultFullMarks.get(r.subjectId) ?? 100,
-        grade: r.grade || '',
-        gp: r.gp ?? 0,
-        highestMarks: r.highestMarks,
-        isAbsent: !!r.isAbsent
-      }))
-      .sort((a: any, b: any) => a.subject.localeCompare(b.subject));
-
-    // Rank within class.
-    const clsRanked = report.students
-      .filter((s: any) => s.class === agg.class)
-      .sort((a: any, b: any) => b.gpa - a.gpa || b.percentage - a.percentage);
-    const position = clsRanked.findIndex((s: any) => s.studentId === studentId) + 1;
-
-    // Attendance percentage.
-    const attendance = await prisma.attendance.findMany({ where: { studentId } });
-    const present = attendance.filter((a) => normalizeAttendanceStatus(a.status) === 'Present').length;
-    const attendancePct = attendance.length ? Math.round((present / attendance.length) * 100) : 0;
-
-    res.json({
-      institute: { name: institute?.name, logo: institute?.logo, address: institute?.address, phone: institute?.phone, email: institute?.email, targetLine: institute?.targetLine },
-      student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, roll: student?.roll, class: student?.class, section: student?.section },
-      exam: { id: report.exam.id, name: report.exam.name, academicYear: report.exam.academicYear, type: report.exam.type?.name || '' },
-      rows,
-      totals: {
-        totalMarks: agg.totalMarks,
-        fullMarks: agg.fullMarks,
-        percentage: agg.percentage,
-        gpa: agg.gpa,
-        grade: agg.grade,
-        passed: agg.passed
-      },
-      position,
-      attendance: { present, total: attendance.length, percentage: attendancePct }
-    });
+    res.json(body);
   } catch (error: any) {
     console.error('Error building report card:', error);
     res.status(500).json({ error: 'Failed to build report card', details: error.message });
@@ -4407,12 +4418,12 @@ app.get('/fees', async (_req: Request, res: Response) => {
   res.json(fees);
 });
 
-app.post('/fees', async (req: Request, res: Response) => {
+app.post('/fees', authMiddleware, async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().min(1),
     feeType: z.string(),
-    amount: z.number(),
-    discount: z.number().default(0),
+    amount: z.number().positive(),
+    discount: z.number().nonnegative().default(0),
     status: z.enum(['Paid', 'Due', 'Partial']).default('Due'),
   });
   const parsed = schema.safeParse(req.body);
@@ -4421,7 +4432,7 @@ app.post('/fees', async (req: Request, res: Response) => {
   res.status(201).json(fee);
 });
 
-app.put('/fees/:id', async (req: Request, res: Response) => {
+app.put('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     studentId: z.string().optional(),
@@ -4436,9 +4447,21 @@ app.put('/fees/:id', async (req: Request, res: Response) => {
   res.json(fee);
 });
 
-app.post('/fees/:id/pay', async (req: Request, res: Response) => {
+app.post('/fees/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
+    // Check if payment ledger entry already exists to prevent double-counting
+    const existingLedger = await tx.ledgerEntry.findFirst({
+      where: {
+        ...ACTIVE_LEDGER,
+        referenceInvoice: id,
+        type: 'income'
+      }
+    });
+    if (existingLedger) {
+      throw new HttpError(400, 'Payment has already been recorded');
+    }
+    
     const fee = await tx.studentFee.update({ where: { id }, data: { status: 'Paid' } });
     await tx.ledgerEntry.create({
       data: {
@@ -4453,7 +4476,7 @@ app.post('/fees/:id/pay', async (req: Request, res: Response) => {
   res.json(result);
 });
 
-app.delete('/fees/:id', async (req: Request, res: Response) => {
+app.delete('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.studentFee.delete({ where: { id } });
@@ -4486,26 +4509,40 @@ app.post('/salaries/process', async (req: Request, res: Response) => {
   const paymentDate = new Date(year, month, 28);
   const teachers = await prisma.teacher.findMany({ where: { id: { in: teacherIds } } });
   const newRecords = await prisma.$transaction(
-    teachers.map(t =>
-      prisma.teacherSalary.create({
+    teachers.map(t => {
+      // Use teacher's actual salary, or fallback to provided baseSalary, or default to 3000
+      const salary = t.salary ?? baseSalary ?? 3000;
+      return prisma.teacherSalary.create({
         data: {
           teacherId: t.id,
-          baseSalary: baseSalary ?? 3000,
+          baseSalary: salary,
           bonus: 0,
           deductions: 0,
-          netSalary: (baseSalary ?? 3000),
+          netSalary: salary,
           paymentDate,
           status: 'Pending',
         },
-      })
-    )
+      });
+    })
   );
   res.status(201).json(newRecords);
 });
 
-app.post('/salaries/:id/pay', async (req: Request, res: Response) => {
+app.post('/salaries/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
+    // Check if payment ledger entry already exists to prevent double-counting
+    const existingLedger = await tx.ledgerEntry.findFirst({
+      where: {
+        ...ACTIVE_LEDGER,
+        referenceInvoice: id,
+        type: 'expense'
+      }
+    });
+    if (existingLedger) {
+      throw new HttpError(400, 'Payment has already been recorded');
+    }
+    
     const salary = await tx.teacherSalary.update({ where: { id }, data: { status: 'Paid' } });
     await tx.ledgerEntry.create({
       data: {
@@ -4540,10 +4577,10 @@ app.get('/expenses', async (_req: Request, res: Response) => {
   res.json(expenses);
 });
 
-app.post('/expenses', async (req: Request, res: Response) => {
+app.post('/expenses', authMiddleware, async (req: Request, res: Response) => {
   const schema = z.object({
     category: z.string(),
-    amount: z.number(),
+    amount: z.number().positive(),
     date: z.string().transform((d) => new Date(d)),
     notes: z.string().optional()
   });
@@ -4566,7 +4603,7 @@ app.post('/expenses', async (req: Request, res: Response) => {
   res.status(201).json(result);
 });
 
-app.put('/expenses/:id', async (req: Request, res: Response) => {
+app.put('/expenses/:id', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     category: z.string().optional(),
@@ -4576,13 +4613,32 @@ app.put('/expenses/:id', async (req: Request, res: Response) => {
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const expense = await prisma.schoolExpense.update({ where: { id }, data: parsed.data });
-  res.json(expense);
+  
+  const result = await prisma.$transaction(async (tx) => {
+    const expense = await tx.schoolExpense.update({ where: { id }, data: parsed.data });
+    
+    // If amount changed, also update the ledger entry
+    if (parsed.data.amount !== undefined) {
+      await tx.ledgerEntry.updateMany({
+        where: { referenceInvoice: id },
+        data: { amount: parsed.data.amount }
+      });
+    }
+    
+    return expense;
+  });
+  res.json(result);
 });
 
-app.delete('/expenses/:id', async (req: Request, res: Response) => {
+app.delete('/expenses/:id', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
-  await prisma.schoolExpense.delete({ where: { id } });
+  await prisma.$transaction(async (tx) => {
+    // Find and delete the associated ledger entry
+    await tx.ledgerEntry.deleteMany({
+      where: { referenceInvoice: id }
+    });
+    await tx.schoolExpense.delete({ where: { id } });
+  });
   res.status(204).send();
 });
 
@@ -4645,6 +4701,84 @@ app.delete('/classes/:id', async (req: Request, res: Response) => {
     }
     console.error('Delete class error:', error);
     res.status(500).json({ error: 'Failed to delete class', details: error.message });
+  }
+});
+
+// Announcements (school-wide notice board)
+const announcementTarget = z.enum(['All', 'Teachers', 'Students', 'Parents']);
+const toAnnouncement = (a: any) => ({ ...a, date: a.createdAt });
+
+app.get('/announcements', async (_req: Request, res: Response) => {
+  try {
+    const items = await prisma.announcement.findMany({ orderBy: { createdAt: 'desc' } });
+    res.json(items.map(toAnnouncement));
+  } catch (error: any) {
+    console.error('Fetch announcements error:', error);
+    res.status(500).json({ error: 'Failed to fetch announcements' });
+  }
+});
+
+app.post('/announcements', async (req: Request, res: Response) => {
+  const schema = z.object({
+    title: z.string().min(1),
+    content: z.string().min(1),
+    author: z.string().min(1).optional(),
+    role: z.string().min(1).optional(),
+    target: announcementTarget.optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const created = await prisma.announcement.create({
+      data: {
+        title: parsed.data.title,
+        content: parsed.data.content,
+        author: parsed.data.author ?? 'Admin',
+        role: parsed.data.role ?? 'Admin',
+        target: parsed.data.target ?? 'All',
+      },
+    });
+    res.status(201).json(toAnnouncement(created));
+  } catch (error: any) {
+    console.error('Create announcement error:', error);
+    res.status(500).json({ error: 'Failed to create announcement' });
+  }
+});
+
+app.put('/announcements/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const schema = z.object({
+    title: z.string().min(1).optional(),
+    content: z.string().min(1).optional(),
+    author: z.string().min(1).optional(),
+    role: z.string().min(1).optional(),
+    target: announcementTarget.optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  try {
+    const updated = await prisma.announcement.update({ where: { id }, data: parsed.data });
+    res.json(toAnnouncement(updated));
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Announcement not found' });
+    }
+    console.error('Update announcement error:', error);
+    res.status(500).json({ error: 'Failed to update announcement' });
+  }
+});
+
+app.delete('/announcements/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    await prisma.announcement.delete({ where: { id } });
+    res.status(204).send();
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Announcement not found' });
+    }
+    console.error('Delete announcement error:', error);
+    res.status(500).json({ error: 'Failed to delete announcement' });
   }
 });
 
@@ -5159,9 +5293,17 @@ app.post('/store/sales', async (req: Request, res: Response) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { studentId, items, saleDate, paymentStatus } = parsed.data;
-  const totalAmount = items.reduce((s, it) => s + it.quantity * it.price, 0);
+  const totalAmount = items.reduce((s, it) => roundMoney(money(it.quantity * it.price).plus(s)), money(0));
 
   const result = await prisma.$transaction(async (tx) => {
+    // Ensure stock doesn't go negative
+    for (const it of items) {
+      const product = await tx.product.findUnique({ where: { id: it.productId } });
+      if (!product || product.currentStock < it.quantity) {
+        throw new HttpError(400, `Insufficient stock for product ${it.productId}. Available: ${product?.currentStock || 0}, Requested: ${it.quantity}`);
+      }
+    }
+
     const sale = await tx.sale.create({
       data: {
         studentId: studentId ?? null,
@@ -5299,7 +5441,7 @@ app.post('/admission-packages', async (req: Request, res: Response) => {
     description: z.string().optional(),
     feeItems: z.array(z.object({
       name: z.string(),
-      amount: z.number(),
+      amount: z.number().positive(),
       isMandatory: z.boolean().default(true)
     }))
   });
@@ -5334,7 +5476,7 @@ app.put('/admission-packages/:id', async (req: Request, res: Response) => {
     feeItems: z.array(z.object({
       id: z.string().optional(),
       name: z.string(),
-      amount: z.number(),
+      amount: z.number().positive(),
       isMandatory: z.boolean().default(true)
     })).optional()
   });
@@ -5559,24 +5701,81 @@ app.post('/students/admission', async (req: Request, res: Response) => {
         }
       });
 
-      // 3. Create Invoice
-      const invoice = await tx.invoice.create({
-        data: {
-          studentId: newStudent.id,
-          type: 'admission',
-          totalAmount,
-          status: fullyCovered ? 'paid' : 'unpaid',
-          items: {
-            create: pkg.feeItems.map(item => ({
-              name: item.name,
-              amount: item.amount
-            }))
-          }
-        },
-        include: { items: true }
-      });
+       // 3. Create FeeRecord for admission (New Fee System)
+       // First, ensure ADMISSION fee category exists
+       let admissionCategory = await (tx as any).feeCategory.findUnique({
+         where: { code: 'ADMISSION' }
+       });
 
-      return { student: newStudent, invoice };
+       if (!admissionCategory) {
+         admissionCategory = await (tx as any).feeCategory.create({
+           data: {
+             code: 'ADMISSION',
+             name: 'Admission Fee',
+             description: 'One-time admission fee',
+             isRecurring: false,
+             frequency: 'once',
+             isGeneratable: false,
+             isActive: true
+           }
+         });
+       }
+
+       // Create FeeRecord for admission
+       const admissionFeeRecord = await (tx as any).feeRecord.create({
+         data: {
+           studentId: newStudent.id,
+           categoryId: admissionCategory.id,
+           billingPeriod: `${new Date().getFullYear()}-ADM`,
+           amount: totalAmount,
+           assignmentAmount: totalAmount,
+           source: 'package',
+           status: fullyCovered ? 'paid' : 'due',
+           notes: `Admission fee for package: ${pkg.name}`
+         }
+       });
+
+// Create LedgerEntry for admission fee
+        await (tx as any).ledgerEntry.create({
+          data: {
+            type: 'income',
+            category: 'admission_fee',
+            amount: totalAmount,
+            feeRecordId: admissionFeeRecord.id,
+            feeCategoryId: admissionCategory.id,
+            billingPeriod: `${new Date().getFullYear()}-ADM`,
+            studentId: newStudent.id
+          }
+        });
+
+       // Update Student with admission FeeRecord link
+       await (tx as any).student.update({
+         where: { id: newStudent.id },
+         data: {
+           admissionFeeRecordId: admissionFeeRecord.id,
+           admissionStatus: fullyCovered ? 'completed' : 'pending'
+         }
+       });
+
+       // 4. Create Invoice (for backward compatibility)
+       const invoice = await tx.invoice.create({
+         data: {
+           studentId: newStudent.id,
+           type: 'admission',
+           totalAmount,
+           status: fullyCovered ? 'paid' : 'unpaid',
+           migrationFeeRecordId: admissionFeeRecord.id,
+           items: {
+             create: pkg.feeItems.map(item => ({
+               name: item.name,
+               amount: item.amount
+             }))
+           }
+         },
+         include: { items: true }
+       });
+
+       return { student: newStudent, admissionFeeRecord, invoice };
     });
 
     res.json(result);
@@ -5590,7 +5789,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
 });
 
 // Payments
-app.post('/payments', async (req: Request, res: Response) => {
+app.post('/payments', authMiddleware, async (req: Request, res: Response) => {
   const schema = z.object({
     invoiceId: z.string(),
     amount: z.number().positive(),
@@ -5619,6 +5818,10 @@ app.post('/payments', async (req: Request, res: Response) => {
           status: true,
           type: true,
           academicYear: true,
+          migrationFeeRecordId: true,
+          // Joined in rather than fetched separately so the ledger entry below can be
+          // attributed without another round trip inside the transaction.
+          migrationFeeRecord: { select: { id: true, categoryId: true, billingPeriod: true } },
         },
       });
       if (!invoice) throw new HttpError(404, 'Invoice not found');
@@ -5641,35 +5844,56 @@ app.post('/payments', async (req: Request, res: Response) => {
           receivedBy,
           paymentNo,
           date: paymentDate,
+          // Link back to the category fee record so its status can be derived.
+          feeRecordId: invoice.migrationFeeRecordId ?? null,
         },
       });
 
-      await recalcInvoiceTx(tx, invoiceId);
+await recalcInvoiceTx(tx, invoiceId);
 
-      if (invoice.type === 'admission') {
-        const updated = await tx.invoice.findUnique({
-          where: { id: invoiceId },
-          select: { status: true },
+       // Keep any linked FeeRecord status in step with real payments
+       // (partial vs paid vs waived) rather than assuming a full settlement.
+       if (invoice.migrationFeeRecordId) {
+         await refreshRecordStatus(tx, invoice.migrationFeeRecordId);
+       }
+
+       // Handle student activation for admission fees
+       if (invoice.type === 'admission') {
+         const updated = await tx.invoice.findUnique({
+           where: { id: invoiceId },
+           select: { status: true },
+         });
+
+         if (updated?.status === 'paid') {
+           // Update student status and admission status
+           await tx.student.update({
+             where: { id: invoice.studentId },
+             data: {
+               status: 'Active',
+               admissionStatus: 'completed'
+             },
+           });
+         }
+       }
+
+// A bridged invoice is a category fee, so tag the income row the same way the
+        // admission flow does — otherwise category fee reports cannot attribute it.
+        const bridgedRecord = invoice.migrationFeeRecord ?? null;
+
+        await tx.ledgerEntry.create({
+          data: {
+            type: 'income',
+            category: invoice.type === 'admission' ? 'admission_fee' : 'fee_collection',
+            amount: money(amount).toDecimalPlaces(2),
+            referenceInvoice: invoiceId,
+            paymentId: payment.id,
+            studentId: invoice.studentId,
+            feeRecordId: bridgedRecord?.id ?? null,
+            feeCategoryId: bridgedRecord?.categoryId ?? null,
+            billingPeriod: bridgedRecord?.billingPeriod ?? null,
+            date: paymentDate,
+          },
         });
-        if (updated?.status === 'paid') {
-          await tx.student.update({
-            where: { id: invoice.studentId },
-            data: { status: 'Active' },
-          });
-        }
-      }
-
-      await tx.ledgerEntry.create({
-        data: {
-          type: 'income',
-          category: invoice.type === 'admission' ? 'admission_fee' : 'fee_collection',
-          amount: money(amount).toDecimalPlaces(2),
-          referenceInvoice: invoiceId,
-          paymentId: payment.id,
-          studentId: invoice.studentId,
-          date: paymentDate,
-        },
-      });
 
       await logAudit(tx, {
         action: 'payment.create',
@@ -5681,7 +5905,7 @@ app.post('/payments', async (req: Request, res: Response) => {
       });
 
       return payment;
-    });
+    }, PAYMENT_TX_OPTIONS);
 
     res.json(result);
   } catch (error: any) {
@@ -5693,6 +5917,14 @@ app.post('/payments', async (req: Request, res: Response) => {
   }
 });
 
+// Payments, voids and invoice creation each run several queries inside one interactive
+// transaction. Prisma's default 5s budget is not enough for them over a remote pooler,
+// where a single round trip can take the best part of a second, and the transaction
+// aborting mid-way surfaces to the user as a bare 500. Take a payment on a slow link
+// first and this fires regularly.
+const MONEY_TX_OPTIONS = { timeout: 30000, maxWait: 15000 };
+const PAYMENT_TX_OPTIONS = MONEY_TX_OPTIONS;
+
 // Void / refund — payments are immutable. Voiding keeps the row (status='voided')
 // + audit trail, recalculates the invoice, and writes a reversing ledger entry.
 const reversePayment = async (paymentId: string, opts: { reason: string; actor?: string }) => {
@@ -5702,10 +5934,6 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
     if (isVoided(payment)) throw new HttpError(400, 'Payment already voided');
 
     await lockInvoice(tx, payment.invoiceId);
-    const invoice = await tx.invoice.findUnique({
-      where: { id: payment.invoiceId },
-      select: { studentId: true },
-    });
 
     const updatedPayment = await tx.payment.update({
       where: { id: payment.id },
@@ -5714,17 +5942,34 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
 
     await recalcInvoiceTx(tx, payment.invoiceId);
 
-    await tx.ledgerEntry.create({
-      data: {
-        type: 'expense',
-        category: 'payment_void',
-        amount: payment.amount,
-        referenceInvoice: payment.invoiceId,
+    // A voided payment reduces what is settled, so the linked fee record
+    // must be re-derived (it may fall back from 'paid' to 'partial'/'due').
+    if (payment.feeRecordId) {
+      await refreshRecordStatus(tx, payment.feeRecordId);
+    }
+
+    // A void cancels the original income rather than appending a second row.
+    // Appending an expense left income counted in full *and* added an equal
+    // expense, so every voided payment moved profit by twice its amount.
+    // Flagging the row keeps it for audit and nets it out of all totals, which
+    // exclude reversedAt != null.
+    const reversed = await tx.ledgerEntry.updateMany({
+      where: {
+        type: 'income',
         paymentId: payment.id,
-        studentId: invoice?.studentId ?? null,
-        date: new Date(),
+        reversedAt: null,
       },
+      data: { reversedAt: new Date() },
     });
+
+    if (reversed.count === 0) {
+      // No linked income row (e.g. income booked without a Payment row). Record
+      // the shortfall so the gap is visible instead of silently skewing totals.
+      console.warn(
+        `[reversePayment] payment ${payment.id} (${payment.paymentNo ?? 'no paymentNo'}) ` +
+          `voided but no income ledger row was found to reverse`,
+      );
+    }
 
     await logAudit(tx, {
       action: 'payment.void',
@@ -5736,10 +5981,10 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
     });
 
     return { ...updatedPayment };
-  });
+  }, MONEY_TX_OPTIONS);
 };
 
-app.post('/payments/:id/void', async (req: Request, res: Response) => {
+app.post('/payments/:id/void', authMiddleware, async (req: Request, res: Response) => {
   const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
   const parsed = schema.safeParse(req.body ?? {});
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Voided';
@@ -5754,7 +5999,7 @@ app.post('/payments/:id/void', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/payments/:id/refund', async (req: Request, res: Response) => {
+app.post('/payments/:id/refund', authMiddleware, async (req: Request, res: Response) => {
   const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
   const parsed = schema.safeParse(req.body ?? {});
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Refund';
@@ -5770,24 +6015,37 @@ app.post('/payments/:id/refund', async (req: Request, res: Response) => {
 });
 
 app.get('/invoices', async (req: Request, res: Response) => {
-  const { studentId } = req.query;
+  const { studentId, page = '1', limit = '20' } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page)) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
+  const skip = (pageNum - 1) * limitNum;
+
   const where: any = {};
   if (studentId) where.studentId = String(studentId);
 
-  const invoices = await prisma.invoice.findMany({
-    where,
-    include: { items: true, payments: true, student: true },
-    orderBy: { createdAt: 'desc' }
+  const [invoices, total] = await Promise.all([
+    prisma.invoice.findMany({
+      where,
+      include: { items: true, payments: true, student: true },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limitNum
+    }),
+    prisma.invoice.count({ where })
+  ]);
+
+  res.json({
+    data: invoices.map((inv: any) => {
+      const balance = invoiceBalance(inv, inv.payments);
+      return {
+        ...inv,
+        paid: netPaid(inv.payments).toNumber(),
+        balance: balance.toNumber(),
+        feeState: getFeeState(balance, inv.dueDate),
+      };
+    }),
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) }
   });
-  res.json(invoices.map((inv: any) => {
-    const balance = invoiceBalance(inv, inv.payments);
-    return {
-      ...inv,
-      paid: netPaid(inv.payments).toNumber(),
-      balance: balance.toNumber(),
-      feeState: getFeeState(balance, inv.dueDate),
-    };
-  }));
 });
 
 app.post('/invoices/from-package', async (req: Request, res: Response) => {
@@ -5838,7 +6096,7 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
     items: z.array(z.object({ name: z.string(), amount: z.number().positive() })).min(1),
     initialPayment: z.number().min(0).optional().default(0),
     method: z.string().optional().default('cash'),
-    billingMonth: z.string().optional(),
+    billingMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'billingMonth must be YYYY-MM format').optional(),
     academicYear: z.string().optional(),
     date: z.string().optional(),
     dueDate: z.string().optional(),
@@ -5854,10 +6112,7 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
       const computedTotal = items.reduce((s, i) => s.plus(money(i.amount)), money(0));
       if (computedTotal.lte(0)) throw new HttpError(400, 'Invoice total must be positive');
 
-      const acYear = academicYear ?? (billingMonth ? (() => {
-        const m = /^(\d{4})-(\d{2})$/.exec(billingMonth);
-        return m ? academicYearForMonth(Number(m[1]), Number(m[2])) : academicYearForDate(new Date());
-      })() : academicYearForDate(date ? new Date(date) : new Date()));
+      const acYear = academicYear ?? (billingMonth ? academicYearForMonth(Number(billingMonth.substring(0, 4)), Number(billingMonth.substring(5))) : academicYearForDate(date ? new Date(date) : new Date()));
 
       const invoiceDate = date ? new Date(date) : new Date();
       const { invoiceNo } = await nextInvoiceNumber(tx, acYear);
@@ -5919,7 +6174,7 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
       }
 
       return await tx.invoice.findUnique({ where: { id: invoice.id }, include: { items: true, payments: true } });
-    });
+    }, MONEY_TX_OPTIONS);
     res.status(201).json(result);
   } catch (e: any) {
     if (e instanceof HttpError) return res.status(e.status).json({ error: e.message });
@@ -5995,32 +6250,48 @@ app.post('/salaries/staff/process', async (req: Request, res: Response) => {
     month: z.number().min(1).max(12),
     year: z.number(),
     paymentDate: z.string().transform(d => new Date(d)),
+    baseSalary: z.number().positive().optional()
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { staffIds, paymentDate } = parsed.data;
+  const { staffIds, paymentDate, baseSalary } = parsed.data;
 
   const staff = await prisma.staff.findMany({ where: { id: { in: staffIds } } });
   const results = [];
 
   for (const s of staff) {
-    const salary = await prisma.staffSalary.create({
+    // Use provided baseSalary or default to 1000
+    // Note: Staff model doesn't have salary field, so we use API parameter or default
+    const salary = baseSalary ?? 1000;
+    const staffSalary = await prisma.staffSalary.create({
       data: {
         staffId: s.id,
-        baseSalary: 1000, // Default or fetch from staff profile if added
-        netSalary: 1000,
+        baseSalary: salary,
+        netSalary: salary,
         paymentDate,
         status: 'Pending'
       }
     });
-    results.push(salary);
+    results.push(staffSalary);
   }
   res.json(results);
 });
 
-app.post('/salaries/staff/:id/pay', async (req: Request, res: Response) => {
+app.post('/salaries/staff/:id/pay', authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
+    // Check if payment ledger entry already exists to prevent double-counting
+    const existingLedger = await tx.ledgerEntry.findFirst({
+      where: {
+        ...ACTIVE_LEDGER,
+        referenceInvoice: id,
+        type: 'expense'
+      }
+    });
+    if (existingLedger) {
+      throw new HttpError(400, 'Payment has already been recorded');
+    }
+    
     const salary = await tx.staffSalary.update({ where: { id }, data: { status: 'Paid' } });
     await tx.ledgerEntry.create({
       data: {
@@ -6037,24 +6308,142 @@ app.post('/salaries/staff/:id/pay', async (req: Request, res: Response) => {
 
 // Ledger & Transactions
 app.get('/finance/transactions', async (req: Request, res: Response) => {
-  const { type, category } = req.query;
+  const { type, category, page = '1', limit = '20' } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page)) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
+  const skip = (pageNum - 1) * limitNum;
+
   const where: any = {};
   if (type) where.type = String(type);
   if (category) where.category = String(category);
+  Object.assign(where, ACTIVE_LEDGER);
 
-  const entries = await prisma.ledgerEntry.findMany({
-    where,
-    orderBy: { createdAt: 'desc' }
+  const [entries, total] = await Promise.all([
+    prisma.ledgerEntry.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limitNum
+    }),
+    prisma.ledgerEntry.count({ where })
+  ]);
+
+  res.json({
+    data: entries,
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) }
   });
-  res.json(entries);
 });
 
-app.get('/finance/income', async (_req: Request, res: Response) => {
-  const entries = await prisma.ledgerEntry.findMany({
-    where: { type: 'income' },
-    orderBy: { createdAt: 'desc' }
+app.get('/finance/income', async (req: Request, res: Response) => {
+  const { page = '1', limit = '20' } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page)) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
+  const skip = (pageNum - 1) * limitNum;
+
+  const [entries, total] = await Promise.all([
+    prisma.ledgerEntry.findMany({
+      where: { ...ACTIVE_LEDGER, type: 'income' },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limitNum
+    }),
+    prisma.ledgerEntry.count({ where: { ...ACTIVE_LEDGER, type: 'income' } })
+  ]);
+
+  res.json({
+    data: entries,
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) }
   });
-  res.json(entries);
+});
+
+/**
+ * POST /finance/income
+ * Manual income entry. The Income page has always offered an "Add income" form,
+ * but only the GET existed, so every submission 404'd and nothing was recorded.
+ *
+ * Writes an active ledger row (reversedAt stays null) so it is picked up by every
+ * total, including the dashboard, without any special-casing.
+ */
+app.post('/finance/income', authMiddleware, async (req: Request, res: Response) => {
+  const { category, amount, date, notes, reference } = (req.body ?? {}) as {
+    category?: string;
+    amount?: unknown;
+    date?: string;
+    notes?: string;
+    reference?: string;
+  };
+
+  const label = String(category ?? '').trim();
+  if (!label) return res.status(400).json({ error: 'Category is required.' });
+
+  let value: Prisma.Decimal;
+  try {
+    value = roundMoney(amount);
+  } catch {
+    return res.status(400).json({ error: 'Amount must be a number.' });
+  }
+  if (!value.gt(0)) return res.status(400).json({ error: 'Amount must be greater than 0.' });
+
+  let when = new Date();
+  if (date) {
+    const parsed = new Date(date);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'Date is invalid.' });
+    }
+    when = parsed;
+  }
+
+  const entry = await prisma.ledgerEntry.create({
+    data: {
+      type: 'income',
+      // Free text is normalised the same way POST /expenses does it so the
+      // category breakdowns group consistently.
+      category: label.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+      amount: value,
+      date: when,
+      referenceInvoice: reference ? String(reference) : null,
+    },
+  });
+
+  res.status(201).json(entry);
+});
+
+/**
+ * GET /finance/expenses
+ * Ledger-backed expense list.
+ *
+ * The Expenses page used to read SchoolExpense directly, so it only ever showed
+ * expenses created through that one form. Total Expenses on the dashboard sums
+ * every 'expense' ledger row, which also includes salaries and store purchases,
+ * so the page total and the dashboard total could never agree. Reading the same
+ * ledger the totals use makes the two reconcile by construction.
+ */
+app.get('/finance/expenses', authMiddleware, async (req: Request, res: Response) => {
+  const { page = '1', limit = '20', category } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page)) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
+  const skip = (pageNum - 1) * limitNum;
+
+  const where: any = { ...ACTIVE_LEDGER, type: 'expense' };
+  if (category) where.category = String(category);
+
+  const [entries, total, sum] = await Promise.all([
+    prisma.ledgerEntry.findMany({
+      where,
+      orderBy: { date: 'desc' },
+      skip,
+      take: limitNum,
+    }),
+    prisma.ledgerEntry.count({ where }),
+    prisma.ledgerEntry.aggregate({ _sum: { amount: true }, where }),
+  ]);
+
+  res.json({
+    data: entries,
+    // Server-side total across every matching row, not just the current page.
+    totalAmount: money(sum._sum.amount).toNumber(),
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+  });
 });
 
 // Financial Reports
@@ -6062,32 +6451,51 @@ app.get('/finance/reports/summary', async (req: Request, res: Response) => {
   const { from, to } = req.query;
   const where: any = {};
   if (from && to) {
-    where.createdAt = { gte: new Date(String(from)), lte: new Date(String(to)) };
+    // Use half-open range [from, to) to exclude the day after 'to'
+    where.date = { gte: new Date(String(from)), lt: new Date(String(to)) };
   }
 
-  const entries = await prisma.ledgerEntry.findMany({ where });
+  const entries = await prisma.ledgerEntry.findMany({ where: { ...where, ...ACTIVE_LEDGER } });
   const income = entries.filter(e => e.type === 'income').reduce((s, e) => s.plus(e.amount), money(0));
   const expense = entries.filter(e => e.type === 'expense').reduce((s, e) => s.plus(e.amount), money(0));
 
-  const byCategory = entries.reduce((acc: any, e) => {
-    acc[e.category] = money(acc[e.category]).plus(e.amount).toNumber();
-    return acc;
-  }, {});
+  // Income and expense are totalled separately, so their per-category breakdowns
+  // must be too. Merging them into one map let an expense such as
+  // 'store_purchase' be reported as income purely because the caller guessed
+  // from the category name.
+  const bucket = (type: string) =>
+    entries
+      .filter(e => e.type === type)
+      .reduce((acc: Record<string, number>, e) => {
+        acc[e.category] = money(acc[e.category] ?? 0).plus(e.amount).toNumber();
+        return acc;
+      }, {});
 
   res.json({
     totalIncome: income,
     totalExpense: expense,
     netProfit: income.minus(expense),
-    byCategory
+    incomeByCategory: bucket('income'),
+    expenseByCategory: bucket('expense'),
   });
 });
 
 // Fee Reports
 app.get('/finance/reports/fees', async (req: Request, res: Response) => {
-  const invoices = await prisma.invoice.findMany({
-    include: { payments: true, student: true },
-    orderBy: [{ createdAt: 'desc' }]
-  });
+  const { page = '1', limit = '50' } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page)) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 50));
+  const skip = (pageNum - 1) * limitNum;
+
+  const [invoices, total] = await Promise.all([
+    prisma.invoice.findMany({
+      include: { payments: true, student: true },
+      orderBy: [{ createdAt: 'desc' }],
+      skip,
+      take: limitNum
+    }),
+    prisma.invoice.count()
+  ]);
 
   const report = invoices.map(inv => {
     const paid = netPaid(inv.payments);
@@ -6111,7 +6519,10 @@ app.get('/finance/reports/fees', async (req: Request, res: Response) => {
     };
   });
 
-  res.json(report);
+  res.json({
+    data: report,
+    pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) }
+  });
 });
 
 // Fee summary (derived from invoices — never a parallel source of truth)
@@ -6144,8 +6555,9 @@ app.get('/finance/fees/summary', async (_req: Request, res: Response) => {
 
     for (const p of payments) {
       if (isVoided(p)) continue;
+      const endOfToday = new Date(startToday.getTime() + 24 * 60 * 60 * 1000);
       if (p.date >= startToday && p.date < endMonth) collectedThisMonth = collectedThisMonth.plus(p.amount);
-      if (p.date >= startToday && p.date < endMonth && p.date.getTime() >= startToday.getTime()) collectedToday = collectedToday.plus(p.amount);
+      if (p.date >= startToday && p.date < endOfToday) collectedToday = collectedToday.plus(p.amount);
     }
 
     res.json({
@@ -7826,7 +8238,17 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
 
     const pendingAssignments: never[] = [];
 
-    const latestNotices: never[] = [];
+    // Student-visible announcements (targeted to Students, or to All).
+    const studentAnnouncements = await prisma.announcement.findMany({
+      where: { target: { in: ['All', 'Students'] } },
+      orderBy: { createdAt: 'desc' },
+      take: 3,
+    });
+    const latestNotices = studentAnnouncements.map((a) => ({
+      title: a.title,
+      date: formatCardDate(a.createdAt),
+      content: a.content,
+    }));
 
     const recentResults = results.map((r) => ({
       subject: subjectName(r.subjectId),
@@ -8183,9 +8605,39 @@ app.get('/student/exam-schedule', async (req: Request, res: Response) => {
   }
 });
 
+// Student's own printable report card (same data as the admin report card).
+app.get('/student/report-card', async (req: Request, res: Response) => {
+  try {
+    const { email, studentId, examId } = req.query as any;
+    if (!examId) return res.status(400).json({ error: 'examId is required' });
+    const student = await findStudent(email, studentId);
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+    const body = await buildStudentReportCard(String(examId), student.id);
+    if (!body) return res.status(404).json({ error: 'No results for this student in this exam' });
+    res.json(body);
+  } catch (error: any) {
+    console.error('Error building student report card:', error);
+    res.status(500).json({ error: 'Failed to build report card' });
+  }
+});
+
 app.get('/student/notices', async (_req: Request, res: Response) => {
   try {
-    res.json([]);
+    const items = await prisma.announcement.findMany({
+      where: { target: { in: ['All', 'Students'] } },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    res.json(items.map((a) => ({
+      id: a.id,
+      title: a.title,
+      content: a.content,
+      category: a.target,
+      date: formatCardDate(a.createdAt),
+      attachment: null,
+    })));
   } catch (error) {
     console.error('Error fetching notices:', error);
     res.status(500).json({ error: 'Failed to fetch notices' });
@@ -8211,6 +8663,12 @@ app.get('/student/assignments', async (_req: Request, res: Response) => {
 });
 
 const port = Number(process.env.PORT) || 4000;
+
+// Mount fees router
+app.use('/fees', feesRouter);
+
+// Mount error handler as the last middleware (catches all errors from routes)
+app.use(errorHandler);
 
 async function ensureStudentAcademicRecordTable() {
   try {
