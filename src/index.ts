@@ -1503,7 +1503,7 @@ app.get('/promotions/archive', authMiddleware, checkRole(['Admin']), async (req:
 });
 
 // Exam Types
-app.get('/exam-types', async (_req: Request, res: Response) => {
+app.get('/exam-types', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   try {
     const types = await prisma.examType.findMany({ orderBy: { name: 'asc' } });
     res.json(types);
@@ -1513,7 +1513,7 @@ app.get('/exam-types', async (_req: Request, res: Response) => {
   }
 });
 
-app.post('/exam-types', async (req: Request, res: Response) => {
+app.post('/exam-types', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const schema = z.object({ name: z.string().min(1) });
     const parsed = schema.safeParse(req.body);
@@ -1526,7 +1526,7 @@ app.post('/exam-types', async (req: Request, res: Response) => {
   }
 });
 
-app.patch('/exam-types/:id', async (req: Request, res: Response) => {
+app.patch('/exam-types/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     const schema = z.object({ name: z.string().min(1).max(100) });
@@ -1543,7 +1543,7 @@ app.patch('/exam-types/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.delete('/exam-types/:id', async (req: Request, res: Response) => {
+app.delete('/exam-types/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.$transaction([
@@ -1563,7 +1563,7 @@ app.delete('/exam-types/:id', async (req: Request, res: Response) => {
 });
 
 // Exams
-app.get('/exams', async (_req: Request, res: Response) => {
+app.get('/exams', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const exams = await prisma.exam.findMany({
     include: { type: true },
     orderBy: { startDate: 'desc' }
@@ -1571,7 +1571,7 @@ app.get('/exams', async (_req: Request, res: Response) => {
   res.json(exams);
 });
 
-app.post('/exams', async (req: Request, res: Response) => {
+app.post('/exams', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     typeId: z.string().min(1),
@@ -1747,7 +1747,7 @@ app.post('/exams/:id/weight', authMiddleware, checkRole(['Admin']), async (req: 
 });
 
 // Exam Attendance - Get classes with active schedules for an exam
-app.get('/exams/:examId/attendance/classes', async (req: Request, res: Response) => {
+app.get('/exams/:examId/attendance/classes', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
 
@@ -1796,7 +1796,7 @@ app.get('/exams/:examId/attendance/classes', async (req: Request, res: Response)
 });
 
 // Exam Attendance - Get attendance for an exam (with filters)
-app.get('/exams/:examId/attendance', async (req: Request, res: Response) => {
+app.get('/exams/:examId/attendance', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
     const { subjectId, class: className, section, date } = req.query as any;
@@ -1888,7 +1888,7 @@ app.get('/exams/:examId/attendance', async (req: Request, res: Response) => {
 });
 
 // Exam Attendance - Save attendance records
-app.post('/exams/:examId/attendance/save', authMiddleware, async (req: Request, res: Response) => {
+app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
     const schema = z.array(z.object({
@@ -1977,7 +1977,7 @@ app.post('/exams/:examId/attendance/save', authMiddleware, async (req: Request, 
 });
 
 // Exam Attendance - Get report/summary
-app.get('/exams/:examId/attendance/report', async (req: Request, res: Response) => {
+app.get('/exams/:examId/attendance/report', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
     const { class: className, section } = req.query as any;
@@ -3557,7 +3557,7 @@ app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (re
 });
 
 // Exam Schedules (Routine)
-app.get('/schedules', async (req: Request, res: Response) => {
+app.get('/schedules', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     examId: z.string().optional(),
   });
@@ -3576,7 +3576,7 @@ app.get('/schedules', async (req: Request, res: Response) => {
   res.json(schedules);
 });
 
-app.post('/schedules', async (req: Request, res: Response) => {
+app.post('/schedules', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     examId: z.string().min(1),
     classId: z.string().optional(),
@@ -3713,7 +3713,7 @@ app.post('/schedules', async (req: Request, res: Response) => {
   res.json(schedule);
 });
 
-app.delete('/schedules/:id', async (req: Request, res: Response) => {
+app.delete('/schedules/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.examSchedule.delete({ where: { id } });
@@ -4643,7 +4643,7 @@ app.delete('/expenses/:id', authMiddleware, async (req: Request, res: Response) 
 });
 
 // Classes
-app.get('/classes', async (_req: Request, res: Response) => {
+app.get('/classes', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const classes = await prisma.schoolClass.findMany({
     orderBy: [{ name: 'asc' }, { section: 'asc' }],
     include: { teacher: { select: { id: true, name: true } } }
@@ -4657,7 +4657,7 @@ app.get('/classes', async (_req: Request, res: Response) => {
   res.json(counts);
 });
 
-app.post('/classes', async (req: Request, res: Response) => {
+app.post('/classes', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     section: z.string().min(1),
@@ -4670,7 +4670,7 @@ app.post('/classes', async (req: Request, res: Response) => {
   res.status(201).json({ ...cls, students });
 });
 
-app.put('/classes/:id', async (req: Request, res: Response) => {
+app.put('/classes/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -4684,7 +4684,7 @@ app.put('/classes/:id', async (req: Request, res: Response) => {
   res.json({ ...cls, students });
 });
 
-app.delete('/classes/:id', async (req: Request, res: Response) => {
+app.delete('/classes/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.$transaction([
@@ -4783,12 +4783,12 @@ app.delete('/announcements/:id', async (req: Request, res: Response) => {
 });
 
 // Subjects
-app.get('/subjects', async (_req: Request, res: Response) => {
+app.get('/subjects', authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const subjects = await prisma.subject.findMany({ orderBy: [{ name: 'asc' }] });
   res.json(subjects);
 });
 
-app.post('/subjects', async (req: Request, res: Response) => {
+app.post('/subjects', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     banglaName: z.string().optional().nullable(),
@@ -4801,7 +4801,7 @@ app.post('/subjects', async (req: Request, res: Response) => {
   res.status(201).json(subject);
 });
 
-app.put('/subjects/:id', async (req: Request, res: Response) => {
+app.put('/subjects/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -4826,7 +4826,7 @@ app.put('/subjects/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.delete('/subjects/:id', async (req: Request, res: Response) => {
+app.delete('/subjects/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.$transaction([
@@ -5179,13 +5179,30 @@ app.post('/store/products', async (req: Request, res: Response) => {
     category: z.string().optional(),
     purchasePrice: z.number().nonnegative(),
     sellingPrice: z.number().nonnegative(),
+    // Opening balance for goods already on the shelf when a product is first
+    // catalogued. Later stock changes go through purchases/sales only.
+    openingStock: z.number().int().nonnegative().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { openingStock, ...fields } = parsed.data;
   const item = await prisma.product.create({
-    data: { ...parsed.data, currentStock: 0 }
+    data: { ...fields, currentStock: openingStock ?? 0 }
   });
   res.status(201).json(item);
+});
+
+app.put('/store/suppliers/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const schema = z.object({
+    name: z.string().min(1).optional(),
+    phone: z.string().optional(),
+    address: z.string().optional()
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const item = await prisma.supplier.update({ where: { id }, data: parsed.data });
+  res.json(item);
 });
 
 app.put('/store/products/:id', async (req: Request, res: Response) => {
@@ -6575,7 +6592,7 @@ app.get('/finance/fees/summary', async (_req: Request, res: Response) => {
 });
 
 // Grading System
-app.get('/grading', async (req: Request, res: Response) => {
+app.get('/grading', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const { typeId } = req.query as any;
     const where: any = {};
@@ -6595,7 +6612,7 @@ app.get('/grading', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/grading/bulk', async (req: Request, res: Response) => {
+app.post('/grading/bulk', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.array(z.object({
     id: z.string().optional(),
     grade: z.string(),
@@ -7081,53 +7098,50 @@ app.post('/auth/login', async (req: Request, res: Response) => {
       }
     } else if (role && role.toLowerCase() === 'teacher') {
       // Look for teacher in the teachers table
-      console.log('Teacher login attempt:', { email, password, role });
-
       const teacher = await prisma.teacher.findFirst({
         where: {
           OR: [
             { email: email },
             { employeeId: email },
-            { phone: email } // Also check phone in case they enter phone number
+            { phone: email }, // Also check phone in case they enter phone number
+            { login: { username: email } } // username assigned on the Teacher Logins screen
           ]
-        }
+        },
+        include: { login: true }
       });
 
-      console.log('Teacher found:', teacher ? 'YES' : 'NO');
       if (teacher) {
-        console.log('Teacher details:', { id: teacher.id, name: teacher.name, email: teacher.email, employeeId: teacher.employeeId });
+        const session = {
+          id: teacher.id,
+          email: teacher.email,
+          role: 'Teacher',
+          name: teacher.name,
+          subject: teacher.subject
+        };
 
-        // For teachers, check if password matches teacher's employeeId or email
-        // This is a simplified approach - in production, use the TeacherLogin table
-        if (password === teacher.employeeId ||
+        if (teacher.login) {
+          // A TeacherLogin row is the source of truth: only its password works
+          // and a Disabled account cannot sign in. This check used to be missing
+          // entirely, so every password set on the Teacher Logins screen was
+          // rejected with "Invalid credentials".
+          if (teacher.login.status === 'Active' && teacher.login.password === password) {
+            user = session;
+            prisma.teacherLogin.update({
+              where: { id: teacher.login.id },
+              data: { lastLogin: new Date() }
+            }).catch(() => {});
+          }
+        } else if (
+          // No credential on file yet — legacy fallbacks for un-provisioned
+          // teachers only, so they can never bypass a password an admin set.
+          password === teacher.employeeId ||
           password === teacher.email.split('@')[0] ||
           password === 'password' ||
           password === 'test' ||
-          password === '123456') { // Added common test password
-          user = {
-            id: teacher.id,
-            email: teacher.email,
-            role: 'Teacher',
-            name: teacher.name,
-            subject: teacher.subject
-          };
-          console.log('Teacher authenticated successfully');
-        } else {
-          console.log('Teacher password mismatch. Tried:', password, 'against:', {
-            employeeId: teacher.employeeId,
-            emailPrefix: teacher.email.split('@')[0],
-            password: 'password',
-            test: 'test',
-            '123456': '123456'
-          });
+          password === '123456'
+        ) {
+          user = session;
         }
-      } else {
-        console.log('Teacher not found with:', email);
-        // List all teachers for debugging
-        const allTeachers = await prisma.teacher.findMany({
-          select: { id: true, name: true, email: true, employeeId: true, phone: true }
-        });
-        console.log('Available teachers:', allTeachers);
       }
     } else if (role && role.toLowerCase() === 'student') {
       // First, try to find a StudentLogin with the provided credentials
@@ -7403,10 +7417,14 @@ async function teacherRelevantExams(teacher: any): Promise<Array<any>> {
     orderBy: { startDate: 'asc' }
   });
 
+  // Only advertise the classes this teacher may actually open — an exam card
+  // listing every scheduled class sent them to entries that 403'd.
+  const allowedClassIds = await teacherAllowedClassIdsAll(teacher);
+
   return exams.map((e: any) => {
     const classMap = new Map<string, any>();
     (e.schedules || []).forEach((s: any) => {
-      if (s.class) classMap.set(s.class.id, { id: s.class.id, name: s.class.name, section: s.class.section });
+      if (s.class && allowedClassIds.has(s.class.id)) classMap.set(s.class.id, { id: s.class.id, name: s.class.name, section: s.class.section });
     });
     return {
       id: e.id,
@@ -7678,8 +7696,12 @@ app.get('/teacher/exams', authMiddleware, checkRole(['Teacher']), async (req: Re
     const user = (req as any).user;
 
     // Get teacher information
+    // `classes` is required: teacherExamScope falls back to the teacher's
+    // assigned classes in 'assigned' mode, so omitting it silently resolved
+    // every such teacher to zero classes and therefore zero exams.
     const teacher = await prisma.teacher.findFirst({
-      where: { email: user.email }
+      where: { email: user.email },
+      include: { classes: true, permission: true }
     });
 
     if (!teacher) {
@@ -8004,6 +8026,106 @@ app.post('/class-routine/update-entry', async (req: Request, res: Response) => {
 });
 
 // Teacher Marks Entry
+//
+// Subject scope for a marks write. Class access on its own used to be enough to
+// save marks for any subject in that class — including another teacher's. When
+// recorded (class, subject) assignments exist only those pairs are writable,
+// otherwise the teacher's own subject is the limit. Marks mode 'all'/'specific'
+// is a deliberate admin grant of every subject, so it stays unrestricted.
+// Returns null when allowed, otherwise the error message.
+async function teacherMarksSubjectError(
+  teacher: any,
+  classId: string,
+  subjectIds: Array<string | undefined>
+): Promise<string | null> {
+  const permission = await teacherPermissionRecord(teacher);
+  if (permission.marksMode === 'all' || permission.marksMode === 'specific') return null;
+
+  const pairs = await prisma.classSubjectTeacher.findMany({
+    where: { teacherId: teacher.id },
+    select: { classId: true, subjectId: true }
+  });
+  let allowedSubjectIds: Set<string> | null = null;
+  if (pairs.length > 0) {
+    allowedSubjectIds = new Set(pairs.filter((p: any) => p.classId === classId).map((p: any) => p.subjectId));
+  } else {
+    const teacherSubjectName = String(teacher.subject || '').trim();
+    if (teacherSubjectName) {
+      const subject = await prisma.subject.findFirst({
+        where: { name: teacherSubjectName },
+        select: { id: true }
+      });
+      if (subject) allowedSubjectIds = new Set([subject.id]);
+    }
+  }
+  if (!allowedSubjectIds || allowedSubjectIds.size === 0) return null;
+  return subjectIds.some((sid) => !sid || !allowedSubjectIds!.has(sid))
+    ? 'You are not assigned to this subject'
+    : null;
+}
+
+// Existing marks for one (exam, class, subject), so the entry grid loads what is
+// already saved. Without this the page opened blank and saving wrote 0 for every
+// student, wiping the record. Same class/subject scope as the write.
+app.get('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const { examId, classId, subjectId } = req.query;
+
+    if (!examId || !classId || !subjectId) {
+      return res.status(400).json({ error: 'Exam ID, Class ID and Subject ID are required' });
+    }
+
+    const teacher = await prisma.teacher.findFirst({
+      where: { email: user.email },
+      include: { classes: true, permission: true }
+    });
+    if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
+
+    const allowed = await teacherAllowedClassIds(teacher, 'marks');
+    if (!allowed.has(String(classId))) {
+      return res.status(403).json({ error: 'You are not assigned to this class' });
+    }
+
+    const subjectError = await teacherMarksSubjectError(teacher, String(classId), [String(subjectId)]);
+    if (subjectError) return res.status(403).json({ error: subjectError });
+
+    const classInfo = await prisma.schoolClass.findUnique({
+      where: { id: String(classId) },
+      select: { name: true, section: true }
+    });
+    if (!classInfo) return res.status(404).json({ error: 'Class not found' });
+
+    const students = await prisma.student.findMany({
+      where: { class: classInfo.name, section: classInfo.section },
+      select: { id: true },
+      orderBy: { roll: 'asc' }
+    });
+    const studentIds = students.map((s: any) => s.id);
+    if (studentIds.length === 0) return res.json({ marks: [] });
+
+    const rows = await prisma.result.findMany({
+      where: { examId: String(examId), subjectId: String(subjectId), studentId: { in: studentIds } },
+      select: { studentId: true, written: true, mcq: true, practical: true, totalMarks: true, grade: true, gp: true }
+    });
+
+    res.json({
+      marks: rows.map((r: any) => ({
+        studentId: r.studentId,
+        written: r.written ?? null,
+        mcq: r.mcq ?? null,
+        practical: r.practical ?? null,
+        total: r.totalMarks ?? null,
+        grade: r.grade ?? null,
+        gp: r.gp ?? null
+      })),
+    });
+  } catch (error) {
+    console.error('Error fetching teacher marks:', error);
+    res.status(500).json({ error: 'Failed to load marks' });
+  }
+});
+
 app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -8041,6 +8163,34 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
         });
         fallbackSubjectId = subject?.id;
       }
+    }
+
+    const subjectError = await teacherMarksSubjectError(
+      teacher,
+      String(classId),
+      (marks as any[]).map((m: any) => m.subjectId || fallbackSubjectId)
+    );
+    if (subjectError) {
+      return res.status(403).json({ error: subjectError });
+    }
+
+    // The students must belong to the class being marked. Passing the check on
+    // classId alone let a teacher write marks for any student id, including one
+    // in a class they have no access to.
+    const classInfo = await prisma.schoolClass.findUnique({
+      where: { id: String(classId) },
+      select: { name: true, section: true }
+    });
+    if (!classInfo) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    const classStudents = await prisma.student.findMany({
+      where: { class: classInfo.name, section: classInfo.section },
+      select: { id: true }
+    });
+    const classStudentIds = new Set(classStudents.map((s: any) => s.id));
+    if ((marks as any[]).some((m: any) => !classStudentIds.has(m.studentId))) {
+      return res.status(403).json({ error: 'One or more students are not in this class' });
     }
 
     // Save marks for each student
