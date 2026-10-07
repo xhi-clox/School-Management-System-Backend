@@ -64,6 +64,17 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
  */
 const ACTIVE_LEDGER = { reversedAt: null } as const;
 
+/**
+ * Only students on roll ('Active') may be marked, counted or tallied.
+ *
+ * Student.status is free text and also carries 'Inactive', 'Graduated',
+ * 'Withdrawn', ... Those students must never appear on a register or be
+ * included in any attendance statistic, otherwise they deflate every
+ * percentage (they count as unmarked/absent days that were never their fault).
+ * Spread into the `where` of every attendance read, write and aggregate.
+ */
+const ACTIVE_STUDENT_STATUS = 'Active' as const;
+
 // Before helmet/cors/body parsers so platform health probes always get a fast 200
 app.get('/health', (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok' });
@@ -394,12 +405,30 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     prisma.schoolClass.count(),
     prisma.staff.count(),
     prisma.attendance.findMany({
-      where: { date: { gte: attStart, lt: attEnd } },
+      // Scoped to on-roll students: an inactive/graduated student's saved row
+      // must not contribute to today's counts or the absent-students list.
+      where: { date: { gte: attStart, lt: attEnd }, student: { status: ACTIVE_STUDENT_STATUS } },
       select: {
         studentId: true,
         status: true,
         student: {
-          select: { id: true, name: true, admissionNo: true, avatar: true, class: true, section: true, roll: true, status: true, guardianPhone: true }
+          select: {
+            id: true,
+            name: true,
+            admissionNo: true,
+            avatar: true,
+            class: true,
+            section: true,
+            roll: true,
+            status: true,
+            phone: true,
+            guardianPhone: true,
+            fatherName: true,
+            motherName: true,
+            guardian: {
+              select: { guardianName: true, guardianPhone: true, fatherPhone: true, motherPhone: true }
+            },
+          }
         }
       }
     }),
@@ -557,19 +586,41 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const present = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
   const totalForToday = uniqueToday.length;
 
+  // Every reachable number for the absent student, de-duplicated and in
+  // priority order, so the UI can offer click-to-call without extra requests.
   const absentStudents = uniqueToday
     .filter((r) => ['absent', 'a'].includes(String(r.status || '').trim().toLowerCase()))
-    .map((r) => ({
-      id: r.student?.id || r.studentId,
-      name: r.student?.name || 'Unknown',
-      admissionNo: r.student?.admissionNo || '',
-      avatar: r.student?.avatar || null,
-      class: r.student?.class || '',
-      section: r.student?.section || '',
-      roll: r.student?.roll ?? 0,
-      status: r.student?.status || 'Inactive',
-      guardianPhone: r.student?.guardianPhone || ''
-    }));
+    .map((r) => {
+      const g = r.student?.guardian;
+      const contacts: Array<{ label: string; name: string; phone: string }> = [];
+      const seen = new Set<string>();
+      const push = (label: string, name: string | null | undefined, raw: string | null | undefined) => {
+        const phone = String(raw ?? '').trim();
+        if (!phone) return;
+        const key = phone.replace(/\s+/g, '');
+        if (seen.has(key)) return;
+        seen.add(key);
+        contacts.push({ label, name: name || '', phone });
+      };
+      push('guardian', g?.guardianName, g?.guardianPhone);
+      push('guardian', r.student?.guardianPhone, r.student?.guardianPhone);
+      push('father', g?.fatherPhone || r.student?.fatherName, g?.fatherPhone);
+      push('mother', g?.motherPhone || r.student?.motherName, g?.motherPhone);
+      push('student', r.student?.name, r.student?.phone);
+
+      return {
+        id: r.student?.id || r.studentId,
+        name: r.student?.name || 'Unknown',
+        admissionNo: r.student?.admissionNo || '',
+        avatar: r.student?.avatar || null,
+        class: r.student?.class || '',
+        section: r.student?.section || '',
+        roll: r.student?.roll ?? 0,
+        status: r.student?.status || 'Inactive',
+        guardianPhone: contacts[0]?.phone || r.student?.guardianPhone || '',
+        contacts
+      };
+    });
 
   // History series (6-month / daily / yearly) were bucketed above from the
   // single bounded ledger read.
@@ -732,7 +783,9 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
 
   try {
     const records = await prisma.attendance.findMany({
-      where: { date: { gte: start, lte: end } },
+      // Only on-roll students, otherwise a student marked inactive mid-month
+      // keeps dragging the weekly present/absent bars and rates down.
+      where: { date: { gte: start, lte: end }, student: { status: ACTIVE_STUDENT_STATUS } },
       select: { date: true, status: true },
     });
 
@@ -1777,7 +1830,7 @@ app.get('/exams/:examId/attendance/classes', authMiddleware, checkRole(['Admin']
       Array.from(classSectionsMap.entries()).map(async ([className, classIds]) => {
         const sections = Array.from(classIds);
         const students = await prisma.student.findMany({
-          where: { class: className },
+          where: { class: className, status: ACTIVE_STUDENT_STATUS },
           select: { section: true },
           distinct: ['section'],
         });
@@ -1831,11 +1884,11 @@ app.get('/exams/:examId/attendance', authMiddleware, checkRole(['Admin']), async
       include: { student: true, subject: true },
     });
 
-    // Get students for the selected class/section
+    // Get students for the selected class/section (on-roll only)
     let students: any[] = [];
     if (className && section) {
       students = await prisma.student.findMany({
-        where: { class: className, section },
+        where: { class: className, section, status: ACTIVE_STUDENT_STATUS },
         orderBy: { roll: 'asc' },
       });
     }
@@ -1904,6 +1957,24 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
 
     const records = parsed.data;
 
+    // Only on-roll students may be marked. Inactive/graduated students are
+    // dropped here so they cannot be recorded as absent for the exam.
+    const eligibleStudents = await prisma.student.findMany({
+      where: { id: { in: [...new Set(records.map((r) => r.studentId))] }, status: ACTIVE_STUDENT_STATUS },
+      select: { id: true },
+    });
+    const eligibleIds = new Set(eligibleStudents.map((s) => s.id));
+    const activeRecords = records.filter((r) => eligibleIds.has(r.studentId));
+    const rejectedInactive = records
+      .filter((r) => !eligibleIds.has(r.studentId))
+      .map((r) => ({ studentId: r.studentId, subjectId: r.subjectId, date: r.date }));
+    if (activeRecords.length === 0) {
+      return res.status(400).json({
+        error: 'No active students in the submitted records. Attendance cannot be recorded for inactive or graduated students.',
+        invalid: rejectedInactive,
+      });
+    }
+
     // Validate that every (subjectId, date) being marked is actually scheduled
     // for this exam. This prevents attendance being saved for subjects/days
     // that aren't part of the exam timetable. (#13)
@@ -1915,7 +1986,7 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
     for (const s of schedules) {
       scheduled.add(`${s.subjectId}::${localDayKey(new Date(s.date))}`);
     }
-    const invalid = records.filter(
+    const invalid = activeRecords.filter(
       (r) => !scheduled.has(`${r.subjectId}::${localDayKey(new Date(r.date))}`)
     );
     if (invalid.length > 0) {
@@ -1931,7 +2002,7 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
     const actorRole = (req as any).user?.role;
     const todayKey = localDayKey(new Date());
     if (actorRole !== 'Admin') {
-      const notToday = records.filter((r) => localDayKey(new Date(r.date)) !== todayKey);
+      const notToday = activeRecords.filter((r) => localDayKey(new Date(r.date)) !== todayKey);
       if (notToday.length > 0) {
         return res.status(403).json({
           error: 'Attendance can only be taken on the day the exam is scheduled (today). Admin can make later corrections.',
@@ -1941,7 +2012,7 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
     }
 
     // Use upsert for each record
-    await Promise.all(records.map(record => {
+    await Promise.all(activeRecords.map(record => {
       const day = new Date(`${localDayKey(new Date(record.date))}T00:00:00.000Z`);
       return prisma.examAttendance.upsert({
         where: {
@@ -1969,7 +2040,7 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
       });
     }));
 
-    res.json({ success: true, count: records.length });
+    res.json({ success: true, count: activeRecords.length, skippedInactive: rejectedInactive.length });
   } catch (error: any) {
     console.error('Error saving exam attendance:', error);
     res.status(500).json({ error: 'Failed to save exam attendance', details: error.message });
@@ -1982,8 +2053,10 @@ app.get('/exams/:examId/attendance/report', authMiddleware, checkRole(['Admin'])
     const { examId } = req.params;
     const { class: className, section } = req.query as any;
 
-    // Build student filter
-    const studentFilter: any = {};
+    // Build student filter. Restricted to on-roll students so inactive /
+    // graduated students never show up in the exam attendance report or drag
+    // the overall attendance rate down.
+    const studentFilter: any = { status: ACTIVE_STUDENT_STATUS };
     if (className) studentFilter.class = className;
     if (section) studentFilter.section = section;
 
@@ -4846,16 +4919,29 @@ app.delete('/subjects/:id', authMiddleware, checkRole(['Admin']), async (req: Re
 // Attendance
 app.get('/attendance', async (req: Request, res: Response) => {
   const schema = z.object({
-    class: z.string().min(1),
-    section: z.string().min(1),
+    class: z.string().optional(),
+    section: z.string().optional(),
     date: z.string().min(1),
   });
   const parsed = schema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { class: className, section, date } = parsed.data as any;
+  const className = parsed.data.class && parsed.data.class !== 'all' ? parsed.data.class : undefined;
+  const section = parsed.data.section && parsed.data.section !== 'all' ? parsed.data.section : undefined;
+  const { date } = parsed.data;
   // Standardize the day to the same UTC-midnight form used at save time.
   const day = utcMidnight(attendanceDayKey(String(date)));
-  const students = await prisma.student.findMany({ where: { class: className, section }, orderBy: { roll: 'asc' } });
+  // Inactive/graduated/withdrawn students are not on roll, so they must never
+  // appear on the register - otherwise they silently deflate attendance %.
+  // Omitting class/section (or passing "all") returns the whole school.
+  const students = await prisma.student.findMany({
+    where: {
+      status: ACTIVE_STUDENT_STATUS,
+      ...(className ? { class: className } : {}),
+      ...(section ? { section } : {}),
+    },
+    orderBy: [{ class: 'asc' }, { section: 'asc' }, { roll: 'asc' }],
+    select: { id: true, name: true, roll: true, class: true, section: true },
+  });
   const records = await prisma.attendance.findMany({
     where: { studentId: { in: students.map((s) => s.id) }, date: day },
   });
@@ -4864,6 +4950,8 @@ app.get('/attendance', async (req: Request, res: Response) => {
     studentId: s.id,
     studentName: s.name,
     roll: s.roll,
+    class: s.class,
+    section: s.section,
     status: normalizeAttendanceStatus(map.get(s.id)) ,
   }));
   res.json(result);
@@ -5066,8 +5154,10 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'class/section is required (or provide classId or studentId)' });
   }
 
+  // Inactive/graduated students are off the roll: excluding them keeps their
+  // unmarked days out of every present/absent tally and percentage.
   const students = await prisma.student.findMany({
-    where: { class: className, section, ...(studentId ? { id: studentId } : {}) },
+    where: { class: className, section, status: ACTIVE_STUDENT_STATUS, ...(studentId ? { id: studentId } : {}) },
     orderBy: { roll: 'asc' },
     select: { id: true, name: true, roll: true }
   });
@@ -5113,7 +5203,13 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
       else if (st === 'L') late++;
       else if (st === 'LV') leave++;
     }
-    const percentage = Math.round((present / days.length) * 100);
+    // Percentage is over days the student was actually marked (Present +
+    // Absent + Late + Leave), not every calendar day of the month. Dividing
+    // by calendar days penalises a student for days attendance was never
+    // taken (and for days before they were marked), producing percentages far
+    // below the real rate. Students with no marked day report 0.
+    const marked = present + absent + late + leave;
+    const percentage = marked > 0 ? Math.round((present / marked) * 100) : 0;
     return {
       id: s.id,
       name: s.name,
@@ -5123,6 +5219,7 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
       absent,
       late,
       leave,
+      marked,
       percentage
     };
   });
@@ -5142,6 +5239,155 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
   }
 
   res.json({ days, students: studentsOut, dailyTotals });
+});
+
+// School-wide (or class-scoped) attendance overview.
+// Powers the Daily / Weekly / Monthly stat blocks on the reports page.
+//   ?date=YYYY-MM-DD                -> that single day
+//   ?startDate=&endDate=            -> that range (weekly view)
+//   ?month=&year=                   -> that calendar month (monthly view)
+// `class` and `section` are OPTIONAL: omit them (or pass "all") for the whole
+// school. Every figure is scoped to on-roll students, and `rate` divides by the
+// number of students actually MARKED in the window - never by the roster - so
+// unmarked days and off-roll students can't depress the percentage.
+app.get('/attendance/overview', async (req: Request, res: Response) => {
+  const schema = z.object({
+    date: z.string().optional(),
+    startDate: z.string().optional(),
+    endDate: z.string().optional(),
+    month: z.coerce.number().int().min(1).max(12).optional(),
+    year: z.coerce.number().int().optional(),
+    class: z.string().optional(),
+    section: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const q = parsed.data as any;
+
+  try {
+    // Resolve the window: explicit range wins, then single date, then month.
+    let start: Date;
+    let end: Date; // exclusive
+    let mode: 'daily' | 'weekly' | 'monthly';
+
+    const rangeStart = q.startDate ? new Date(String(q.startDate)) : null;
+    const rangeEnd = q.endDate ? new Date(String(q.endDate)) : null;
+
+    if (rangeStart && rangeEnd && !Number.isNaN(rangeStart.getTime()) && !Number.isNaN(rangeEnd.getTime())) {
+      start = utcMidnight(attendanceDayKey(String(q.startDate)));
+      end = utcMidnight(attendanceDayKey(String(q.endDate)));
+      end.setUTCDate(end.getUTCDate() + 1);
+      if (end <= start) end = new Date(start.getTime() + 86_400_000);
+      mode = 'weekly';
+    } else if (q.month && q.year) {
+      start = new Date(Date.UTC(q.year, q.month - 1, 1));
+      end = new Date(Date.UTC(q.year, q.month, 1));
+      mode = 'monthly';
+    } else if (q.date) {
+      start = utcMidnight(attendanceDayKey(String(q.date)));
+      end = new Date(start.getTime() + 86_400_000);
+      mode = 'daily';
+    } else {
+      const today = utcMidnight(localDayKey(new Date()));
+      start = today;
+      end = new Date(today.getTime() + 86_400_000);
+      mode = 'daily';
+    }
+
+    const className = q.class && q.class !== 'all' ? String(q.class) : undefined;
+    const sectionName = q.section && q.section !== 'all' ? String(q.section) : undefined;
+    const scopeIsSchool = !className && !sectionName;
+
+    const rows = await prisma.attendance.findMany({
+      where: {
+        date: { gte: start, lt: end },
+        student: {
+          status: ACTIVE_STUDENT_STATUS,
+          ...(className ? { class: className } : {}),
+          ...(sectionName ? { section: sectionName } : {}),
+        },
+      },
+      select: {
+        studentId: true,
+        date: true,
+        status: true,
+        student: { select: { class: true, section: true, roll: true } },
+      },
+    });
+
+    // Head-count of students in scope (roster size, independent of marking).
+    const activeStudentsInScope = await prisma.student.count({
+      where: {
+        status: ACTIVE_STUDENT_STATUS,
+        ...(className ? { class: className } : {}),
+        ...(sectionName ? { section: sectionName } : {}),
+      },
+    });
+
+    type Bucket = { present: number; absent: number; late: number; leave: number; marked: number };
+    const empty = (): Bucket => ({ present: 0, absent: 0, late: 0, leave: 0, marked: 0 });
+    const totals = empty();
+    const byDay = new Map<string, Bucket>();
+    const byClass = new Map<string, Bucket & { students: Set<string> }>();
+
+    for (const r of rows) {
+      const status = normalizeAttendanceStatus(r.status);
+      const dayKey = utcDayKeyOf(r.date);
+
+      const day = byDay.get(dayKey) ?? empty();
+      totals.marked++;
+      day.marked++;
+      const cls = byClass.get(`${r.student?.class ?? ''}|${r.student?.section ?? ''}`) ?? {
+        ...empty(),
+        students: new Set<string>(),
+      };
+      cls.marked++;
+      cls.students.add(`${r.student?.class ?? ''}|${r.student?.section ?? ''}|${r.student?.roll ?? ''}`);
+
+      if (status === 'Present') { totals.present++; day.present++; cls.present++; }
+      else if (status === 'Absent') { totals.absent++; day.absent++; cls.absent++; }
+      else if (status === 'Late') { totals.late++; day.late++; cls.late++; }
+      else if (status === 'Leave') { totals.leave++; day.leave++; cls.leave++; }
+
+      byDay.set(dayKey, day);
+      byClass.set(`${r.student?.class ?? ''}|${r.student?.section ?? ''}`, cls);
+    }
+
+    // Fill every day in the window so the client can render gaps honestly.
+    const days: Array<Bucket & { date: string; rate: number }> = [];
+    for (let d = new Date(start); d < end; d.setUTCDate(d.getUTCDate() + 1)) {
+      const key = utcDayKeyOf(d);
+      const b = byDay.get(key) ?? empty();
+      days.push({ date: key, ...b, rate: b.marked > 0 ? Math.round((b.present / b.marked) * 100) : 0 });
+    }
+
+    const withRate = (b: Bucket) => ({
+      ...b,
+      rate: b.marked > 0 ? Math.round((b.present / b.marked) * 100) : 0,
+    });
+
+    res.json({
+      mode,
+      scope: scopeIsSchool ? 'school' : 'class',
+      class: className ?? null,
+      section: sectionName ?? null,
+      startDate: utcDayKeyOf(start),
+      endDate: utcDayKeyOf(new Date(end.getTime() - 86_400_000)),
+      activeStudents: activeStudentsInScope,
+      unmarked: Math.max(0, activeStudentsInScope - new Set(rows.map((r) => r.studentId)).size),
+      totals: withRate(totals),
+      days,
+      byClass: Array.from(byClass.entries())
+        .map(([key, b]) => {
+          const [cls, sec] = key.split('|');
+          return { class: cls, section: sec, studentsMarked: b.students.size, ...withRate(b) };
+        })
+        .sort((a, b) => a.class.localeCompare(b.class) || a.section.localeCompare(b.section)),
+    });
+  } catch (error: any) {
+    console.error('Attendance overview error:', error);
+    res.status(500).json({ error: 'Failed to load attendance overview' });
+  }
 });
 
 // Teacher Attendance
@@ -5419,13 +5665,15 @@ app.post('/attendance/save', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date, records } = parsed.data as any;
   const day = utcMidnight(attendanceDayKey(String(date)));
-  const students = await prisma.student.findMany({ where: { class: className, section } });
-  const ids = new Set(students.map((s) => s.id));
-  const toSave = records.filter((r: any) => ids.has(r.studentId));
-  await prisma.$transaction(
-    toSave.map((r: any) => {
-      const status = normalizeAttendanceStatus(r.status);
-      return prisma.attendance.upsert({
+    // Only on-roll students may be marked; silently drop records for anyone
+    // who was made inactive between loading the register and saving.
+    const students = await prisma.student.findMany({ where: { class: className, section, status: ACTIVE_STUDENT_STATUS } });
+    const ids = new Set(students.map((s) => s.id));
+    const toSave = records.filter((r: any) => ids.has(r.studentId));
+    await prisma.$transaction(
+      toSave.map((r: any) => {
+        const status = normalizeAttendanceStatus(r.status);
+        return prisma.attendance.upsert({
         where: { studentId_date: { studentId: r.studentId, date: day } },
         update: { status },
         create: { studentId: r.studentId, date: day, status },
@@ -7587,11 +7835,13 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
       return res.status(404).json({ error: 'Class not found' });
     }
 
-    // Get students for this class using Student model
+    // Get students for this class using Student model (on-roll only, so
+    // inactive/graduated students are never marked by teachers either)
     const students = await prisma.student.findMany({
       where: {
         class: classInfo.name,
-        section: classInfo.section
+        section: classInfo.section,
+        status: ACTIVE_STUDENT_STATUS
       },
       select: {
         id: true,
@@ -7664,7 +7914,7 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
     // Save attendance to the Attendance table (same as /attendance/save)
     const day = utcMidnight(attendanceDayKey(String(date)));
     const students = await prisma.student.findMany({
-      where: { class: classInfo.name, section: classInfo.section }
+      where: { class: classInfo.name, section: classInfo.section, status: ACTIVE_STUDENT_STATUS }
     });
     const ids = new Set(students.map((s) => s.id));
     const toSave = (records as any[]).filter((r: any) => r.studentId && ids.has(r.studentId));
