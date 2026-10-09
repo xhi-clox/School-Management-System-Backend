@@ -407,7 +407,13 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     prisma.attendance.findMany({
       // Scoped to on-roll students: an inactive/graduated student's saved row
       // must not contribute to today's counts or the absent-students list.
-      where: { date: { gte: attStart, lt: attEnd }, student: { status: ACTIVE_STUDENT_STATUS } },
+      // `studentWhere` also applies the teacher's class scope, so a teacher's
+      // marked total can never exceed the active students they can see -
+      // otherwise the "marked out of" progress bar would read above 100%.
+      where: {
+        date: { gte: attStart, lt: attEnd },
+        student: { AND: [studentWhere, { status: ACTIVE_STUDENT_STATUS }] },
+      },
       select: {
         studentId: true,
         status: true,
