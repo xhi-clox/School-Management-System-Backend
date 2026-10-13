@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { addMonths } from 'date-fns';
+import { addMonths, differenceInCalendarDays, startOfDay } from 'date-fns';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { authMiddleware } from './auth';
@@ -540,6 +540,16 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
     _count: { id: true }
   });
 
+  // On-roll headcount per class, used as the denominator for the dashboard's
+  // per-class attendance marking progress. Scoped the same way as today's
+  // attendance rows above (teacher class scope + active status), so a class can
+  // never report more marked students than it has students.
+  const activeStudentsPerClass = await prisma.student.groupBy({
+    by: ['class'],
+    where: { AND: [studentWhere, { status: ACTIVE_STUDENT_STATUS }] },
+    _count: { id: true }
+  });
+
   const feeInvoices = await prisma.invoice.findMany({
     select: {
       totalAmount: true,
@@ -592,44 +602,41 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
   const present = normalizedStatuses.filter((s) => s === 'present' || s === 'p').length;
   const totalForToday = uniqueToday.length;
 
-  // Every reachable number for the absent student, de-duplicated and in
-  // priority order, so the UI can offer click-to-call without extra requests.
-  const absentStudents = uniqueToday
-    .filter((r) => ['absent', 'a'].includes(String(r.status || '').trim().toLowerCase()))
-    .map((r) => {
-      const g = r.student?.guardian;
-      const contacts: Array<{ label: string; name: string; phone: string }> = [];
-      const seen = new Set<string>();
-      const push = (label: string, name: string | null | undefined, raw: string | null | undefined) => {
-        const phone = String(raw ?? '').trim();
-        if (!phone) return;
-        const key = phone.replace(/\s+/g, '');
-        if (seen.has(key)) return;
-        seen.add(key);
-        contacts.push({ label, name: name || '', phone });
-      };
-      push('guardian', g?.guardianName, g?.guardianPhone);
-      push('guardian', r.student?.guardianPhone, r.student?.guardianPhone);
-      push('father', g?.fatherPhone || r.student?.fatherName, g?.fatherPhone);
-      push('mother', g?.motherPhone || r.student?.motherName, g?.motherPhone);
-      push('student', r.student?.name, r.student?.phone);
-
-      return {
-        id: r.student?.id || r.studentId,
-        name: r.student?.name || 'Unknown',
-        admissionNo: r.student?.admissionNo || '',
-        avatar: r.student?.avatar || null,
-        class: r.student?.class || '',
-        section: r.student?.section || '',
-        roll: r.student?.roll ?? 0,
-        status: r.student?.status || 'Inactive',
-        guardianPhone: contacts[0]?.phone || r.student?.guardianPhone || '',
-        contacts
-      };
-    });
+  const absentStudents = buildAbsentStudents(uniqueToday);
 
   // History series (6-month / daily / yearly) were bucketed above from the
   // single bounded ledger read.
+
+  // Per-class marking progress for the dashboard chart. Numerator comes from
+  // the rows already loaded above; denominator from the on-roll groupBy. Classes
+  // with no active students are dropped - there is no register to mark.
+  const markedPerClass = new Map<string, number>();
+  for (const r of uniqueToday) {
+    const cls = r.student?.class;
+    if (!cls) continue;
+    markedPerClass.set(cls, (markedPerClass.get(cls) ?? 0) + 1);
+  }
+
+  const byClass = activeStudentsPerClass
+    .map((g) => {
+      const total = g._count.id;
+      if (!g.class || total <= 0) return null;
+      // `uniqueToday` is already restricted to active students, so marked
+      // cannot exceed total. Clamped anyway so a stale row can't overflow.
+      const marked = Math.min(total, markedPerClass.get(g.class) ?? 0);
+      const pct = total > 0 ? Math.round((marked / total) * 100) : 0;
+      return {
+        class: g.class,
+        total,
+        marked,
+        pct,
+        state: pct >= 100 ? 'complete' : marked > 0 ? 'partial' : 'pending',
+      };
+    })
+    .filter((c): c is { class: string; total: number; marked: number; pct: number; state: string } => c !== null)
+    // Worst progress first, so the classes needing attention are never the
+    // ones pushed out of the chart's top-N window.
+    .sort((a, b) => a.pct - b.pct || a.class.localeCompare(b.class));
 
   const dashboardBody = {
     counts: {
@@ -673,7 +680,8 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       absent,
       late,
       onLeave,
-      absentStudents
+      absentStudents,
+      byClass
     },
     upcomingExams: upcomingExams.map(ex => ({
       id: ex.id,
@@ -822,6 +830,85 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
   }
 });
 
+/**
+ * GET /dashboard/attendance/absentees?date=YYYY-MM-DD
+ *
+ * Absent students for one specific day, with every contact number the
+ * click-to-call dialog needs. `/dashboard/stats` already covers today; this
+ * exists so a past day can be drilled into from the dashboard's weekly chart.
+ *
+ * Scoped exactly like `/dashboard/stats` - a teacher only ever sees the
+ * absentees from their own classes.
+ */
+app.get('/dashboard/attendance/absentees', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const requested = String(req.query.date ?? '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requested)) {
+      return res.status(400).json({ error: 'date must use YYYY-MM-DD format' });
+    }
+    // Attendance.date is a date-only key stored at UTC midnight.
+    const start = utcMidnight(requested);
+    if (Number.isNaN(start.getTime()) || start.toISOString().slice(0, 10) !== requested) {
+      return res.status(400).json({ error: 'date is invalid' });
+    }
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 1);
+
+    let studentWhere: any = {};
+    if (user && user.role === 'Teacher') {
+      const teacher = await prisma.teacher.findUnique({ where: { id: user.id } });
+      if (!teacher) return res.json({ date: requested, absentees: [] });
+      const classes = await prisma.schoolClass.findMany({
+        where: { teacher: { id: teacher.id } },
+        select: { name: true, section: true }
+      });
+      if (classes.length === 0) return res.json({ date: requested, absentees: [] });
+      studentWhere = { OR: classes.map((c) => ({ class: c.name, section: c.section })) };
+    }
+
+    const rows = await prisma.attendance.findMany({
+      where: {
+        date: { gte: start, lt: end },
+        // Off-roll students must not appear, matching the counts in the chart.
+        student: { AND: [studentWhere, { status: ACTIVE_STUDENT_STATUS }] },
+      },
+      select: {
+        studentId: true,
+        status: true,
+        student: {
+          select: {
+            id: true,
+            name: true,
+            admissionNo: true,
+            avatar: true,
+            class: true,
+            section: true,
+            roll: true,
+            status: true,
+            phone: true,
+            guardianPhone: true,
+            fatherName: true,
+            motherName: true,
+            guardian: {
+              select: { guardianName: true, guardianPhone: true, fatherPhone: true, motherPhone: true }
+            },
+          }
+        }
+      }
+    });
+
+    // One row per student: a duplicate save for the same day must not list them twice.
+    const seen = new Set<string>();
+    const unique = rows.filter((r) => (seen.has(r.studentId) ? false : (seen.add(r.studentId), true)));
+
+    const absentees = buildAbsentStudents(unique).sort((a, b) => (a.roll ?? 0) - (b.roll ?? 0));
+    res.json({ date: requested, absentees });
+  } catch (error: any) {
+    console.error('Error fetching absentees for date:', error);
+    res.status(500).json({ error: 'Failed to fetch absentees' });
+  }
+});
 app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
   const schema = z.object({
     type: z.enum(['income', 'expense', 'profit']),
@@ -931,6 +1018,114 @@ app.get('/students/rolls/used', authMiddleware, async (req: Request, res: Respon
     res.status(500).json({ error: 'Failed to fetch used rolls' });
   }
 });
+
+/**
+ * GET /students/birthdays?days=30&class=&section=
+ *
+ * Upcoming birthdays, soonest first. `days` is a forward-looking window
+ * (default 30, clamped to 1..366). A student whose birthday is today reports
+ * `daysUntil: 0`, which is what the navbar alert keys off.
+ *
+ * `dob` is a full timestamp on the Student row, but only the month/day matter
+ * here, so the year is recomputed onto the current (or next) year.
+ *
+ * NOTE: must stay ABOVE `app.get('/students/:id')` — Express matches in
+ * registration order, so `/students/birthdays` would be swallowed as an id.
+ */
+app.get('/students/birthdays', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const requestedDays = Number(req.query.days);
+    const days = Number.isFinite(requestedDays)
+      ? Math.min(366, Math.max(1, Math.floor(requestedDays)))
+      : 30;
+    const classFilter = req.query.class ? String(req.query.class) : undefined;
+    const sectionFilter = req.query.section ? String(req.query.section) : undefined;
+
+    const where: any = { dob: { not: null }, status: ACTIVE_STUDENT_STATUS };
+
+    // Teachers only see the students in their own classes, same as /students.
+    if (user.role === 'Teacher') {
+      const teacher = await prisma.teacher.findUnique({ where: { id: user.id } });
+      if (!teacher) return res.json({ today: startOfTodayISO(), days, birthdays: [] });
+      const classes = await prisma.schoolClass.findMany({
+        where: { teacher: { id: teacher.id } },
+        select: { name: true, section: true }
+      });
+      if (classes.length === 0) return res.json({ today: startOfTodayISO(), days, birthdays: [] });
+      where.OR = classes.map((c) => ({ class: c.name, section: c.section }));
+    }
+
+    if (classFilter && classFilter !== 'all') where.class = classFilter;
+    if (sectionFilter && sectionFilter !== 'all') where.section = sectionFilter;
+
+    const students = await prisma.student.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        admissionNo: true,
+        class: true,
+        section: true,
+        roll: true,
+        gender: true,
+        phone: true,
+        guardianPhone: true,
+        dob: true,
+      },
+    });
+
+    const today = startOfDay(new Date());
+
+    const birthdays = students
+      .map((s) => {
+        const upcoming = nextBirthday(s.dob as Date, today);
+        const daysUntil = differenceInCalendarDays(upcoming, today);
+        return {
+          studentId: s.id,
+          name: s.name,
+          admissionNo: s.admissionNo,
+          class: s.class,
+          section: s.section,
+          roll: s.roll,
+          gender: s.gender,
+          phone: s.phone,
+          guardianPhone: s.guardianPhone,
+          dob: s.dob,
+          birthdayDate: upcoming.toISOString(),
+          turningAge: upcoming.getFullYear() - (s.dob as Date).getFullYear(),
+          daysUntil,
+          isToday: daysUntil === 0,
+          isUpcoming: daysUntil <= 7,
+        };
+      })
+      .filter((b) => b.daysUntil >= 0 && b.daysUntil <= days)
+      .sort((a, b) => a.daysUntil - b.daysUntil || a.roll - b.roll);
+
+    res.json({ today: today.toISOString(), days, birthdays });
+  } catch (error: any) {
+    console.error('Error fetching student birthdays:', error);
+    res.status(500).json({ error: 'Failed to fetch student birthdays' });
+  }
+});
+
+/**
+ * Next occurrence of a birth month/day on or after `today`.
+ *
+ * Feb 29 has no match in a common year, so it rolls forward to Mar 1 rather
+ * than collapsing onto Feb 28.
+ */
+function nextBirthday(dob: Date, today: Date): Date {
+  const thisYear = new Date(today.getFullYear(), dob.getMonth(), dob.getDate());
+  if (differenceInCalendarDays(thisYear, today) < 0) {
+    return new Date(today.getFullYear() + 1, dob.getMonth(), dob.getDate());
+  }
+  return thisYear;
+}
+
+function startOfTodayISO(): string {
+  return startOfDay(new Date()).toISOString();
+}
 
 // Student Logins
 // NOTE: these must stay ABOVE `app.get('/students/:id')` below — Express matches
@@ -5693,6 +5888,58 @@ app.post('/attendance/save', async (req: Request, res: Response) => {
   res.status(201).json({ ok: true });
 });
 
+/**
+ * DELETE /attendance/date?date=YYYY-MM-DD
+ *
+ * Clears every saved attendance row for a single day, school-wide. Used to wipe
+ * a day that was marked against the wrong date and has to be redone.
+ *
+ * Admin only. Deliberately refuses any date other than the one supplied, and
+ * reports how many rows it removed so the UI can confirm exactly what went.
+ *
+ * Student and teacher attendance are cleared together: the register page shows
+ * both tabs, and wiping only students would leave the day looking half-cleared.
+ */
+app.delete('/attendance/date', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const requested = String(req.query.date ?? '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requested)) {
+      return res.status(400).json({ error: 'date must use YYYY-MM-DD format' });
+    }
+    const start = utcMidnight(requested);
+    if (Number.isNaN(start.getTime()) || start.toISOString().slice(0, 10) !== requested) {
+      return res.status(400).json({ error: 'date is invalid' });
+    }
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 1);
+    const where = { date: { gte: start, lt: end } };
+
+    const [studentCount, teacherCount] = await Promise.all([
+      prisma.attendance.count({ where }),
+      prisma.teacherAttendance.count({ where }),
+    ]);
+
+    // Nothing to do: report success rather than an error so a repeat click is
+    // harmless rather than alarming.
+    if (studentCount === 0 && teacherCount === 0) {
+      return res.json({ date: requested, deleted: { students: 0, teachers: 0 } });
+    }
+
+    // One transaction: a half-deleted day is worse than no deletion at all.
+    const [, deletedStudents] = await prisma.$transaction([
+      prisma.teacherAttendance.deleteMany({ where }),
+      prisma.attendance.deleteMany({ where }),
+    ]);
+
+    res.json({
+      date: requested,
+      deleted: { students: deletedStudents.count, teachers: teacherCount },
+    });
+  } catch (error: any) {
+    console.error('Error deleting attendance for date:', error);
+    res.status(500).json({ error: 'Failed to delete attendance' });
+  }
+});
 // Admission Packages
 app.get('/admission-packages', async (req: Request, res: Response) => {
   const { classId, session } = req.query;
@@ -8556,6 +8803,49 @@ function normalizeAttendanceStatus(raw: unknown): string {
 // Same as normalizeAttendanceStatus but lowercase (teacher page expects this).
 function lowerAttendanceStatus(raw: unknown): string {
   return normalizeAttendanceStatus(raw).toLowerCase();
+}
+
+/**
+ * Every reachable number for an absent student, de-duplicated and in priority
+ * order, so the UI can offer click-to-call without extra requests.
+ *
+ * Shared by `/dashboard/stats` (today) and `/dashboard/attendance/absentees`
+ * (any single day) so both produce an identical payload shape.
+ */
+function buildAbsentStudents(rows: Array<any>): Array<any> {
+  return rows
+    .filter((r) => ['absent', 'a'].includes(String(r.status || '').trim().toLowerCase()))
+    .map((r) => {
+      const g = r.student?.guardian;
+      const contacts: Array<{ label: string; name: string; phone: string }> = [];
+      const seen = new Set<string>();
+      const push = (label: string, name: string | null | undefined, raw: string | null | undefined) => {
+        const phone = String(raw ?? '').trim();
+        if (!phone) return;
+        const key = phone.replace(/\s+/g, '');
+        if (seen.has(key)) return;
+        seen.add(key);
+        contacts.push({ label, name: name || '', phone });
+      };
+      push('guardian', g?.guardianName, g?.guardianPhone);
+      push('guardian', r.student?.guardianPhone, r.student?.guardianPhone);
+      push('father', g?.fatherPhone || r.student?.fatherName, g?.fatherPhone);
+      push('mother', g?.motherPhone || r.student?.motherName, g?.motherPhone);
+      push('student', r.student?.name, r.student?.phone);
+
+      return {
+        id: r.student?.id || r.studentId,
+        name: r.student?.name || 'Unknown',
+        admissionNo: r.student?.admissionNo || '',
+        avatar: r.student?.avatar || null,
+        class: r.student?.class || '',
+        section: r.student?.section || '',
+        roll: r.student?.roll ?? 0,
+        status: r.student?.status || 'Inactive',
+        guardianPhone: contacts[0]?.phone || r.student?.guardianPhone || '',
+        contacts
+      };
+    });
 }
 
 // Day key from a stored attendance date (UTC), e.g. "2026-08-21".
