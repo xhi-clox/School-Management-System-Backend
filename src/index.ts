@@ -4958,6 +4958,10 @@ app.get('/attendance', async (req: Request, res: Response) => {
     roll: s.roll,
     class: s.class,
     section: s.section,
+    // `marked` tells the register apart from a default: `status` falls back to
+    // 'Present' for students with no saved row, so without this flag the UI
+    // cannot tell "already marked present" from "never marked".
+    marked: map.has(s.id),
     status: normalizeAttendanceStatus(map.get(s.id)) ,
   }));
   res.json(result);
