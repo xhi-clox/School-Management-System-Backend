@@ -512,6 +512,22 @@ model SchoolExpense {
   @@index([createdAt])
 }
 
+// User-managed income/expense categories. Ledger and expense rows still store
+// the category as free text (LedgerEntry.category / SchoolExpense.category), so
+// renaming a category also rewrites matching rows to keep reports consistent.
+model FinanceCategory {
+  id          String   @id @default(cuid())
+  type        String // 'income' | 'expense'
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([type, name])
+  @@index([type, isActive])
+}
+
 model SchoolClass {
   id        String   @id @default(cuid())
   name      String
@@ -521,11 +537,22 @@ model SchoolClass {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Optional profile shown on the class detail page. All nullable so existing
+  // rows need no backfill and the migration stays purely additive.
+  room      String?
+  floor     String?
+  shift     String?
+  startTime String?
+  endTime   String?
+  weekDays  String?
+  session   String?
+  capacity  Int?
+
   packages         AdmissionPackage[]
   feeStructures    FeeStructure[]
   examSchedules    ExamSchedule[]
   classSubjects    ClassSubjectTeacher[]
-  
+
   // New Fee System
   feeAssignments   FeeAssignment[]
 }
@@ -844,7 +871,10 @@ model Institute {
   id         String   @id @default(cuid())
   name       String   @default("NexGrad Institute")
   logo       String?
-  targetLine String?  @default("Excellence in Education")
+  headmasterSignature String?
+  targetLine String?  @default("ESTD: 2012")
+  schoolCode String?
+  emisCode   String?
   phone      String?
   website    String?
   address    String?

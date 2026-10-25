@@ -65,6 +65,27 @@ const generateFeesSchema = z.object({
   preview: z.boolean().default(false),
 });
 
+/**
+ * Manual multi-category / multi-month entry for one student, e.g. clearing
+ * five months of unpaid tuition + library fees in a single request.
+ * Override amount and discount (when supplied) apply to every combination.
+ */
+const bulkCreateFeeRecordsSchema = z.object({
+  studentId: z.string().min(1),
+  categoryIds: z.array(z.string().min(1)).min(1).max(10),
+  billingPeriods: z.array(billingPeriodSchema).min(1).max(24),
+  amount: z
+    .union([z.string(), z.number()])
+    .optional()
+    .transform((v) => (v === undefined || v === null || v === '' ? undefined : money(v))),
+  discountType: z.enum(['percentage', 'fixed']).optional(),
+  discountValue: z
+    .union([z.string(), z.number()])
+    .optional()
+    .transform((v) => (v === undefined || v === null || v === '' ? undefined : money(v))),
+  notes: z.string().optional(),
+});
+
 /** Single error shape for the whole router. */
 function sendError(res: Response, error: any) {
   if (error instanceof z.ZodError) {
@@ -371,6 +392,61 @@ router.post('/records', authMiddleware, checkRole(['Admin']), async (req: Reques
     });
 
     return res.status(201).json({ record, resolution });
+  } catch (error: any) {
+    return sendError(res, error);
+  }
+});
+
+/**
+ * POST /fees/records/bulk
+ * Create fee records for one student across several categories and/or months
+ * in a single request (e.g. five months of tuition + library arrears).
+ * Duplicates are skipped, not fatal — the same engine rules apply per row.
+ */
+router.post('/records/bulk', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const input = bulkCreateFeeRecordsSchema.parse(req.body);
+
+    const totalCombos = input.categoryIds.length * input.billingPeriods.length;
+    if (totalCombos > 100) {
+      return res.status(400).json({ error: 'Too many records requested (max 100 per submission).' });
+    }
+
+    const created: any[] = [];
+    const skipped: any[] = [];
+    const failed: any[] = [];
+    let totalAmount = 0;
+
+    for (const categoryId of input.categoryIds) {
+      for (const billingPeriod of input.billingPeriods) {
+        try {
+          const { record, resolution } = await createFeeRecord(prisma, {
+            studentId: input.studentId,
+            categoryId,
+            billingPeriod,
+            source: 'manual',
+            amountOverride: input.amount ?? null,
+            discountType: input.discountType ?? null,
+            discountValue: input.discountValue ?? null,
+            notes: input.notes ?? null,
+          });
+          created.push({ categoryId, billingPeriod, record, resolution });
+          totalAmount += Number(record.amount);
+        } catch (error: any) {
+          if (error instanceof FeeError && error.status === 409) {
+            skipped.push({ categoryId, billingPeriod, reason: error.message });
+          } else {
+            failed.push({
+              categoryId,
+              billingPeriod,
+              reason: error instanceof FeeError ? error.message : (error?.message ?? 'Unexpected error'),
+            });
+          }
+        }
+      }
+    }
+
+    return res.status(201).json({ created, skipped, failed, totalAmount });
   } catch (error: any) {
     return sendError(res, error);
   }

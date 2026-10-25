@@ -11,6 +11,7 @@ import bcrypt from 'bcryptjs';
 import { authMiddleware } from './auth';
 import { checkRole } from './checkRole';
 import errorHandler from './middleware/errorHandler';
+import isMissingColumn from './missing-column';
 import { validateGradingBands, defaultComponentConfig } from './grading-validation';
 import {
   netPaid,
@@ -634,8 +635,11 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
       };
     })
     .filter((c): c is { class: string; total: number; marked: number; pct: number; state: string } => c !== null)
-    // Worst progress first, so the classes needing attention are never the
-    // ones pushed out of the chart's top-N window.
+    // Sorted worst-progress-first. Note the dashboard's by-class tiles
+    // deliberately re-sort into academic order (see the frontend's
+    // class-label module), so this ordering is not what the grid displays - it
+    // only guarantees the classes needing attention are present in the payload
+    // and keeps the tie-break stable.
     .sort((a, b) => a.pct - b.pct || a.class.localeCompare(b.class));
 
   const dashboardBody = {
@@ -1826,33 +1830,41 @@ app.get('/exams', authMiddleware, checkRole(['Admin']), async (_req: Request, re
 });
 
 app.post('/exams', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
-  const schema = z.object({
-    name: z.string().min(1),
-    typeId: z.string().min(1),
-    startDate: z.string().min(1),
-    endDate: z.string().min(1),
-    academicYear: z.string().min(1),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { name, typeId, startDate, endDate, academicYear } = parsed.data;
-  // Validate/canonicalize the academic year so reports keyed on exact strings
-  // don't break on typos. (#18)
-  const canonicalYear = normalizeAcademicYear(academicYear);
-  if (!canonicalYear) {
-    return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+  try {
+    const schema = z.object({
+      name: z.string().trim().min(1, 'Exam name is required'),
+      typeId: z.string().min(1, 'Exam type is required'),
+      startDate: z.string().min(1, 'Start date is required'),
+      endDate: z.string().min(1, 'End date is required'),
+      academicYear: z.string().min(1, 'Academic year is required'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const { name, typeId, startDate, endDate, academicYear } = parsed.data;
+    // Validate/canonicalize the academic year so reports keyed on exact strings
+    // don't break on typos. (#18)
+    const canonicalYear = normalizeAcademicYear(academicYear);
+    if (!canonicalYear) {
+      return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+    }
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (isNaN(start.getTime())) return res.status(400).json({ error: `Invalid start date "${startDate}".` });
+    if (isNaN(end.getTime())) return res.status(400).json({ error: `Invalid end date "${endDate}".` });
+    if (end < start) return res.status(400).json({ error: 'End date cannot be before the start date.' });
+
+    const type = await prisma.examType.findUnique({ where: { id: typeId } });
+    if (!type) return res.status(400).json({ error: 'Selected exam type no longer exists. Refresh and pick a valid type.' });
+
+    const exam = await prisma.exam.create({
+      data: { name, typeId, startDate: start, endDate: end, academicYear: canonicalYear },
+      include: { type: true }
+    });
+    res.status(201).json(exam);
+  } catch (error: any) {
+    console.error('Error creating exam:', error);
+    res.status(500).json({ error: 'Failed to create exam', details: error.message });
   }
-  const exam = await prisma.exam.create({
-    data: {
-      name,
-      typeId,
-      startDate: new Date(startDate),
-      endDate: new Date(endDate),
-      academicYear: canonicalYear
-    },
-    include: { type: true }
-  });
-  res.status(201).json(exam);
 });
 
 // Edit an existing exam (name, type, academic year, date range).
@@ -3987,6 +3999,34 @@ app.post('/schedules', authMiddleware, checkRole(['Admin']), async (req: Request
   res.json(schedule);
 });
 
+app.put('/schedules/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  const schema = z.object({
+    startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Start time must be in HH:mm format'),
+    endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'End time must be in HH:mm format'),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const { startTime, endTime } = parsed.data;
+  if (endTime <= startTime) {
+    return res.status(400).json({ error: 'End time must be after start time' });
+  }
+
+  try {
+    const schedule = await prisma.examSchedule.update({
+      where: { id: req.params.id },
+      data: { startTime, endTime },
+    });
+    res.json(schedule);
+  } catch (error: any) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+    console.error('Update schedule time error:', error);
+    res.status(500).json({ error: 'Failed to update schedule time', details: error.message });
+  }
+});
+
 app.delete('/schedules/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
@@ -4031,6 +4071,36 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const { examId, items, replace } = parsed.data;
 
+    // Fail fast with precise 4xx responses instead of rolling the whole
+    // transaction back and surfacing a generic 500.
+    const exam = await prisma.exam.findUnique({ where: { id: examId }, select: { id: true } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found. Create or select an exam before saving schedules.' });
+
+    const subjectIds = Array.from(new Set(items.map((i) => i.subjectId)));
+    const foundSubjects = await prisma.subject.findMany({ where: { id: { in: subjectIds } }, select: { id: true } });
+    const missingSubjects = subjectIds.filter((id) => !foundSubjects.some((s) => s.id === id));
+    if (missingSubjects.length) {
+      return res.status(400).json({ error: `Unknown subject(s): ${missingSubjects.join(', ')}. Refresh the page and try again.` });
+    }
+    const classIds = Array.from(new Set(items.map((i) => i.classId).filter((v): v is string => !!v)));
+    if (classIds.length) {
+      const foundClasses = await prisma.schoolClass.findMany({ where: { id: { in: classIds } }, select: { id: true } });
+      const missingClasses = classIds.filter((id) => !foundClasses.some((c) => c.id === id));
+      if (missingClasses.length) {
+        return res.status(400).json({ error: `Unknown class(es): ${missingClasses.join(', ')}. Refresh the page and try again.` });
+      }
+    }
+    const mismatched = items
+      .map((item) => {
+        if (item.fullMarks === undefined || item.writtenFullMarks === undefined) return null;
+        const componentSum = (item.writtenFullMarks || 0) + (item.mcqFullMarks || 0) + (item.practicalFullMarks || 0);
+        return componentSum > 0 && componentSum !== item.fullMarks ? `subject ${item.subjectId} (${componentSum} ≠ ${item.fullMarks})` : null;
+      })
+      .filter((v): v is string => !!v);
+    if (mismatched.length) {
+      return res.status(400).json({ error: `Component marks must sum to the total full marks: ${mismatched.join(', ')}.` });
+    }
+
     const saved: any[] = [];
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
@@ -4038,7 +4108,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         if (item.fullMarks !== undefined && item.writtenFullMarks !== undefined) {
           const componentSum = (item.writtenFullMarks || 0) + (item.mcqFullMarks || 0) + (item.practicalFullMarks || 0);
           if (componentSum !== item.fullMarks && componentSum > 0) {
-            throw new Error(`Component marks sum (${componentSum}) must equal fullMarks (${item.fullMarks}) for subject ${item.subjectId}`);
+            throw new HttpError(400, `Component marks sum (${componentSum}) must equal fullMarks (${item.fullMarks}) for subject ${item.subjectId}`);
           }
         }
 
@@ -4140,6 +4210,16 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
 
     res.json(saved);
   } catch (error: any) {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
+    if (error?.code === 'P2002') {
+      return res.status(409).json({ error: 'A schedule row already exists for one of the selected subjects in this class.' });
+    }
+    if (error?.code === 'P2003') {
+      return res.status(400).json({ error: 'One of the selected subjects, classes or grading templates no longer exists. Refresh and try again.' });
+    }
+    if (error?.code === 'P2025') {
+      return res.status(404).json({ error: 'One of the schedule rows no longer exists. Refresh and try again.' });
+    }
     console.error('Bulk schedule error:', error);
     res.status(500).json({ error: 'Failed to save schedules', details: error.message });
   }
@@ -4223,6 +4303,15 @@ app.post('/exam-presets', authMiddleware, checkRole(['Admin']), async (req: Requ
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const d = parsed.data;
 
+    const presetSubjectIds = Array.from(new Set((d.classes || []).flatMap((c) => (c.subjects || []).map((s) => s.subjectId))));
+    if (presetSubjectIds.length) {
+      const found = await prisma.subject.findMany({ where: { id: { in: presetSubjectIds } }, select: { id: true } });
+      const missing = presetSubjectIds.filter((id) => !found.some((s) => s.id === id));
+      if (missing.length) {
+        return res.status(400).json({ error: `Unknown subject(s): ${missing.join(', ')}. Refresh the page and reselect them.` });
+      }
+    }
+
     const preset = await prisma.examPreset.create({
       data: {
         name: d.name,
@@ -4247,6 +4336,12 @@ app.post('/exam-presets', authMiddleware, checkRole(['Admin']), async (req: Requ
     });
     res.status(201).json(preset);
   } catch (error: any) {
+    if (error?.code === 'P2002') {
+      return res.status(409).json({ error: 'This preset has duplicate class/section entries. Remove the duplicates and try again.' });
+    }
+    if (error?.code === 'P2003') {
+      return res.status(400).json({ error: 'One of the selected subjects no longer exists. Refresh the page and reselect them.' });
+    }
     console.error('Error creating preset:', error);
     res.status(500).json({ error: 'Failed to create preset', details: error.message });
   }
@@ -4277,6 +4372,17 @@ app.put('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req: R
 
     const existing = await prisma.examPreset.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'Preset not found' });
+
+    if (d.classes !== undefined) {
+      const presetSubjectIds = Array.from(new Set(d.classes.flatMap((c) => (c.subjects || []).map((s) => s.subjectId))));
+      if (presetSubjectIds.length) {
+        const found = await prisma.subject.findMany({ where: { id: { in: presetSubjectIds } }, select: { id: true } });
+        const missing = presetSubjectIds.filter((sid) => !found.some((s) => s.id === sid));
+        if (missing.length) {
+          return res.status(400).json({ error: `Unknown subject(s): ${missing.join(', ')}. Refresh the page and reselect them.` });
+        }
+      }
+    }
 
     const preset = await prisma.$transaction(async (tx) => {
       const data: any = {};
@@ -4316,6 +4422,12 @@ app.put('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req: R
     });
     res.json(preset);
   } catch (error: any) {
+    if (error?.code === 'P2002') {
+      return res.status(409).json({ error: 'This preset has duplicate class/section entries. Remove the duplicates and try again.' });
+    }
+    if (error?.code === 'P2003') {
+      return res.status(400).json({ error: 'One of the selected subjects no longer exists. Refresh the page and reselect them.' });
+    }
     console.error('Error updating preset:', error);
     res.status(500).json({ error: 'Failed to update preset', details: error.message });
   }
@@ -4326,6 +4438,9 @@ app.delete('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req
     await prisma.examPreset.delete({ where: { id: req.params.id } });
     res.status(204).send();
   } catch (error: any) {
+    if (error?.code === 'P2025') {
+      return res.status(404).json({ error: 'Preset not found — it may have already been deleted.' });
+    }
     console.error('Error deleting preset:', error);
     res.status(500).json({ error: 'Failed to delete preset', details: error.message });
   }
@@ -4351,6 +4466,13 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const d = parsed.data;
+
+    if (d.startDate && isNaN(new Date(d.startDate).getTime())) {
+      return res.status(400).json({ error: `Invalid start date "${d.startDate}".` });
+    }
+    if (d.endDate && isNaN(new Date(d.endDate).getTime())) {
+      return res.status(400).json({ error: `Invalid end date "${d.endDate}".` });
+    }
 
     const preset = await prisma.examPreset.findUnique({
       where: { id: d.presetId },
@@ -4469,6 +4591,10 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
 
     res.json({ mode: 'manual', items: built });
   } catch (error: any) {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
+    if (error?.code === 'P2003') {
+      return res.status(400).json({ error: 'One of the preset subjects or classes no longer exists. Refresh and try again.' });
+    }
     console.error('Error applying preset:', error);
     res.status(500).json({ error: 'Failed to apply preset', details: error.message });
   }
@@ -4477,16 +4603,22 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
 // ---- Save as Preset from an existing exam schedule ----
 app.post('/exam-presets/save-from-exam', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
-    const schema = z.object({ examId: z.string().min(1), name: z.string().min(1) });
+    const schema = z.object({ examId: z.string().min(1), name: z.string().trim().min(1, 'Preset name is required') });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
     const { examId, name } = parsed.data;
+
+    const exam = await prisma.exam.findUnique({ where: { id: examId }, select: { id: true } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found.' });
 
     const schedules = await prisma.examSchedule.findMany({
       where: { examId },
       include: { class: true, subject: true },
       orderBy: [{ date: 'asc' }, { sortOrder: 'asc' }],
     });
+    if (schedules.length === 0) {
+      return res.status(400).json({ error: 'This exam has no schedule rows yet. Save the schedule before saving it as a preset.' });
+    }
 
     // group by (class name, section)
     const groups: Record<string, { className: string; section: string | null; rows: any[] }> = {};
@@ -4565,7 +4697,7 @@ app.get('/institute', async (req: Request, res: Response) => {
         data: {
           email,
           name: 'NexGrad Institute',
-          targetLine: 'Excellence in Education',
+          targetLine: 'ESTD: 2012',
           currency: 'USD'
         }
       });
@@ -4584,7 +4716,10 @@ app.post('/institute', async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().optional(),
     logo: z.string().optional(),
+    headmasterSignature: z.string().optional(),
     targetLine: z.string().optional(),
+    schoolCode: z.string().optional(),
+    emisCode: z.string().optional(),
     phone: z.string().optional(),
     website: z.string().optional(),
     address: z.string().optional(),
@@ -4866,7 +5001,9 @@ app.post('/expenses', authMiddleware, async (req: Request, res: Response) => {
     await tx.ledgerEntry.create({
       data: {
         type: 'expense',
-        category: (expense.category && expense.category.toLowerCase().replace(/\s+/g, '_')) || '',
+        // Store the category verbatim so it matches FinanceCategory names and
+        // keeps the expense list and the ledger reports grouped identically.
+        category: expense.category || '',
         amount: expense.amount,
         referenceInvoice: expense.id,
         createdAt: expense.date
@@ -4890,15 +5027,16 @@ app.put('/expenses/:id', authMiddleware, async (req: Request, res: Response) => 
   
   const result = await prisma.$transaction(async (tx) => {
     const expense = await tx.schoolExpense.update({ where: { id }, data: parsed.data });
-    
-    // If amount changed, also update the ledger entry
-    if (parsed.data.amount !== undefined) {
-      await tx.ledgerEntry.updateMany({
-        where: { referenceInvoice: id },
-        data: { amount: parsed.data.amount }
-      });
+
+    // Mirror the edits onto the linked ledger row so reports never drift from
+    // the expense list (category and amount both feed the breakdowns).
+    const ledgerUpdate: any = {};
+    if (parsed.data.amount !== undefined) ledgerUpdate.amount = parsed.data.amount;
+    if (parsed.data.category !== undefined) ledgerUpdate.category = parsed.data.category;
+    if (Object.keys(ledgerUpdate).length) {
+      await tx.ledgerEntry.updateMany({ where: { referenceInvoice: id }, data: ledgerUpdate });
     }
-    
+
     return expense;
   });
   res.json(result);
@@ -4929,6 +5067,243 @@ app.get('/classes', authMiddleware, checkRole(['Admin']), async (_req: Request, 
     })
   );
   res.json(counts);
+});
+
+/**
+ * GET /classes/:id/detail
+ *
+ * One aggregated payload for the class detail page: profile, staff, roster,
+ * monthly attendance trend, exam standing, fee position and notices. Fetched in
+ * a single request so the page is not built from six round trips.
+ */
+app.get('/classes/:id/detail', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const found = await prisma.schoolClass.findUnique({
+      where: { id },
+      include: {
+        teacher: { select: { id: true, name: true, subject: true, email: true, phone: true, avatar: true, designation: true } },
+        classSubjects: { include: { teacher: { select: { id: true, name: true, subject: true, avatar: true, designation: true } }, subject: { select: { id: true, name: true } } } },
+      },
+    });
+    if (!found) return res.status(404).json({ error: 'Class not found' });
+
+    const cls = found;
+    const where = { class: cls.name, section: cls.section, status: ACTIVE_STUDENT_STATUS };
+
+    // Exams hang off a class through ExamSchedule, not through Exam directly.
+    const classExam = { schedules: { some: { classId: id } } };
+
+    // The profile columns arrived in a later additive migration. Until it has
+    // been applied the class still renders - it just shows these as unset.
+    let profile = {} as Record<string, unknown>;
+    try {
+      const row = (await prisma.schoolClass.findUniqueOrThrow({
+        where: { id },
+        select: {
+          room: true, floor: true, shift: true, startTime: true,
+          endTime: true, weekDays: true, session: true, capacity: true,
+        },
+      })) as Record<string, unknown>;
+      profile = row as Record<string, unknown>;
+    } catch (err) {
+      if (!isMissingColumn(err)) throw err;
+    }
+
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setDate(1);
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+
+    const [students, attendance, exams, results, invoices, payments, feeStructures, notices] =
+      await Promise.all([
+        prisma.student.findMany({
+          where,
+          orderBy: { roll: 'asc' },
+          select: { id: true, name: true, roll: true, gender: true, admissionNo: true, avatar: true, guardianPhone: true },
+        }),
+        prisma.attendance.findMany({
+          where: { student: where, date: { gte: sixMonthsAgo } },
+          select: { date: true, status: true, studentId: true },
+        }),
+        prisma.exam.findMany({
+          where: classExam,
+          orderBy: { startDate: 'desc' },
+          take: 8,
+          select: { id: true, name: true, startDate: true, type: { select: { name: true } } },
+        }),
+        prisma.result.findMany({
+          where: { student: where, exam: classExam },
+          select: { written: true, mcq: true, practical: true, totalMarks: true, studentId: true },
+        }),
+        prisma.invoice.findMany({
+          where: { student: where },
+          select: { id: true, studentId: true, totalAmount: true, paidAmount: true, status: true, dueDate: true },
+        }),
+        prisma.payment.findMany({
+          where: { status: 'active', invoice: { student: where } },
+          select: { amount: true, date: true, invoice: { select: { studentId: true } } },
+        }),
+        prisma.feeStructure.findMany({
+          where: { classId: id, isActive: true, frequency: 'monthly' },
+          orderBy: { amount: 'asc' },
+          take: 1,
+          select: { amount: true },
+        }),
+        prisma.announcement.findMany({ orderBy: { createdAt: 'desc' }, take: 6 }),
+      ]);
+
+    // --- Attendance, bucketed by month and per student -----------------
+    const monthKey = (d: Date) => `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+    type Bucket = { marked: number; present: number };
+    const monthly = new Map<string, Bucket>();
+    const perStudent = new Map<string, { marked: number; present: number }>();
+
+    for (const row of attendance) {
+      const status = normalizeAttendanceStatus(row.status);
+      const key = monthKey(row.date);
+      const bucket = monthly.get(key) ?? { marked: 0, present: 0 };
+      bucket.marked++;
+      if (status === 'Present' || status === 'Late') bucket.present++;
+      monthly.set(key, bucket);
+
+      const own = perStudent.get(row.studentId) ?? { marked: 0, present: 0 };
+      own.marked++;
+      if (status === 'Present' || status === 'Late') own.present++;
+      perStudent.set(row.studentId, own);
+    }
+
+    const pctOf = (b: Bucket | undefined) =>
+      b && b.marked > 0 ? Math.round((b.present / b.marked) * 100) : null;
+
+    // Always six trailing months so the chart keeps a stable x-axis.
+    const monthlyAttendance: Array<{ key: string; label: string; pct: number | null }> = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(1);
+      d.setMonth(d.getMonth() - i);
+      const key = monthKey(d);
+      monthlyAttendance.push({
+        key,
+        label: d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }),
+        pct: pctOf(monthly.get(key)),
+      });
+    }
+    const currentMonth = monthKey(new Date());
+
+    // --- Results ------------------------------------------------------
+    // There is no obtainedMarks column: marks are split across the written,
+    // mcq and practical components.
+    const resultTotals = new Map<string, { obtained: number; total: number; n: number }>();
+    for (const r of results) {
+      const own = resultTotals.get(r.studentId) ?? { obtained: 0, total: 0, n: 0 };
+      own.obtained += Number(r.written ?? 0) + Number(r.mcq ?? 0) + Number(r.practical ?? 0);
+      own.total += Number(r.totalMarks ?? 0);
+      own.n++;
+      resultTotals.set(r.studentId, own);
+    }
+    const examAvgFor = (studentId: string) => {
+      const t = resultTotals.get(studentId);
+      if (!t || t.n === 0 || t.total <= 0) return null;
+      return Math.round((t.obtained / t.total) * 100);
+    };
+
+    // --- Fees ---------------------------------------------------------
+    const paidByStudent = new Map<string, number>();
+    for (const p of payments) {
+      const sid = p.invoice?.studentId;
+      if (sid) paidByStudent.set(sid, (paidByStudent.get(sid) ?? 0) + Number(p.amount ?? 0));
+    }
+    const sum = (rows: typeof invoices, field: 'totalAmount' | 'paidAmount') =>
+      rows.reduce((acc, r) => acc + Number(r[field] ?? 0), 0);
+    const feesCollected = sum(invoices, 'paidAmount');
+    const feesExpected = sum(invoices, 'totalAmount');
+
+    const roster = students.map((s) => {
+      const att = perStudent.get(s.id);
+      const examAvg = examAvgFor(s.id);
+      const paid = paidByStudent.get(s.id) ?? 0;
+      return {
+        id: s.id,
+        name: s.name,
+        roll: s.roll,
+        gender: s.gender,
+        admissionNo: s.admissionNo,
+        avatar: s.avatar,
+        guardianPhone: s.guardianPhone,
+        attendancePct: pctOf(att),
+        examAvg,
+        feePaid: paid,
+      };
+    });
+
+    const ranked = [...roster].sort((a, b) => (b.examAvg ?? -1) - (a.examAvg ?? -1));
+    const topPerformers = ranked.filter((s) => s.examAvg !== null).slice(0, 3);
+    const needsAttention = roster
+      .filter((s) => s.attendancePct !== null && s.attendancePct < 85)
+      .sort((a, b) => (a.attendancePct ?? 0) - (b.attendancePct ?? 0))
+      .slice(0, 6);
+
+    const withAttendance = roster.filter((s) => s.attendancePct !== null);
+    const withMarks = roster.filter((s) => s.examAvg !== null);
+    const avgExam =
+      withMarks.length === 0
+        ? null
+        : Math.round(withMarks.reduce((a, s) => a + (s.examAvg ?? 0), 0) / withMarks.length);
+
+    res.json({
+      class: {
+        id: cls.id,
+        name: cls.name,
+        section: cls.section,
+        teacher: cls.teacher,
+        ...profile,
+        subjects: cls.classSubjects.map((cs) => ({
+          subject: cs.subject?.name ?? '',
+          teacher: cs.teacher
+            ? { id: cs.teacher.id, name: cs.teacher.name, subject: cs.teacher.subject, avatar: cs.teacher.avatar, designation: cs.teacher.designation }
+            : null,
+        })),
+      },
+      monthlyFee: feeStructures[0] ? Number(feeStructures[0].amount) : null,
+      stats: {
+        total: students.length,
+        male: students.filter((s) => s.gender?.toLowerCase() === 'male').length,
+        female: students.filter((s) => s.gender?.toLowerCase() === 'female').length,
+        attendancePct: withAttendance.length
+          ? Math.round(withAttendance.reduce((a, s) => a + (s.attendancePct ?? 0), 0) / withAttendance.length)
+          : null,
+        examAvg: avgExam,
+        feesCollected,
+        feesExpected,
+        feesOutstanding: Math.max(0, feesExpected - feesCollected),
+        collectedThisMonth: payments
+          .filter((p) => p.date && monthKey(new Date(p.date)) === currentMonth)
+          .reduce((a, p) => a + Number(p.amount ?? 0), 0),
+      },
+      monthlyAttendance,
+      students: roster,
+      topPerformers,
+      needsAttention,
+      exams: exams.map((e) => ({
+        id: e.id,
+        name: e.name,
+        type: e.type?.name ?? '',
+        date: e.startDate,
+      })),
+      notices: notices.map((n) => ({
+        id: n.id,
+        title: n.title,
+        content: n.content,
+        author: n.author,
+        role: n.role,
+        target: n.target,
+        createdAt: n.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Class detail error:', error);
+    res.status(500).json({ error: 'Failed to load class detail' });
+  }
 });
 
 app.post('/classes', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
@@ -6878,6 +7253,133 @@ app.get('/finance/income', async (req: Request, res: Response) => {
   });
 });
 
+/* ---- Income / Expense categories (user-managed) ----
+ * Transactions store their category as free text, so these categories are the
+ * source of truth for the pickers and the management page. Renaming rewrites the
+ * matching strings on historic rows so reports stay consistent.
+ */
+const financeCategoryTypeSchema = z.enum(['income', 'expense']);
+
+// Legacy manual entries stored a normalised key (income: non-alphanumerics -> '_',
+// expense: whitespace -> '_'). Match those too when rewriting after a rename.
+const legacyCategoryKeys = (name: string): string[] =>
+  Array.from(new Set([
+    name,
+    name.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+    name.toLowerCase().replace(/\s+/g, '_'),
+  ]));
+
+app.get('/finance/categories', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { type, includeInactive } = req.query;
+    const where: any = {};
+    if (type) {
+      const parsed = financeCategoryTypeSchema.safeParse(String(type));
+      if (!parsed.success) return res.status(400).json({ error: 'type must be "income" or "expense".' });
+      where.type = parsed.data;
+    }
+    if (String(includeInactive) !== 'true') where.isActive = true;
+    const categories = await prisma.financeCategory.findMany({
+      where,
+      orderBy: [{ type: 'asc' }, { name: 'asc' }],
+    });
+    res.json(categories);
+  } catch (error: any) {
+    console.error('Error fetching finance categories:', error);
+    res.status(500).json({ error: 'Failed to load categories', details: error.message });
+  }
+});
+
+app.post('/finance/categories', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      type: financeCategoryTypeSchema,
+      name: z.string().trim().min(1, 'Category name is required'),
+      description: z.string().trim().optional(),
+      isActive: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const d = parsed.data;
+
+    const created = await prisma.financeCategory.create({
+      data: {
+        type: d.type,
+        name: d.name,
+        description: d.description || null,
+        isActive: d.isActive ?? true,
+      },
+    });
+    res.status(201).json(created);
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      const name = String((req.body ?? {}).name ?? '').trim();
+      return res.status(409).json({ error: `A category named "${name}" already exists for this type.` });
+    }
+    console.error('Error creating finance category:', error);
+    res.status(500).json({ error: 'Failed to create category', details: error.message });
+  }
+});
+
+app.put('/finance/categories/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const schema = z.object({
+      name: z.string().trim().min(1, 'Category name is required').optional(),
+      description: z.string().trim().nullable().optional(),
+      isActive: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const d = parsed.data;
+
+    const existing = await prisma.financeCategory.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Category not found.' });
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const cat = await tx.financeCategory.update({
+        where: { id },
+        data: {
+          ...(d.name !== undefined ? { name: d.name } : {}),
+          ...(d.description !== undefined ? { description: d.description || null } : {}),
+          ...(d.isActive !== undefined ? { isActive: d.isActive } : {}),
+        },
+      });
+      const renamed = d.name !== undefined && d.name !== existing.name;
+      if (renamed) {
+        const keys = legacyCategoryKeys(existing.name);
+        await tx.ledgerEntry.updateMany({
+          where: { type: existing.type, category: { in: keys } },
+          data: { category: cat.name },
+        });
+        if (existing.type === 'expense') {
+          await tx.schoolExpense.updateMany({ where: { category: { in: keys } }, data: { category: cat.name } });
+        }
+      }
+      return cat;
+    });
+    res.json(updated);
+  } catch (error: any) {
+    if (error?.code === 'P2002') return res.status(409).json({ error: 'Another category already uses that name.' });
+    if (error?.code === 'P2025') return res.status(404).json({ error: 'Category not found.' });
+    console.error('Error updating finance category:', error);
+    res.status(500).json({ error: 'Failed to update category', details: error.message });
+  }
+});
+
+app.delete('/finance/categories/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
+  try {
+    await prisma.financeCategory.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (error: any) {
+    if (error?.code === 'P2025') {
+      return res.status(404).json({ error: 'Category not found — it may already have been deleted.' });
+    }
+    console.error('Error deleting finance category:', error);
+    res.status(500).json({ error: 'Failed to delete category', details: error.message });
+  }
+});
+
 /**
  * POST /finance/income
  * Manual income entry. The Income page has always offered an "Add income" form,
@@ -6918,9 +7420,9 @@ app.post('/finance/income', authMiddleware, async (req: Request, res: Response) 
   const entry = await prisma.ledgerEntry.create({
     data: {
       type: 'income',
-      // Free text is normalised the same way POST /expenses does it so the
-      // category breakdowns group consistently.
-      category: label.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+      // Store the category label verbatim so it matches the managed
+      // FinanceCategory names exactly (rename propagation relies on that).
+      category: label,
       amount: value,
       date: when,
       referenceInvoice: reference ? String(reference) : null,
