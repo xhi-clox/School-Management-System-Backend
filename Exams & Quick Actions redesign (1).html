@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Exams & Quick Actions</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c1a;--card:#121528;--tile:#0d1020;--line:rgba(255,255,255,.07);--text:#f2f4ff;--muted:#8b91b0;
+  --blue:#1677ff;--blue-soft:rgba(22,119,255,.14);--green:#22c55e;--amber:#f5a524;--violet:#8b7bff;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#f3f5fb;--card:#fff;--tile:#f5f7fc;--line:rgba(15,20,50,.09);--text:#12162b;--muted:#6b7191}}
+:root[data-theme="light"]{--bg:#f3f5fb;--card:#fff;--tile:#f5f7fc;--line:rgba(15,20,50,.09);--text:#12162b;--muted:#6b7191}
+:root[data-theme="dark"]{--bg:#0a0c1a;--card:#121528;--tile:#0d1020;--line:rgba(255,255,255,.07);--text:#f2f4ff;--muted:#8b91b0}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font-family:"Plus Jakarta Sans",system-ui,sans-serif;padding:24px;min-height:100vh}
+.grid{display:grid;grid-template-columns:1.1fr 1fr;gap:18px;max-width:1100px;margin:0 auto}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:24px;display:flex;flex-direction:column;min-height:360px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:18px}
+h2{font-size:18px;font-weight:700;letter-spacing:-.01em}
+.sub{font-size:13px;color:var(--muted);margin-top:4px}
+svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font-family:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.link{display:inline-flex;align-items:center;gap:2px;font-size:12.5px;font-weight:600;color:var(--blue);background:none;border:0;padding:4px 0}
+.link svg{width:15px;height:15px;transition:transform .15s}.link:hover svg{transform:translateX(3px)}
+
+/* week strip */
+.week{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.day{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0 10px;border-radius:14px;border:1px solid var(--line);background:var(--tile);transition:border-color .15s,background .15s,transform .15s}
+.day:hover{border-color:var(--blue)}
+.day small{font-size:11px;color:var(--muted);font-weight:500}
+.day b{font-size:17px;font-weight:700}
+.day i{width:5px;height:5px;border-radius:50%;background:transparent}
+.day.today i{background:var(--blue)}
+.day.today small{color:var(--blue)}
+.day.sel{background:var(--blue);border-color:var(--blue);color:#fff;transform:translateY(-2px)}
+.day.sel small{color:rgba(255,255,255,.8)}.day.sel i{background:#fff}
+.hint{flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px;padding:26px 4px 18px}
+.hint b{font-size:15px;font-weight:600}
+.hint p{font-size:13px;color:var(--muted);line-height:1.5}
+.cta{display:flex;align-items:center;justify-content:space-between;width:100%;padding:14px 16px;border-radius:14px;border:1px dashed var(--line);background:transparent;font-size:13.5px;font-weight:600;color:var(--muted);transition:all .2s}
+.cta .plus{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:var(--blue-soft);color:var(--blue);transition:all .2s}
+.cta .plus svg{width:16px;height:16px}
+.cta.ready{border:1px solid var(--blue);background:var(--blue);color:#fff}
+.cta.ready .plus{background:rgba(255,255,255,.2);color:#fff}
+
+/* bento actions */
+.bento{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto auto;gap:12px;flex:1}
+.hero{grid-row:span 2;position:relative;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;text-align:left;border:0;border-radius:18px;padding:18px;color:#fff;min-height:170px;background:radial-gradient(120% 90% at 100% 0%,#3aa0ff 0%,transparent 55%),linear-gradient(160deg,#1a5df0,#0b2a8f);transition:transform .15s}
+.hero:active{transform:scale(.98)}
+.hero .ic{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:rgba(255,255,255,.18)}
+.hero b{font-size:19px;font-weight:800;display:block;letter-spacing:-.01em}
+.hero span{font-size:12.5px;opacity:.8}
+.hero .go{position:absolute;top:16px;right:16px;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.16);transition:transform .2s}
+.hero .go svg{width:15px;height:15px}.hero:hover .go{transform:rotate(45deg)}
+.mini{display:flex;align-items:center;gap:12px;text-align:left;padding:14px;border-radius:16px;border:1px solid var(--line);background:var(--tile);transition:border-color .15s,background .15s}
+.mini:hover{border-color:var(--c);background:color-mix(in srgb,var(--c) 7%,var(--tile))}
+.mini .ic{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent)}
+.mini b{font-size:13.5px;font-weight:600;display:block}
+.mini span{font-size:11.5px;color:var(--muted)}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="grid">
+
+<section class="card" aria-labelledby="eh">
+  <div class="head">
+    <div><h2 id="eh">Exams</h2><p class="sub" id="range"></p></div>
+    <button class="link">View all <svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+  </div>
+  <div class="week" id="week" role="group" aria-label="Pick a day"></div>
+  <div class="hint">
+    <b>Nothing scheduled this week</b>
+    <p>Pick a day above to plan an exam for it.</p>
+  </div>
+  <button class="cta" id="cta"><span id="ctaText">Schedule an exam</span><span class="plus"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span></button>
+</section>
+
+<section class="card" aria-labelledby="qh">
+  <div class="head"><div><h2 id="qh">Quick actions</h2><p class="sub">Store</p></div></div>
+  <div class="bento">
+    <button class="hero">
+      <span class="go"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></svg></span>
+      <div class="ic"><svg viewBox="0 0 24 24"><circle cx="9" cy="20" r="1.2"/><circle cx="18" cy="20" r="1.2"/><path d="M3 4h2.5l2.3 11h10.4L20 8H6.5"/></svg></div>
+      <div><b>New sale</b><span>Uniforms, books, supplies</span></div>
+    </button>
+    <button class="mini" style="--c:var(--amber)"><div class="ic"><svg viewBox="0 0 24 24"><path d="M5 8h14l-1 12H6L5 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg></div><div><b>Purchases</b><span>Restock</span></div></button>
+    <button class="mini" style="--c:var(--violet)"><div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></svg></div><div><b>Inventory</b><span>Stock levels</span></div></button>
+    <button class="mini" style="--c:var(--green);grid-column:1 / -1"><div class="ic"><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg></div><div><b>Products</b><span>Items and prices</span></div></button>
+  </div>
+  <div class="foot"><span>Need the numbers?</span><button class="link">Store reports <svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button></div>
+</section>
+
+</div>
+<script>
+const w=document.getElementById('week'),cta=document.getElementById('cta'),t=document.getElementById('ctaText');
+const now=new Date(),f=(d,o)=>d.toLocaleDateString('en-GB',o);
+const end=new Date(now);end.setDate(now.getDate()+6);
+document.getElementById('range').textContent=f(now,{day:'numeric',month:'short'})+' to '+f(end,{day:'numeric',month:'short'});
+for(let i=0;i<7;i++){
+  const d=new Date(now);d.setDate(now.getDate()+i);
+  const b=document.createElement('button');b.className='day'+(i===0?' today':'');
+  b.innerHTML='<small>'+f(d,{weekday:'short'})+'</small><b>'+d.getDate()+'</b><i></i>';
+  b.onclick=()=>{
+    const on=b.classList.contains('sel');
+    w.querySelectorAll('.sel').forEach(x=>x.classList.remove('sel'));
+    if(on){cta.classList.remove('ready');t.textContent='Schedule an exam';return}
+    b.classList.add('sel');cta.classList.add('ready');
+    t.textContent='Schedule exam for '+f(d,{weekday:'long',day:'numeric',month:'short'});
+  };
+  w.appendChild(b);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1227 @@
+ ⚠ Warning: Next.js inferred your workspace root, but it may not be correct.
+ We detected multiple lockfiles and selected the directory of C:\Users\Walton\package-lock.json as the root directory.
+ To silence this warning, set `turbopack.root` in your Next.js config, or consider removing one of the lockfiles if it's not needed.
+   See https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack#root-directory for more information.
+ Detected additional lockfiles: 
+   * C:\Users\Walton\Documents\SMS-Backend\School-Management-system\package-lock.json
+
+
+[1m[33mwarn[39m[22m - The class `ease-[cubic-bezier(0.22,1,0.36,1)]` is ambiguous and matches multiple utilities.
+[1m[33mwarn[39m[22m - If this is content and not a class, replace it with `ease-&lsqb;cubic-bezier(0.22,1,0.36,1)&rsqb;` to silence this warning.
+(node:6844) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/classes?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/subjects?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exam-types?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/classes?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/subjects?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exam-types?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+Failed to proxy http://127.0.0.1:4000/results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade%202&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/results/overview?examId=cmteoghwv002bti6oq7g2e53u&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/classes?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade%202&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/results/overview?examId=cmteoghwv002bti6oq7g2e53u&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/classes?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/student/dashboard?email=bushra.das.54%40student.academify.edu&studentId=cms9tr1yd00cltitkeriyd7qj [Error: socket hang up] { code: 'ECONNRESET' }
+[Error: socket hang up] { code: 'ECONNRESET' }
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com [Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+[Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com [Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+[Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/exams?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/institute?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/attendance/summary/weekly?startDate=2026-08-16&endDate=2026-08-29&email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Failed to proxy http://127.0.0.1:4000/auth/login Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload when ./Documents/SMS-Backend/School-Management-system/src/lib/translations.ts changed. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com [Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+[Error: read ECONNRESET] {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Failed to proxy http://127.0.0.1:4000/dashboard/stats?email=admin%40academify.com Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}
+Error: connect ECONNREFUSED 127.0.0.1:4000
+    at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+  errno: -4078,
+  code: 'ECONNREFUSED',
+  syscall: 'connect',
+  address: '127.0.0.1',
+  port: 4000
+}

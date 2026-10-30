@@ -1,0 +1,507 @@
+
+> nextn@0.1.0 dev
+> next dev --turbopack -p 9002
+
+   ▲ Next.js 15.5.9 (Turbopack)
+   - Local:        http://localhost:9002
+   - Network:      http://192.168.0.2:9002
+   - Environments: .env
+
+ ✓ Starting...
+ ○ Compiling middleware ...
+ ✓ Compiled middleware in 754ms
+ ✓ Ready in 4.8s
+ ○ Compiling /dashboard ...
+ ✓ Compiled /dashboard in 25.9s
+ GET /dashboard 200 in 30177ms
+ ○ Compiling /_error ...
+ ✓ Compiled /_error in 8s
+ ○ Compiling /results ...
+ ✓ Compiled /results in 3.6s
+ GET /results 200 in 4019ms
+ GET /results 200 in 707ms
+ GET /results 200 in 348ms
+ GET /dashboard 200 in 1123ms
+ ○ Compiling /favicon.ico ...
+ GET /results 200 in 2360ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 6175ms
+ ✓ Compiled /favicon.ico in 14s
+ GET /exams/exam-schedule 200 in 11376ms
+ GET /exams/exam-schedule 200 in 642ms
+ GET /exams/exam-schedule 200 in 436ms
+ GET /results 200 in 235ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 1666ms
+ GET /login 200 in 2523ms
+ GET /login 200 in 499ms
+ GET /login 200 in 294ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 534ms
+ GET /results 200 in 685ms
+ GET /login 200 in 469ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 732ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 522ms
+ GET /dashboard 200 in 457ms
+ GET /results 200 in 330ms
+ GET /exams/exam-schedule 200 in 360ms
+ GET /dashboard 200 in 341ms
+ GET /dashboard 200 in 541ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 790ms
+ GET /results 200 in 173ms
+ ✓ Compiled in 875ms
+ ✓ Compiled in 101ms
+ GET /results 200 in 959ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 539ms
+ ✓ Compiled in 72ms
+ GET /results 200 in 891ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 412ms
+ ✓ Compiled in 38ms
+ ✓ Compiled in 629ms
+ ✓ Compiled in 4.6s
+ GET /results 200 in 2507ms
+ GET /results 200 in 2670ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 527ms
+ ✓ Compiled in 627ms
+ ✓ Compiled in 412ms
+ ✓ Compiled in 577ms
+ ✓ Compiled in 1769ms
+ ✓ Compiled in 268ms
+ ✓ Compiled middleware in 11ms
+ ✓ Compiled in 758ms
+ GET /results 200 in 1321ms
+ GET /results 200 in 1151ms
+ ✓ Compiled middleware in 3ms
+ ✓ Compiled in 714ms
+ GET /results 200 in 697ms
+ GET /results 200 in 328ms
+ ✓ Compiled middleware in 4ms
+ ✓ Compiled in 1025ms
+ GET /results 200 in 1189ms
+ GET /results 200 in 425ms
+ ✓ Compiled in 433ms
+ ✓ Compiled in 257ms
+ ✓ Compiled in 363ms
+ GET /results 200 in 4220ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1553ms
+ ○ Compiling /results/class ...
+ GET /results/class?examId=cmsus9gir0001mn3dnhn9o8vv&class=Grade+9 200 in 9344ms
+ ✓ Compiled /results/class in 10.8s
+ GET /results/student/cms9tsghp00rqtitkak0eoqdx?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 5175ms
+ ○ Compiling /results/validation ...
+ GET /results/validation?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 5768ms
+ ✓ Compiled /results/validation in 6.2s
+ GET /results/validation?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 1038ms
+ GET /results/configuration?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 3511ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+1 200 in 254ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+2 200 in 258ms
+ ○ Compiling /students ...
+ ✓ Compiled /students in 3.3s
+ GET /students 200 in 3557ms
+ GET /students 200 in 210ms
+ GET /login 200 in 475ms
+ ○ Compiling /student/dashboard ...
+ ✓ Compiled /student/dashboard in 1390ms
+ GET /student/dashboard 200 in 1610ms
+ ○ Compiling /student/exam-schedule ...
+ ✓ Compiled /student/exam-schedule in 651ms
+ GET /student/exam-schedule 200 in 815ms
+ ○ Compiling /student/results ...
+ ✓ Compiled /student/results in 647ms
+ GET /student/results 200 in 813ms
+ ○ Compiling / ...
+ ✓ Compiled / in 1356ms
+ GET / 200 in 1524ms
+ GET /login 200 in 196ms
+ GET /login 200 in 606ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1371ms
+ ✓ Compiled /dashboard in 71ms
+ GET /dashboard 200 in 368ms
+ GET /results 200 in 423ms
+ ○ Compiling /results/analytics ...
+ GET /results/validation 200 in 917ms
+ ✓ Compiled /results/analytics in 8s
+ GET /results/analytics 200 in 8303ms
+ GET /results/analytics 200 in 248ms
+ GET /results/analytics 200 in 166ms
+ GET /results/configuration 200 in 181ms
+ GET /results 200 in 162ms
+ GET /results/student/cms9tsg1200rltitktc8bj0gk?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 220ms
+ GET /login 200 in 149ms
+ GET /dashboard 200 in 187ms
+ ✓ Compiled middleware in 8ms
+ ✓ Compiled in 1871ms
+ GET /dashboard 200 in 2649ms
+ GET /dashboard 200 in 493ms
+ ✓ Compiled in 552ms
+ GET /dashboard 200 in 1861ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 578ms
+ ○ Compiling /teachers ...
+ ✓ Compiled /teachers in 7.9s
+ GET /teachers 200 in 9062ms
+ GET /teachers 200 in 591ms
+ ○ Compiling /class-schedule ...
+ GET /dashboard 200 in 681ms
+ ✓ Compiled /class-schedule in 2.6s
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 594ms
+ GET /teachers 200 in 273ms
+ GET /login 200 in 227ms
+ ○ Compiling /teacher/dashboard ...
+ ✓ Compiled /teacher/dashboard in 3.7s
+ GET /teacher/dashboard 200 in 4139ms
+ GET /teacher/dashboard 200 in 463ms
+ ○ Compiling /teacher/marks-entry ...
+ ✓ Compiled /teacher/marks-entry in 1112ms
+ GET /teacher/marks-entry 200 in 1413ms
+ ○ Compiling /teacher/results ...
+ ✓ Compiled /teacher/results in 732ms
+ GET /teacher/results 200 in 903ms
+ GET /teacher/results 200 in 716ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1358ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1365ms
+ GET /teacher/marks-entry 200 in 855ms
+ GET /teacher/results 200 in 236ms
+ ✓ Compiled in 495ms
+ GET /teacher/results 200 in 909ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 814ms
+ ✓ Compiled in 376ms
+ GET /teacher/results 200 in 883ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 968ms
+ ✓ Compiled in 285ms
+ GET /teacher/results 200 in 626ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 492ms
+ GET /teacher/results 200 in 1692ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1198ms
+ GET /teacher/dashboard 200 in 497ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 459ms
+ ○ Compiling /teacher/attendance ...
+ ✓ Compiled /teacher/attendance in 3.2s
+ GET /teacher/attendance 200 in 3592ms
+ GET /teacher/attendance 200 in 331ms
+ GET /teacher/marks-entry 200 in 197ms
+ GET /teacher/results 200 in 418ms
+ GET /teacher/marks-entry 200 in 563ms
+ GET /teacher/attendance 200 in 304ms
+ GET /teacher/dashboard 200 in 1500ms
+ GET /teacher/dashboard 200 in 468ms
+ ✓ Compiled middleware in 131ms
+ GET /teacher/dashboard 200 in 1431ms
+ GET /teacher/dashboard 200 in 677ms
+ GET /teacher/attendance 200 in 839ms
+ GET /teacher/dashboard 200 in 210ms
+ ✓ Compiled in 1540ms
+ GET /teacher/attendance 200 in 279ms
+ GET /teacher/marks-entry 200 in 291ms
+ GET /teacher/dashboard 200 in 1812ms
+ GET /teacher/dashboard 200 in 956ms
+ ✓ Compiled in 484ms
+ GET /teacher/dashboard 200 in 2831ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 1031ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 1435ms
+ GET /teacher/marks-entry 200 in 2485ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 1834ms
+ GET /teacher/dashboard 200 in 2188ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 857ms
+ ✓ Compiled in 2.2s
+ GET /teacher/dashboard 200 in 658ms
+ GET /teacher/dashboard 200 in 325ms
+ GET /teacher/dashboard 200 in 348ms
+ GET /teacher/dashboard 200 in 367ms
+ GET /teacher/dashboard 200 in 620ms
+ GET /teacher/dashboard 200 in 4253ms
+ GET /login 200 in 3482ms
+ GET / 200 in 3455ms
+ GET / 200 in 2364ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 1724ms
+ GET / 200 in 3142ms
+ GET / 200 in 901ms
+ GET / 200 in 418ms
+ GET / 200 in 425ms
+ GET /login 200 in 387ms
+ ✓ Compiled /dashboard in 88ms
+ GET /dashboard 200 in 603ms
+ ✓ Compiled /results in 136ms
+ GET /results 200 in 390ms
+ ✓ Compiled /results/analytics in 68ms
+ GET /results/analytics 200 in 245ms
+ ✓ Compiled /results/validation in 53ms
+ GET /results/validation 200 in 206ms
+ GET /results/analytics 200 in 1039ms
+ ✓ Compiled /results/configuration in 207ms
+ GET /results/configuration 200 in 966ms
+ GET /results/configuration 200 in 276ms
+ ○ Compiling /results/report-cards ...
+ ✓ Compiled /results/report-cards in 3s
+ GET /results/report-cards 200 in 3437ms
+ GET /results/report-cards 200 in 405ms
+ GET /results 200 in 164ms
+ GET /results/report-cards 200 in 153ms
+ GET /results 200 in 160ms
+ GET /results/report-cards 200 in 161ms
+ GET /results 200 in 154ms
+ ✓ Compiled /results/class in 149ms
+ GET /results/class?examId=cmsus9gir0001mn3dnhn9o8vv&class=Grade+9 200 in 292ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+1 200 in 158ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+2 200 in 182ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+5 200 in 600ms
+ ✓ Compiled /results/student/[id] in 89ms
+ GET /results/student/cms9tsghp00rqtitkak0eoqdx?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 303ms
+ GET /results/analytics 200 in 387ms
+ GET /results/student/cms9tsghp00rqtitkak0eoqdx?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 208ms
+ GET /results 200 in 123ms
+ GET /dashboard 200 in 164ms
+ GET /results 200 in 111ms
+ ✓ Compiled /exams/exam-schedule in 289ms
+ GET /exams/exam-schedule 200 in 774ms
+ ○ Compiling /exams/marks-entry ...
+ ✓ Compiled /exams/marks-entry in 1097ms
+ GET /exams/marks-entry 200 in 1204ms
+ GET /dashboard 200 in 802ms
+ GET /exams/exam-schedule 200 in 105ms
+ GET /exams/marks-entry 200 in 98ms
+ GET /results 200 in 94ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 101ms
+ GET /results/student/cms9tr1yd00cltitkeriyd7qj?examId=cmteoghwv002bti6oq7g2e53u 200 in 1854ms
+ GET /results/student/cms9tr0zk00cbtitktm8ekoxs?examId=cmteoghwv002bti6oq7g2e53u 200 in 104ms
+ GET /results/report-cards 200 in 96ms
+ GET /results/validation 200 in 93ms
+ GET /results/analytics 200 in 96ms
+ GET /results 200 in 92ms
+ GET /results 200 in 1878ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 636ms
+ GET /login 200 in 539ms
+ GET /results/student/cms9tr1yd00cltitkeriyd7qj?examId=cmteoghwv002bti6oq7g2e53u 200 in 130ms
+ GET /student/dashboard 200 in 205ms
+ GET /student/exam-schedule 200 in 163ms
+ GET /student/results 200 in 125ms
+ GET /student/exam-schedule 200 in 92ms
+ ○ Compiling /student/assignments ...
+ ✓ Compiled /student/assignments in 970ms
+ GET /student/assignments 200 in 1075ms
+ ✓ Compiled /student/attendance in 412ms
+ GET /student/attendance 200 in 513ms
+ ✓ Compiled /student/profile in 431ms
+ GET /student/profile 200 in 530ms
+ GET /student/dashboard 200 in 89ms
+ GET /student/results 200 in 90ms
+ GET /student/dashboard 200 in 94ms
+ GET /student/results 200 in 88ms
+ GET /results/student/cms9tr1yd00cltitkeriyd7qj?examId=cmteoghwv002bti6oq7g2e53u 200 in 137ms
+ ✓ Compiled /student/fees in 385ms
+ GET /student/fees 200 in 479ms
+ ✓ Compiled /student/notices in 381ms
+ GET /student/notices 200 in 472ms
+ ✓ Compiled /student/messages in 370ms
+ GET /student/messages 200 in 462ms
+ GET /student/profile 200 in 116ms
+ GET /student/dashboard 200 in 102ms
+ GET /student/profile 200 in 96ms
+ GET /student/dashboard 200 in 97ms
+ ○ Compiling /finance ...
+ ✓ Compiled /finance in 1414ms
+ GET /finance 200 in 1518ms
+ ○ Compiling /finance/fees ...
+ ✓ Compiled /finance/fees in 621ms
+ GET /finance/fees 200 in 721ms
+ GET /finance/fees 200 in 316ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 409ms
+ GET /student/profile 200 in 108ms
+ GET /student/dashboard 200 in 106ms
+ GET /student/exam-schedule 200 in 91ms
+ ○ Compiling /finance/fees/assignments ...
+ ✓ Compiled /finance/fees/assignments in 514ms
+ GET /finance/fees/assignments 200 in 615ms
+ ✓ Compiled /fees/admission-setup in 431ms
+ GET /fees/admission-setup 200 in 527ms
+ ✓ Compiled /finance/fees/reports in 481ms
+ GET /finance/fees/reports 200 in 577ms
+ ✓ Compiled /class-schedule in 39ms
+ GET /class-schedule 200 in 123ms
+ GET /results 200 in 100ms
+ GET /student/dashboard 200 in 120ms
+ GET /student/results 200 in 104ms
+ GET /student/dashboard 200 in 177ms
+ GET /results/student/cms9tr1yd00cltitkeriyd7qj?examId=cmteoghwv002bti6oq7g2e53u 200 in 217ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 188ms
+ GET /results 200 in 240ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 681ms
+ GET /results 200 in 417ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 875ms
+ GET /student/dashboard 200 in 1200ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 626ms
+ GET /student/results 200 in 173ms
+ GET /student/dashboard 200 in 125ms
+ GET /finance/fees 200 in 137ms
+ GET /student/attendance 200 in 189ms
+ GET /student/profile 200 in 125ms
+ GET /student/dashboard 200 in 104ms
+ GET /student/dashboard 200 in 2311ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 597ms
+ GET /student/fees 200 in 216ms
+ GET /student/dashboard 200 in 141ms
+ ✓ Compiled /teachers in 274ms
+ GET /teachers 200 in 495ms
+ GET /dashboard 200 in 242ms
+ GET /dashboard 200 in 162ms
+ GET /dashboard 200 in 144ms
+ GET /dashboard 200 in 126ms
+ GET /dashboard 200 in 147ms
+ GET /dashboard 200 in 175ms
+ GET /teachers 200 in 219ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 561ms
+ GET /dashboard 200 in 147ms
+ GET /dashboard 200 in 149ms
+ GET /dashboard 200 in 802ms
+ GET /dashboard 200 in 183ms
+ GET /dashboard 200 in 501ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 537ms
+ GET /login 200 in 174ms
+ GET /login 200 in 482ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 412ms
+ GET /dashboard 200 in 427ms
+ GET /dashboard 200 in 286ms
+ GET /exams/exam-schedule 200 in 175ms
+ GET /dashboard 200 in 222ms
+ GET /student/dashboard 200 in 199ms
+ GET /student/dashboard 200 in 331ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 566ms
+ GET /student/attendance 200 in 271ms
+ GET /student/results 200 in 223ms
+ GET /student/dashboard 200 in 164ms
+ GET /results 200 in 195ms
+ ✓ Compiled in 4.6s
+ GET /results 200 in 731ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 888ms
+ GET /results/analytics 200 in 892ms
+ GET /results 200 in 2054ms
+ GET /results 200 in 297ms
+ GET /results 200 in 113ms
+ ○ Compiling /announcements ...
+ GET /results 200 in 212ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 634ms
+ GET /results/analytics 200 in 181ms
+ ✓ Compiled /announcements in 5.8s
+ GET /results/analytics 200 in 472ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 376ms
+ GET /results 200 in 114ms
+ GET /dashboard 200 in 211ms
+ GET /results 200 in 97ms
+ GET /results 200 in 862ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 2849ms
+ GET /dashboard 200 in 152ms
+ GET /login 200 in 767ms
+ GET /login 200 in 317ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 430ms
+ GET /login 200 in 323ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 501ms
+ GET /login 200 in 324ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 438ms
+ GET / 200 in 1111ms
+ GET /dashboard 200 in 247ms
+ GET /results 200 in 2354ms
+ GET /results/analytics 200 in 1036ms
+ GET / 200 in 1002ms
+ GET /results 200 in 918ms
+ GET /results/analytics 200 in 270ms
+ GET /results 200 in 119ms
+ GET /results/analytics 200 in 111ms
+ GET /results/student/cms9tr2vp00cvtitk154rxry5?examId=cmteoghwv002bti6oq7g2e53u 200 in 193ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 130ms
+ GET /results/student/cms9tr0zk00cbtitktm8ekoxs?examId=cmteoghwv002bti6oq7g2e53u 200 in 231ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 247ms
+ ✓ Compiled in 4.3s
+ ✓ Compiled in 704ms
+ ✓ Compiled in 287ms
+ GET /results/analytics 200 in 3557ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 2607ms
+ ✓ Compiled in 653ms
+ GET /results/analytics 200 in 817ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 420ms
+ ✓ Compiled in 190ms
+ ✓ Compiled in 192ms
+ GET /results/analytics 200 in 605ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 375ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 163ms
+ ✓ Compiled in 1107ms
+ GET /results/analytics 200 in 220ms
+ GET /results/analytics 200 in 133ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+2 200 in 326ms
+ ✓ Compiled in 457ms
+ ✓ Compiled in 292ms
+ ✓ Compiled in 267ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Kindergarten 200 in 443ms
+ GET /dashboard 200 in 334ms
+ GET /results 200 in 333ms
+ GET /results/analytics 200 in 188ms
+ GET /results/class?examId=cmteoghwv002bti6oq7g2e53u&class=Grade+2 200 in 157ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+5 200 in 125ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+5&section=A 200 in 176ms
+ GET /results/student/cms9trnp000j4titkwpp7mln7?examId=cms9tun5g01rptitkbztinabu 200 in 1116ms
+ ✓ Compiled in 498ms
+ ✓ Compiled in 566ms
+ ✓ Compiled in 1462ms
+ GET /results 200 in 285ms
+ GET /results/analytics 200 in 137ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+2 200 in 444ms
+ GET /dashboard 200 in 147ms
+ ✓ Compiled in 430ms
+ ✓ Compiled in 499ms
+ ✓ Compiled in 347ms
+ GET /results/analytics 200 in 675ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 202ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 159ms
+ GET /results/analytics?academicYear=2026-2027&examId=cms9tun5g01rptitkbztinabu 200 in 156ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 147ms
+ GET /results/analytics?academicYear=2026-2027&examId=cms9tun5g01rptitkbztinabu 200 in 238ms
+ GET /results/class?examId=cms9tun5g01rptitkbztinabu&class=Grade+5 200 in 712ms
+ GET /results/analytics?examId=cms9tun5g01rptitkbztinabu&academicYear=2026-2027 200 in 119ms
+ GET /results/analytics?academicYear=2026-2027&examId=cms9tun5g01rptitkbztinabu 200 in 155ms
+ GET /results/analytics?academicYear=2026-2027&examId=cms9tun5g01rptitkbztinabu 200 in 135ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 130ms
+ GET /results/analytics?academicYear=2026&examId=cmsus9gir0001mn3dnhn9o8vv 200 in 129ms
+ GET /results/class?examId=cmsus9gir0001mn3dnhn9o8vv&class=Grade+9 200 in 124ms
+ GET /results?examId=cmsus9gir0001mn3dnhn9o8vv 200 in 95ms
+ GET /results/analytics 200 in 118ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 130ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 203ms
+ GET /results/validation 200 in 138ms
+ GET /results/configuration 200 in 122ms
+ GET /results/report-cards 200 in 109ms
+ GET /results 200 in 95ms
+ ✓ Compiled in 1191ms
+ ✓ Compiled in 16ms
+ GET /results 200 in 5592ms
+ GET /student/dashboard 200 in 5286ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 621ms
+ GET /favicon.ico?favicon.4f68ae19.ico 200 in 344ms
+ ✓ Compiled in 287ms
+ ✓ Compiled in 845ms
+ ✓ Compiled in 53ms
+ ✓ Compiled in 209ms
+ GET /exams/marks-entry 200 in 793ms
+ GET /exams/exam-schedule 200 in 162ms
+ GET /exams/marks-entry 200 in 118ms
+ GET /exams/marks-entry 200 in 506ms
+ GET /exams/exam-schedule 200 in 144ms
+ GET /results 200 in 313ms
+ GET /results/analytics 200 in 193ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 254ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 180ms
+ GET /results/validation 200 in 119ms
+ GET /results 200 in 143ms
+ GET /results/analytics 200 in 116ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 145ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 133ms
+ GET /results/validation 200 in 94ms
+ GET /results 200 in 95ms
+ GET /results/analytics 200 in 92ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 176ms
+ GET /results/analytics?academicYear=2026&examId=cmteoghwv002bti6oq7g2e53u 200 in 137ms
+ GET /results/validation 200 in 139ms
+ GET /results 200 in 109ms
+ GET /dashboard 200 in 159ms
+ GET /dashboard 200 in 145ms
+ ✓ Compiled in 3.6s
+ GET /dashboard 200 in 2226ms
+ GET /dashboard 200 in 838ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 838ms
+ GET /dashboard 200 in 452ms
+ GET /favicon.ico?favicon.4f68ae19.ico 500 in 758ms

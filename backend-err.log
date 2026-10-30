@@ -1,0 +1,124 @@
+SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at parse (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\body-parser\lib\types\json.js:92:19)
+    at C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\body-parser\lib\read.js:128:18
+    at AsyncResource.runInAsyncScope (node:async_hooks:227:14)
+    at invokeCallback (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\raw-body\index.js:238:16)
+    at done (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\raw-body\index.js:227:7)
+    at IncomingMessage.onEnd (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\raw-body\index.js:287:7)
+    at IncomingMessage.emit (node:events:509:28)
+    at endReadableNT (node:internal/streams/readable:1729:12)
+    at processTicksAndRejections (node:internal/process/task_queues:90:21)
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:5061
+            const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
+                  ^
+
+SyntaxError: Identifier 'totalAmount' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1804:18)
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1845:20)
+    at Module._compile (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\source-map-support\source-map-support.js:568:25)
+    at Module.m._compile (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:69:33)
+    at node:internal/modules/cjs/loader:2002:10
+    at require.extensions..jsx.require.extensions..js (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:114:20)
+    at require.extensions.<computed> (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:71:20)
+    at Object.nodeDevHook [as .ts] (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\ts-node-dev\lib\hook.js:63:13)
+    at Module.load (node:internal/modules/cjs/loader:1594:32)
+    at Module._load (node:internal/modules/cjs/loader:1396:12)
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:5061
+            const totalAmount = pkg.feeItems.reduce((sum, item) => sum.plus(item.amount), money(0));
+                  ^
+
+SyntaxError: Identifier 'totalAmount' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1804:18)
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1845:20)
+    at Module._compile (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\source-map-support\source-map-support.js:568:25)
+    at Module.m._compile (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:69:33)
+    at node:internal/modules/cjs/loader:2002:10
+    at require.extensions..jsx.require.extensions..js (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:114:20)
+    at require.extensions.<computed> (C:\Users\Walton\AppData\Local\Temp\ts-node-dev-hook-719336825292029.js:71:20)
+    at Object.nodeDevHook [as .ts] (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\ts-node-dev\lib\hook.js:63:13)
+    at Module.load (node:internal/modules/cjs/loader:1594:32)
+    at Module._load (node:internal/modules/cjs/loader:1396:12)
+Error: listen EADDRINUSE: address already in use 0.0.0.0:4000
+    at Server.setupListenHandle [as _listen2] (node:net:2009:16)
+    at listenInCluster (node:net:2066:12)
+    at node:net:2275:7
+    at processTicksAndRejections (node:internal/process/task_queues:90:21)
+Error: listen EADDRINUSE: address already in use 0.0.0.0:4000
+    at Server.setupListenHandle [as _listen2] (node:net:2009:16)
+    at listenInCluster (node:net:2066:12)
+    at node:net:2275:7
+    at processTicksAndRejections (node:internal/process/task_queues:90:21)
+Error fetching institute profile: PrismaClientKnownRequestError: 
+Invalid `prisma.institute.findUnique()` invocation in
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:44
+
+  4064 if (!email) return res.status(400).json({ error: 'Email is required' });
+  4065 
+  4066 try {
+→ 4067   let institute = await prisma.institute.findUnique(
+Timed out fetching a new connection from the connection pool. More info: http://pris.ly/d/connection-pool (Current connection pool timeout: 10, connection limit: 9)
+    at ei.handleRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:228:13)
+    at ei.handleAndLogRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:174:12)
+    at ei.request (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:143:12)
+    at a (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\getPrismaClient.ts:833:24)
+    at C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:21 {
+  code: 'P2024',
+  meta: { modelName: 'Institute', connection_limit: 9, timeout: 10 },
+  clientVersion: '6.19.2'
+}
+Error fetching institute profile: PrismaClientKnownRequestError: 
+Invalid `prisma.institute.findUnique()` invocation in
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:44
+
+  4064 if (!email) return res.status(400).json({ error: 'Email is required' });
+  4065 
+  4066 try {
+→ 4067   let institute = await prisma.institute.findUnique(
+Timed out fetching a new connection from the connection pool. More info: http://pris.ly/d/connection-pool (Current connection pool timeout: 10, connection limit: 9)
+    at ei.handleRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:228:13)
+    at ei.handleAndLogRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:174:12)
+    at ei.request (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:143:12)
+    at a (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\getPrismaClient.ts:833:24)
+    at C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:21 {
+  code: 'P2024',
+  meta: { modelName: 'Institute', connection_limit: 9, timeout: 10 },
+  clientVersion: '6.19.2'
+}
+Error fetching institute profile: PrismaClientKnownRequestError: 
+Invalid `prisma.institute.findUnique()` invocation in
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:44
+
+  4064 if (!email) return res.status(400).json({ error: 'Email is required' });
+  4065 
+  4066 try {
+→ 4067   let institute = await prisma.institute.findUnique(
+Can't reach database server at `ep-noisy-darkness-azkghpgo-pooler.c-3.ap-southeast-1.aws.neon.tech:5432`
+
+Please make sure your database server is running at `ep-noisy-darkness-azkghpgo-pooler.c-3.ap-southeast-1.aws.neon.tech:5432`.
+    at ei.handleRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:228:13)
+    at ei.handleAndLogRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:174:12)
+    at ei.request (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:143:12)
+    at a (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\getPrismaClient.ts:833:24)
+    at C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4067:21 {
+  code: 'P1001',
+  meta: {
+    modelName: 'Institute',
+    database_location: 'ep-noisy-darkness-azkghpgo-pooler.c-3.ap-southeast-1.aws.neon.tech:5432'
+  },
+  clientVersion: '6.19.2'
+}
+PrismaClientKnownRequestError: 
+Invalid `prisma.schoolClass.findMany()` invocation in
+C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4382:44
+
+  4379 
+  4380 // Classes
+  4381 app.get('/classes', async (_req: Request, res: Response) => {
+→ 4382   const classes = await prisma.schoolClass.findMany(
+Timed out fetching a new connection from the connection pool. More info: http://pris.ly/d/connection-pool (Current connection pool timeout: 10, connection limit: 9)
+    at ei.handleRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:228:13)
+    at ei.handleAndLogRequestError (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:174:12)
+    at ei.request (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\RequestHandler.ts:143:12)
+    at a (C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\node_modules\@prisma\client\src\runtime\getPrismaClient.ts:833:24)
+    at C:\Users\Walton\Documents\SMS-Backend\School-Management-System-Backend\src\index.ts:4382:19

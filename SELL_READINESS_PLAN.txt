@@ -1,0 +1,1120 @@
+================================================================================
+SELL-READINESS PLAN
+School Management System ("SMS" / Academify / NexGrad)
+Repository: C:\Users\Walton\Documents\SMS-Backend
+Date: 2026-10-16
+================================================================================
+
+PURPOSE
+-------
+This document lists everything that must be done to move this codebase from
+"working software that one school uses" to "software that can legally and
+safely be sold to paying schools in Bangladesh".
+
+It is ordered by dependency. Do NOT start a later phase before the phase above
+it is complete and verified. Phases 1 and 2 gate all revenue. Phase 3 gates
+scale. Phase 6 gates credibility.
+
+HOW TO USE
+----------
+Each task is written as:
+  [ ] N.N  TITLE
+        FILE   : path relative to C:\Users\Walton\Documents\SMS-Backend
+        WHERE  : line numbers / symbol (line numbers are from the current
+                 9,413-line index.ts; re-verify before editing)
+        DO     : the change required
+        WHY    : the commercial reason it blocks selling
+        VERIFY : the command or manual check that proves it is done
+
+Effort estimates assume ONE developer working part-time (8-12 hours/week).
+Verify the current line numbers before editing; index.ts changes often.
+
+--------------------------------------------------------------------------------
+SECTION 0 - DECISIONS ALREADY MADE (do not relitigate these)
+--------------------------------------------------------------------------------
+
+SEGMENT     : Private schools, 200-800 students. First priority city Dhaka,
+              then Chattogram, then secondary cities.
+PRICING     : Annual licence, paid UP FRONT. No monthly billing, no auto-debit.
+CHANNEL     : Founder-led direct sales. On-site demo, data migration, training.
+CAPACITY    : Solo, part-time. Every task is scoped so support time stays low.
+BRANDING   : "SMS" means School Management System. There is NO telecom product,
+              NO bulk SMS, NO WhatsApp API product, NO BTRC A2A licence needed.
+              Remove all messaging/SMS branding and all messaging claims.
+WEDGE       : Fee collection and reconciliation. "Stop chasing fees. Know exactly
+              who has not paid, every day, without a single phone call to a
+              parent." This is the buying reason. Modules are not.
+
+--------------------------------------------------------------------------------
+SECTION 1 - VERDICT: CAN YOU SELL THIS TODAY?
+--------------------------------------------------------------------------------
+
+NO. Three hard blockers, all verified in the source code on 2026-10-16.
+
+BLOCKER 1 - Around 110 of 206 API routes have NO authentication.
+  Anyone on the internet can read every student record, every result, your
+  payroll and your finance ledger, and can write invoices, payments,
+  announcements and attendance. Confirmed unauthenticated examples:
+    index.ts:6832  GET  /finance/transactions
+    index.ts:6972  GET  /finance/reports/summary
+    index.ts:6539  GET  /invoices
+    index.ts:4768  GET  /salaries
+    index.ts:4773  POST /salaries/process
+    index.ts:4834  DEL  /salaries/:id
+    index.ts:2387  GET  /results
+    index.ts:2401  POST /results/bulk
+    index.ts:1124  GET  /students/logins   (and PUT/POST/DELETE siblings)
+    index.ts:5121  GET  /attendance
+    index.ts:5862  POST /attendance/save
+    index.ts:4690  GET  /fees
+    index.ts:6722  GET  /staff
+    index.ts:4985  GET  /announcements
+    index.ts:5869+ GET  /student/*         (entire student portal)
+    index.ts:202   GET  /test-db
+
+  Commercial impact: one security-conscious headmaster finds this in a demo
+  and the deal dies, then tells the market. This is existential.
+
+BLOCKER 2 - There is a hardcoded admin backdoor password.
+  index.ts:7599
+      password === 'fresh_password_2026'
+  grants admin access to any known email address. Also:
+    index.ts:7639-7646 teacher with no login record can sign in with
+                     'password', 'test', '123456', their employeeId, or the
+                     local part of their email.
+    index.ts:7668   student passwords compared in PLAINTEXT.
+    index.ts:7689   a student with no login row accepts ANY password.
+
+BLOCKER 3 - There is no multi-tenancy at all.
+  There is no schoolId column anywhere in prisma/schema.prisma. The Institute
+  model (schema.prisma:843) is a single global profile row. School #2 would
+  see school #1's students. You cannot onboard a second paying customer until
+  this is built. Multi-tenancy is not a feature; it IS the product.
+
+Plus: the landing page currently makes claims that are false (see Section 6).
+Promising a 14-day free trial and a pricing page that do not exist is a
+fraudulent-advertising and consumer-trust risk in a small, word-of-mouth
+market.
+
+--------------------------------------------------------------------------------
+SECTION 2 - PHASE 0: SECURITY AND TRUTH (Week 1-2, approx 15 hours)
+--------------------------------------------------------------------------------
+Goal: close ~110 open endpoints and remove every false public claim.
+Nothing else in this plan is safe to start until this is done.
+
+[ ] 2.1  Add a single global authentication gate
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: after line 133 (after the body parsers) and BEFORE line 145,
+             which is the first real route. Note that /health (line 79) and /
+             (line 83) are registered deliberately before helmet/cors/parsers
+             so probes get a fast 200 - DO NOT move the gate above them.
+      DO   : Add ONE app.use() that requires a valid JWT for every request,
+             with a small explicit allowlist of public routes. Suggested
+             allowlist: /health, /, /auth/login, plus /favicon.ico.
+             Keep the existing per-route authMiddleware and checkRole() calls
+             in place - this gate is additive, not a replacement.
+      WHY  : This single change closes the majority of BLOCKER 1 in one edit.
+             Per-route patching of 110 endpoints is what causes mistakes.
+      VERIFY: Start the API, then with no Authorization header:
+               curl http://localhost:4000/finance/transactions  -> 401
+               curl http://localhost:4000/invoices            -> 401
+               curl http://localhost:4000/student/dashboard   -> 401
+               curl http://localhost:4000/health               -> 200
+
+[ ] 2.2  Remove the admin backdoor
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 7598-7603
+      DO   : Delete the `password === 'fresh_password_2026'` short-circuit so
+             only `await bcrypt.compare(password, user.password)` remains.
+      VERIFY: POST /auth/login with any valid admin email and the literal
+               password fresh_password_2026 must return 401.
+
+[ ] 2.3  Close the teacher legacy-password fallbacks
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 7639-7649 (the `else if` branch taken when teacher.login is null)
+      DO   : Delete the entire legacy branch. If a teacher has no
+             TeacherLogin row, they cannot sign in. Admin provisions the login
+             on the "Teacher Logins" screen. This forces correct onboarding
+             and is also a selling point ("passwords are hashed, not guessable").
+      VERIFY: A teacher with no login row cannot authenticate with any password.
+
+[ ] 2.4  Hash all remaining plaintext passwords
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 7632 (teacher), 7668 (student), 7689 (student fallback)
+      DO   : Switch to bcrypt.compare against a hashed column.
+      NOTE : StudentLogin.password and TeacherLogin.password are currently
+             plain String (schema.prisma:142, 156). Add a migration and a
+             one-off backfill script that hashes any existing value. Until
+             hashing is deployed, use bcrypt.compare with a guard that detects
+             an unhashed legacy value and re-hashes it on next successful
+             login (lazy migration) - this avoids locking out existing users.
+      FILE : School-Management-System-Backend\scripts\ (new file)
+      DO   : Add backfill-hash-passwords.ts following the pattern of the
+             existing scripts\backfill-admission-status.ts.
+      VERIFY: No code path anywhere compares a password with === or ==.
+               grep -rn "password ===" School-Management-System-Backend\src
+
+[ ] 2.5  Delete the student any-password fallback
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 7678-7700 (the else branch when no StudentLogin row exists)
+      DO   : Delete it. Without a login row there is no sign-in.
+
+[ ] 2.6  Fail hard when JWT_SECRET is missing
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 117-120 and 7704-7709
+      FILE : School-Management-System-Backend\src\auth.ts
+      WHERE: 20-26
+      FILE : School-Management-System-Backend\src\middleware\auth.ts
+      WHERE: 23-25
+      DO   : Delete all three fallback secrets. If JWT_SECRET is unset, log a
+             fatal error and process.exit(1). Never sign or verify a token with
+             a value that is published in your own source code on GitHub.
+      VERIFY: Unset JWT_SECRET and start the server - it must refuse to boot.
+
+[ ] 2.7  Consolidate the duplicated auth middleware
+      FILE : School-Management-System-Backend\src\auth.ts
+      FILE : School-Management-System-Backend\src\middleware\auth.ts
+      DO   : index.ts:11 imports authMiddleware from './auth', but a second
+             near-identical middleware exists in ./middleware/auth. Pick one,
+             delete the other, update the import. Two copies of security
+             middleware guarantee they will drift apart.
+      VERIFY: Only one definition of authMiddleware exists in the repo.
+
+[ ] 2.8  Fix CORS - the allowlist is built but never used
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 92-115
+      DO   : line 104 builds `allowedOrigins` (DEFAULT_CORS_ORIGINS plus
+             CORS_ORIGINS from the environment) and line 107 defines
+             isVercelPreviewOrigin - but neither is referenced. line 111 sets
+             `origin: true`, which allows every origin. Change origin to a
+             function that returns the origin only if it is in allowedOrigins
+             or matches isVercelPreviewOrigin, otherwise false.
+      ALSO : DEFAULT_CORS_ORIGINS lists http://localhost:3000 but the frontend
+             dev server runs on port 9002 (School-Management-system\package.json
+             "dev": "next dev --turbopack -p 9002"). Correct the port or local
+             development will break once 2.1 lands.
+      WHY  : Bearer tokens in localStorage + permissive CORS is how tokens get
+             stolen. Also add `origin: false` logging so attempts are visible.
+      VERIFY: curl with Origin: https://evil.example - must be rejected.
+
+[ ] 2.9  Remove or heavily gate the data-wipe endpoint
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 715  DELETE /admin/reset-data
+      DO   : This is a full data wipe. Your own docs
+             (DATA_RESTORATION_STATUS.md, FEE_SYSTEM_RECOVERY_GUIDE.md)
+             record that a migrate reset previously destroyed invoice and
+             payment history. Delete the route entirely. If it must exist for
+             development, gate it behind NODE_ENV === 'development' AND an
+             explicit CONFIRM_RESET_TOKEN environment variable.
+
+[ ] 2.10 Gate or remove /test-db
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 202  GET /test-db
+      DO   : Remove, or restrict to development only. It reveals database
+             connectivity details to anonymous callers.
+
+[ ] 2.11 Stop the client asserting its own role
+      FILE : School-Management-System-Backend\src\index.ts
+      WHERE: 7576-7578 and 7705-7709
+      DO   : Two problems. (a) `role` is taken from the request body, so the
+             client decides which table to be searched. (b) The JWT payload is
+             { userId, email, role } - derive the role server-side from the row
+             that was actually authenticated and ignore the body's role for
+             anything other than a UI hint. Also shorten expiry from 7d to a
+             shorter period once refresh/rotation exists.
+      WHY  : Role-from-request-body plus 110 open routes means a student can
+             simply POST role=admin and be searched in the users table.
+      NOTE : When multi-tenancy lands, the JWT must also carry schoolId.
+             Plan the payload now: { userId, email, role, schoolId }.
+
+[ ] 2.12 Stop storing the admin password in the browser
+      FILE : School-Management-system\src\app\(auth)\login\page.tsx
+      WHERE: 171 (reads rememberedCredentials), 313 (writes it)
+      DO   : localStorage.setItem('rememberedCredentials', ...) saves the
+             PLAINTEXT PASSWORD. Your target customer is a school office where
+             one shared Windows PC may be used by several staff and is often
+             reachable by students. Remove password persistence entirely -
+             remember only the email and the last selected role.
+      WHY  : This is the single most embarrassing security finding in a live
+             on-site demo. Fix it before the first demo.
+      ALSO : School-Management-system\src\lib\api.ts:44 stores the JWT in
+             localStorage. Acceptable for v1, but add a "log out everywhere"
+             / token-revocation story before Phase 4, and never store the
+             password.
+
+[ ] 2.13 Add rate limiting on authentication
+      FILE : School-Management-System-Backend (package.json + src)
+      DO   : Install express-rate-limit. Apply a strict limiter to /auth/login
+             (e.g. 10 attempts per 15 minutes per IP) and a looser global
+             limiter. The backend currently has no rate limiting of any kind.
+      VERIFY: The 11th failed login from one IP within 15 minutes returns 429.
+
+[ ] 2.14 Add a lint and typecheck script to the backend
+      FILE : School-Management-System-Backend\package.json
+      DO   : The backend has NO lint and NO typecheck script. TypeScript is
+             only compiled as part of "build" ("prisma generate && tsc").
+             Add:
+               "lint"      : "eslint src --ext .ts"
+               "typecheck" : "tsc --noEmit"
+             then install eslint and run it. You cannot safely make 110
+             security edits to 9,413 lines without a typechecker in the loop.
+      FILE : School-Management-system\package.json
+      NOTE : The frontend already has "lint" and "typecheck". Use them.
+
+[ ] 2.15 Delete the stale duplicate Prisma schema
+      FILE : School-Management-system\prisma\schema.prisma
+      DO   : DELETE IT. This is an out-of-date frontend copy that uses Float
+             for money instead of Decimal and is missing Notification,
+             TeacherLogin, TeacherPermission, ClassSubjectTeacher,
+             GradingSystem, FeeParticular and Institute. The canonical schema
+             is School-Management-System-Backend\prisma\schema.prisma. Keeping
+             a second divergent schema will cost hours of confusion during the
+             Phase 1 migration. Ensure nothing in the frontend imports it.
+
+[ ] 2.16 PHASE 0 VERIFICATION GATE
+      Run all of the following and record the output in a file called
+      PHASE0-EVIDENCE.txt at the repo root. Do not proceed to Phase 1 until
+      every line passes:
+        [ ] No route returns 200 without a token (exception: /health and /)
+        [ ] grep -rn "fresh_password_2026" src            -> 0 matches
+        [ ] grep -rn "password ===" src                   -> 0 matches
+        [ ] grep -rn "fallback-jwt-secret" src            -> 0 matches
+        [ ] grep -rn "fallback-secret" src                -> 0 matches
+        [ ] npm run typecheck   (backend)                 -> clean
+        [ ] npm run lint        (backend)                 -> clean
+        [ ] npm run typecheck   (frontend)                -> clean
+        [ ] npm run build       (backend)                 -> succeeds
+
+--------------------------------------------------------------------------------
+SECTION 3 - PHASE 1: MULTI-TENANCY (Week 3-8, approx 60 hours)
+--------------------------------------------------------------------------------
+This is the highest-risk phase in the entire plan. It modifies the schema of a
+database that holds real money records, in a repository that has already
+destroyed invoice and payment data once.
+
+[ ] 3.1  BACK UP AND PROVE THE BACKUP BEFORE ANY SCHEMA CHANGE
+      DO   : The database is on Neon. Create a Neon branch (this is instant
+             and point-in-time), then take a logical dump and PROVE you can
+             restore it into a scratch database:
+               pg_dump "$DATABASE_URL" -Fc -f pre-multitenant.dump
+               createdb scratch_restore
+               pg_restore -d scratch_restore pre-multitenant.dump
+             Then run row counts on students, fees, invoices, payments,
+             ledger entries in both and confirm they match.
+      RULE : NEVER run `prisma migrate reset` against the live database again.
+             Never run `prisma migrate dev` in production. Use
+             `npm run prisma:deploy` (migrate deploy) against production.
+      VERIFY: Restored database passes scripts\verify-fee-collection.ts with
+              identical totals.
+
+[ ] 3.2  Make every migration additive
+      DO   : For the whole of Phase 1, only ADD columns, tables and indexes.
+             Never rename or drop in the same release that you add. A
+             non-additive change on 9,413 lines of untested SQL logic against
+             live money data is how you lose a customer.
+      NOTE : There are no automated tests in this repository (no test files
+             found). scripts\verify-fee-engine.ts, scripts\verify-fee-collection.ts
+             and scripts\smoke-fee-endpoints.ts are your regression net - run
+             them against every migration before it is applied to production.
+
+[ ] 3.3  Create the School model
+      FILE : School-Management-System-Backend\prisma\schema.prisma (new)
+      FIELDS:
+        id            String  @id @default(cuid())
+        name          String
+        slug          String  @unique          -- subdomain, e.g. "dhanmondi"
+        logo          String?
+        contactEmail  String
+        contactPhone  String?
+        address       String?
+        plan          String  @default("starter")
+        licenceEndsAt DateTime?
+        isActive      Boolean @default(true)
+        createdAt     DateTime @default(now())
+        updatedAt     DateTime @updatedAt
+      RELATIONS:
+        institute    Institute?
+        users        User[]
+        students     Student[]
+        teachers     Teacher[]
+        staff        Staff[]
+        planLimits   ...   (see Section 4)
+      NOTE : Store no PII about the school owner beyond contact details. This
+             is children's data - see Section 9.7.
+
+[ ] 3.4  Add schoolId to every tenant-scoped table (additive migration)
+      DO   : Add `schoolId String` to each model that holds customer data, with
+             `@@index([schoolId])`. Backfill with the existing school's id, then
+             add the FK constraint. Expected list (verify against the actual
+             schema - there are 49 models):
+        User, Student, StudentLogin, Teacher, TeacherLogin, TeacherPermission,
+        ClassSubjectTeacher, Staff, SchoolClass, Subject, Attendance,
+        TeacherAttendance, ExamType, Exam, ExamSchedule, ExamAttendance, Result,
+        GradingSystem, GradingBand, GradingSchedule, ExamPreset, FeeParticular,
+        FeeCategory, FeeAssignment, FeeRecord, StudentFeeOverride, Invoice,
+        InvoiceItem, Payment, LedgerEntry, Expense, Salary, AdmissionPackage,
+        AdmissionPackageItem, StoreProduct, StoreSupplier, StorePurchase,
+        StoreSale, Announcement, Notification, ClassRoom, TimeSlot,
+        ClassRoutine, ClassPeriod, IdCard, Promotion, PromotionRecord
+      RULE : Use onDelete: Restrict on money tables (FeeRecord, Payment,
+             Invoice, LedgerEntry) so a school can never be deleted and take
+             the school's financial history with it. Soft-delete schools
+             (isActive = false) instead of deleting.
+      VERIFY: SELECT schoolId, count(*) FROM "Student" GROUP BY schoolId;
+              must show exactly one school after backfill.
+
+[ ] 3.5  Convert the five GLOBAL unique constraints (the real blocker)
+      WHY  : These are why school #2 is physically impossible today. Two
+             schools cannot both have a teacher whose username is "admin", a
+             subject named "Midterm", or a fee category coded "TUITION".
+      FILE : School-Management-System-Backend\prisma\schema.prisma
+      CHANGE (drop the global unique, add a compound one):
+        line  68  Student.admissionNo      @unique
+                  -> remove @unique, add @@unique([schoolId, admissionNo])
+        line 141  StudentLogin.username    @unique
+                  -> remove @unique, add @@unique([schoolId, username])
+        line 155  TeacherLogin.username    @unique
+                  -> remove @unique, add @@unique([schoolId, username])
+        line 608  ExamType.name            @unique
+                  -> remove @unique, add @@unique([schoolId, name])
+        line 919  FeeCategory.code         @unique
+                  -> remove @unique, add @@unique([schoolId, code])
+      ALSO RE-CHECK: Subject, SchoolClass, ExamPreset, TimeSlot, ClassRoom,
+             Room, GradingBand and any other model with a @unique on a
+             human-readable name. Run: grep -n "@unique" prisma/schema.prisma
+             and audit EVERY hit, not just these five.
+      MIGRATION ORDER: (1) add schoolId columns, (2) backfill, (3) drop the
+             unique indexes, (4) add compound unique indexes. Never drop a
+             unique index before the compound one exists.
+      VERIFY: With two test schools, insert Student admissionNo "1" in both ->
+              succeeds. Insert the SAME admissionNo twice in ONE school ->
+              fails.
+
+[ ] 3.6  Replace the singleton Institute row with a per-school profile
+      FILE : School-Management-System-Backend\prisma\schema.prisma:843-856
+      DO   : Add schoolId (unique) to Institute so each school has its own
+             name, logo, address. Also fix the currency default:
+             line 853 `currency String @default("USD")` -> default("BDT").
+             A Bangladeshi school showing USD is an instant credibility loss.
+      FILE : School-Management-System-Backend\src\index.ts:4556, 4580
+      DO   : GET/POST /institute currently takes ?email= to pick a row. Replace
+             with tenant-scoped resolution from the JWT. Remove the email
+             parameter - it is a cross-tenant lookup vector.
+      FILE : School-Management-system\src\lib\api.ts:205
+      DO   : Same: drop the `?email=` query from the institute call.
+
+[ ] 3.7  Add the tenant context middleware
+      FILE : School-Management-System-Backend\src\middleware\ (new)
+             tenant.ts
+      DO   : Verify the JWT, read schoolId from the payload, load the School,
+             reject if isActive is false or licenceEndsAt has passed (see
+             Section 4.4 for the soft-expiry behaviour), then attach
+             req.tenant = { schoolId, role, school }.
+      ORDER : This must run AFTER the Phase 0 global auth gate (2.1) and
+             BEFORE any route handler.
+      NOTE : docs\multi-tenant-strategy.md contains an earlier draft of this
+             file. Use it as a starting sketch but note its `prisma.$use()`
+             approach is from Prisma v4 and is DEPRECATED in Prisma 6 - see
+             3.8 for the correct mechanism.
+
+[ ] 3.8  Enforce isolation in ONE place (do not hand-edit 206 routes)
+      FILE : School-Management-System-Backend\src\prisma-tenant.ts (new)
+      DO   : Prisma 6 removed `$use`. Create ONE tenant-scoped client factory
+             that, given a schoolId, returns a Prisma client whose every model
+             call has schoolId injected:
+               export const tenantClient = (schoolId: string) =>
+                 prisma.$extends(tenantExtension(schoolId))
+             Use it everywhere instead of the raw `prisma`. Where a model has
+             no schoolId yet, exclude it explicitly so the compiler finds it.
+      RULE : This is the single most important design decision in Phase 1. If
+             you add `where: { schoolId }` by hand to 206 routes you will miss
+             one and leak a school. One factory, no exceptions.
+      ALSO : Add findMany defaults and block raw queryRaw from reaching a
+             tenant-scoped client, because queryRaw bypasses model filters.
+
+[ ] 3.9  Rework the login flow for tenancy
+      FILE : School-Management-System-Backend\src\index.ts:7576-7722
+      DO   : Identify the school first. Cheapest for this market is a SCHOOL
+             CODE typed on the login screen (e.g. "DHR-4821") plus a subdomain
+             if you later use school-name.academify.com. Then resolve the user
+             WITHIN that school only - every findFirst must include
+             schoolId. Return schoolId, schoolName and the resolved plan in the
+             login response so the frontend can render branding.
+      FILE : School-Management-system\src\app\(auth)\login\page.tsx
+      DO   : Add the school-code field. REMOVE the role-selection tabs (line
+             ~531) and replace them with a single credential box: a customer
+             should not be shown a choice of Admin / Teacher / Student. That
+             looks like a toy, and it is why 2.11 exists. Keep the tabs only on
+             a clearly-labelled internal/dev login if you need them.
+      DO   : Populate the JWT with { userId, email, role, schoolId }.
+
+[ ] 3.10 Build a tenant-isolation test suite (this is the safety net)
+      FILE : School-Management-System-Backend\scripts\test-tenant-isolation.ts (new)
+      DO   : Seed two schools (A and B) with one student, teacher, fee record,
+             invoice and payment each, plus deliberately COLLIDING values
+             (both schools have student admissionNo "1", both have teacher
+             username "admin", both have ExamType "Midterm", both have
+             FeeCategory "TUITION") - then, authenticated as school A, call
+             every one of the 206 routes and assert that no row, count, total
+             or error message from school B is ever reachable.
+      ALSO : Explicitly test that school A cannot fetch school B's record by
+             guessing its cuid id in the URL. Cuid is not a secret.
+      WHY  : Your repo has no automated tests. This script becomes your release
+             gate. Run it before every deployment for the rest of this project.
+             Write it once, run it forever.
+      VERIFY: The script exits 0 and prints a per-endpoint pass count.
+
+[ ] 3.11 PHASE 1 VERIFICATION GATE
+        [ ] pg_restore into scratch succeeded and row counts matched (3.1)
+        [ ] scripts\verify-fee-engine.ts passes, totals unchanged
+        [ ] scripts\verify-fee-collection.ts passes, totals unchanged
+        [ ] scripts\smoke-fee-endpoints.ts passes
+        [ ] Two schools coexist with colliding admissionNos/usernames/names
+        [ ] scripts\test-tenant-isolation.ts passes for all 206 routes
+        [ ] A user logged into school A cannot read school B by direct ID
+        [ ] npm run typecheck and npm run lint clean (both apps)
+        [ ] Demo tenant exists with realistic Bangla/BDT sample data
+
+[ ] 3.12  Fix the data-correctness bugs before you have paying customers
+      FILE : current-bugs.txt (repo root) - 20 documented bugs
+      WHY  : These will produce wrong report cards and wrong money totals for
+             real paying schools. HighestMarks being calculated globally rather
+             than per subject+class is a correctness failure you will be blamed
+             for publicly. Fix these BEFORE the first real customer, because
+             after launch you own the bug.
+      PRIORITY 1 - fix before any paying school:
+        [ ] Highest-marks overwrite (bugs 7 and 15). index.ts ~1733-1739 and
+              ~1814-1817. Should be per (examId, subjectId, classId), and
+              currently updates ALL results with a global highest, overwriting
+              per-subject values. Wrap it in the same transaction as the bulk
+              result upsert (bug 16 - the updateMany currently runs outside).
+        [ ] Result status lifecycle mismatch (bug 10). index.ts ~2088 and ~2183
+              - the endpoint allows Draft -> Published but
+              ALLOWED_STATUS_TRANSITIONS forbids it. Pick one behaviour.
+        [ ] Grade calculation with zero MCQ marks (bug 6). index.ts ~1752-1771 -
+              a student with m.mcq === 0 passes. Make mandatory components
+              actually mandatory.
+        [ ] Percentage divide-by-zero (bug 14). index.ts ~1871. Guard
+              fullMarks > 0.
+        [ ] Attendance status normalisation (bugs 1 and 2). The database holds
+              'present', 'Present', 'PRESENT', 'Absent', 'Late', 'Leave'.
+              Create Prisma enums, backfill to one casing, add a CHECK
+              constraint, and store all dates in UTC consistently.
+      PRIORITY 2 - within the first 3 months of paying customers:
+        [ ] Weighted GPA using subject credit hours (bug 11)
+        [ ] Real duplicate-result detection (bug 13 - currently hardcodes
+              noDuplicateResults: true and never checks)
+        [ ] Exam type foreign key with an empty-string default (bug 9)
+        [ ] Sync exam attendance with regular attendance (bug 17)
+        [ ] Soft deletes (deletedAt) on Result, Exam, Attendance (bug 11 low)
+        [ ] Audit trail: modifiedBy / modifiedAt on results and attendance
+        [ ] Academic-year validation so "2024-25" vs "2024-2025" cannot break
+              a report (bug 18)
+
+[ ] 3.13  Split the monolith (LAST, not first)
+      FILE : School-Management-System-Backend\src\index.ts - 9,413 lines,
+             206 routes, one file
+      DO   : Do NOT refactor for its own sake during Phases 0-2; you need the
+             small diff reviewable. But after 3.8 and 3.12, extract by domain
+             into src/routes\{auth,students,teachers,attendance,exams,results,
+             fees,finance,store,announcements,class-routine,teacher,student}.ts
+             plus a src\app.ts that composes them, leaving index.ts as a thin
+             entrypoint. This is what makes a solo solo-part-time codebase
+             survivable for years.
+      NOTE : docs\blueprint.md and current-bugs.txt item 15 already call for
+             this. It is genuinely important, and it is genuinely not first.
+
+--------------------------------------------------------------------------------
+SECTION 4 - PHASE 2: LICENSING AND BILLING (Week 9-11, approx 25 hours)
+--------------------------------------------------------------------------------
+You charge annual, paid upfront. So you need to record a licence, show it, and
+let it lapse gracefully. You do NOT need a payment gateway to start.
+
+[ ] 4.1  Add the commercial models
+      FILE : School-Management-System-Backend\prisma\schema.prisma (new)
+      PLAN (reference data, not per-school):
+        name          String  @id        -- 'starter' | 'standard' | 'plus'
+        displayName   String
+        priceBdt      Int
+        maxStudents   Int                -- -1 = unlimited
+        maxTeachers   Int
+        maxStaff      Int
+        features      Json               -- string[]
+      SUBSCRIPTION:
+        id          String @id @default(cuid())
+        schoolId    String @unique
+        plan        String
+        startsAt    DateTime
+        endsAt      DateTime
+        amountBdt   Int
+        paymentRef  String?              -- bKash/bank transaction id
+        paidAt      DateTime?
+        status      String  @default('active')  -- active|pending|expired|cancelled
+        notes       String?
+
+[ ] 4.2  Enforce plan limits on write
+      DO   : On student admission and on /fees/generate, check the school's
+             plan maxStudents and maxTeachers. Warn at 80%, block at 100%, and
+             always allow the school to DEACTIVATE a student so they make room
+             (new admission blocked, promotion allowed).
+      WHY  : Upgrading a school is how you grow revenue. Limits make the upgrade
+             feel necessary instead of optional.
+
+[ ] 4.3  Add the licence/entitlement middleware
+      FILE : School-Management-System-Backend\src\middleware\ (new) licence.ts
+      DO   : Resolve { plan, endsAt, status } once per request and attach it to
+             req.entitlement so handlers can check features without re-querying.
+
+[ ] 4.4  Choose SOFT expiry, not hard lockout (important, read carefully)
+      DO   : In Bangladesh a school cannot suddenly lose access mid-term; it
+             causes real disruption and a furious customer plus bad publicity.
+             When endsAt passes:
+               - KEEP all read access fully working
+               - KEEP parent/teacher/student portals working
+               - BLOCK only: new admissions, /fees/generate, marks entry,
+                 and staff account creation
+               - Show a persistent banner with the renewal amount and a
+                 "Contact to renew" button
+      WHY  : You get paid without becoming the villain, and the school's
+             operation is never disrupted by your billing cycle.
+
+[ ] 4.5  Build the admin licence screen
+      FILE : School-Management-system\ (new page under the admin app, e.g.
+             src\app\(app)\settings\licence\page.tsx)
+      DO   : Show plan, seats used vs limit, start/end dates, amount, payment
+             reference, and a printable invoice/receipt. Add Bangla strings to
+             src\lib\translations.ts and register them in
+             src\context\LanguageContext.tsx.
+
+[ ] 4.6  Take payment the simple way first
+      DO   : Phase 1 of billing is MANUAL and that is correct for 200-800
+             student schools at 18,000-72,000 BDT per year. Issue an invoice,
+             receive bKash/nagad/bank transfer, record paymentRef, flip
+             status to active. Automate only after you have 10+ customers.
+      IF YOU WANT CARD/DBBL SUPPORT LATER:
+             Integrate an aggregator. bKash Tokenized Checkout v2 supports
+             Create Payment + Execute Payment with a callbackURL, and bKash
+             also offers an explicit "Educational Institutions" product
+             (fee collection, checkout, real-time reporting portal) which is
+             worth looking at as a partner for YOUR schools' fee collection as
+             well as for your own subscription. NOTE: bKash sells that same
+             product to schools directly, so it is both a partner option and a
+             competitor. Do not build this before Phase 5.
+
+[ ] 4.7  Never build auto-debit standing instructions for v1
+      WHY  : BD schools will not accept an auto-charge on their admin wallet,
+             and failed-debit dunning would consume exactly the part-time hours
+             this whole plan is trying to protect.
+
+[ ] 4.8  Renewal reminders
+      DO   : Email or WhatsApp the office 60 days, 30 days and 7 days before
+             endsAt. Annual BD school budgets are set at admission season, so
+             start renewal conversations in October-November.
+
+[ ] 4.9  PHASE 2 VERIFICATION GATE
+        [ ] A school can be moved between plans and the seat limit enforces
+        [ ] Expiry blocks writes but not reads, and shows the banner (4.4)
+        [ ] Invoice/receipt renders and prints in both English and Bangla
+        [ ] A full manual renewal (invoice -> payment -> activation) works
+
+--------------------------------------------------------------------------------
+SECTION 5 - PHASE 3: MIGRATION AND ONBOARDING AS A PRODUCT (Week 12-14)
+--------------------------------------------------------------------------------
+This is your highest-margin revenue line and your biggest support-time risk.
+Your repo root already contains real customer files - Nursery.xls,
+Play Group.xls, KG.xlsx, KGasdf.xls, 1.xls - which proves you already know
+schools' Excel layouts. Turn that skill into a product.
+
+[ ] 5.1  Productise the importer
+      FILE : School-Management-System-Backend (reuse/extend the existing
+             student import; reference file
+             School-Management-System-Backend\student_import_template.csv
+             and src\app\(app)\students)
+      DO   : Build a self-serve import wizard with: file upload -> column
+             mapping UI -> DRY RUN showing a preview of exactly what will and
+             will not import (with reasons for rejects) -> confirm -> import.
+      WHY  : Every hour of migration you automate is an hour you do not spend
+             on support as a solo part-time operator. This is the difference
+             between 30 schools and 60 schools.
+
+[ ] 5.2  Import these entity types, in this order of customer pain
+        [ ] Students (with admission numbers and class/section)   - highest
+        [ ] Fee structures and outstanding balances per student   - highest
+        [ ] Teachers and staff
+        [ ] Prior payments / opening balances so dues are correct on day 1
+        [ ] Previous exam results, if the school wants historic report cards
+      NOTE : Opening balances matter most. A school will not trust the system
+             until the "who owes what" screen matches what they already know.
+             Getting this wrong on day 1 loses the customer permanently.
+
+[ ] 5.3  Run one pilot at cost
+      DO   : Convert one friendly school. Charge a reduced licence (or nothing)
+             but DO charge the onboarding fee, discounted, so the behaviour of
+             a paying transaction is exercised from day one.
+      COLLECT: a written testimonial, permission to use their logo, and a
+             60-90 second Bangla screen recording of the fee dashboard.
+
+--------------------------------------------------------------------------------
+SECTION 6 - PHASE 4: MAKE THE PUBLIC CLAIMS TRUE (Week 12, approx 6 hours)
+--------------------------------------------------------------------------------
+Everything below currently promises something that does not exist. This is a
+consumer-trust and advertising-accuracy problem in a small word-of-mouth market.
+
+[ ] 6.1  Remove or implement the false claims
+      FILE : School-Management-system\src\components\home-page\CTA.tsx
+            line 22  "Join thousands of educational institutions"  -> false
+            line 28  "Start Free Trial" linking to /login        -> no trial exists
+            line 40-49 "No credit card required" / "14-day free trial" /
+                      "Cancel anytime"                            -> all false
+      FILE : School-Management-system\src\components\home-page\Footer.tsx
+            line 47  <a href="#">Pricing</a>                     -> dead link
+      FILE : School-Management-system\src\components\home-page\Hero.tsx
+            line 52  "NexGrad SMS is live"                      -> confusing/false
+      FILE : School-Management-system\src\components\home-page\Hero.tsx
+            line 86-89 "Watch Demo" button                      -> does nothing
+      DO   : Either implement a real trial (recommended, see 8.4) or delete the
+             claims. Do not ship a trial promise you cannot honour.
+
+[ ] 6.2  Rename the brand
+      DO   : "SMS" reads to a Bangladeshi buyer as Short Message Service, which
+             will make them ask "where is the SMS?" and you have no such
+             product. Pick ONE name and use it everywhere. Fix at minimum:
+        [ ] src\components\home-page\Hero.tsx:52        ("NexGrad SMS is live")
+        [ ] src\app\(auth)\login\page.tsx:334 and :487  (<span>SMS</span> logo)
+        [ ] src\app\globals.css:168 comment referencing sms-landing
+      VERIFY: grep -rn "SMS" src/  -> every remaining hit is either
+              "School Management System" spelled out, or gone.
+
+[ ] 6.3  Remove the fake SMS reminder button
+      FILE : School-Management-system\src\components\finance\fee-table-view.tsx
+      WHERE: 187-200
+      DO   : The "Send Reminder SMS" button only fires a toast saying it
+             "would be" sent. Nothing is sent. Delete the button, or relabel it
+             "Coming soon" and disable it.
+      ALSO : src\app\(app)\finance\fees\page.tsx:185 and the translation keys
+             at src\lib\translations.ts:235 and :641
+             ("SMS reminder sent to" / the Bangla equivalent) - these state a
+             message was SENT. Remove or change them.
+      WHY  : A demo where a button lies about sending a message to a parent is
+             the moment a headmaster stops believing the rest of the product.
+
+[ ] 6.4  Remove or implement the empty student-portal features
+      FILE : School-Management-System-Backend\src\index.ts:9326, 9347, 9356
+      DO   : /student/notices, /student/messages and /student/assignments all
+             `return []`. Either implement them or remove them from the student
+             portal navigation. Dead menu items in a live demo are worse than
+             absent features.
+      NOTE : Messaging is explicitly NOT a product decision in this plan
+             (see Section 0). Announcements/notices are still worth having -
+             they are in-app, require no licence, and cost you nothing.
+
+[ ] 6.5  Write a real pricing page
+      FILE : School-Management-system\src\components\home-page\ (new) Pricing.tsx
+      DO   : Show the three plans from Section 7 in BOTH Bangla and English,
+             state the annual-licence-upfront model explicitly, state what is
+             NOT included, and state the onboarding/migration fee separately.
+             State honestly whether the price is per student or per school.
+      WHY  : In Bangladesh, a visible price filters out time-wasters and raises
+             close rate. Hiding price until contact kills your solo-part-time
+             sales funnel.
+
+[ ] 6.6  Add proof
+      DO   : Landing page needs, before you spend money on ads: pilot
+             customer logo and quote, the Bangla demo video, a feature list
+             that matches reality, screenshots of the actual UI (the existing
+             DashboardPreview uses abstract mock bars - real screenshots of your
+             fee dashboard convert far better), and the security posture in
+             plain Bangla ("সব তথ্য আলাদা স্কুলে আলাদা, পাসওয়ার্ড এনক্রিপ্টেড").
+
+--------------------------------------------------------------------------------
+SECTION 7 - PHASE 5: COMMERCIAL PACKAGING AND PRICING
+--------------------------------------------------------------------------------
+Anchors researched on 2026-10-16. You are competing against free tiers,
+~USD 10/month subscriptions, per-student pricing, and an active "pay once,
+never pay monthly" self-hosted lifetime-licence competitor. Therefore: never
+compete on price, and always sell the annual licence.
+
+[ ] 7.1  LIST PRICES (annual, upfront, BDT)
+      STARTER    BDT 18,000 / year   up to 250 students
+                 Fees + invoices + outstanding-fee reconciliation dashboard,
+                 attendance, report cards, 3 office users, teacher portal,
+                 student portal, email support.
+      STANDARD   BDT 36,000 / year   250-600 students
+                 Everything in Starter, plus exam scheduling, gradebook,
+                 store/inventory, payroll, custom domain, priority support.
+      PLUS       BDT 72,000 / year   600+ students, or multi-branch
+                 Everything in Standard, plus multi-campus, API access,
+                 white-label, a named support contact.
+
+[ ] 7.2  ONE-TIME AND ADD-ON FEES (high margin, sell them every time)
+      Onboarding + Excel data migration   BDT 8,000 - 15,000
+      On-site training day                BDT 5,000
+      Additional campus                   BDT 18,000 / year
+      Custom report development           BDT 5,000 - 20,000 per report
+      Data recovery / re-migration        BDT 5,000 - 10,000
+
+[ ] 7.3  DISCOUNTING RULES (decide now, do not improvise later)
+      [ ] 15-25% only for the first 5 schools (references), never after
+      [ ] Never discount for a multi-year prepay - you want the renewal
+      [ ] Annual prepay only. No monthly, no quarterly.
+      [ ] Keep a free/discounted tier for madrasas and very small schools as a
+            funnel entry, but never free for a school with real data in it.
+      NOTE : Consider BASIS (Bangladesh Association of Software and
+             Information Services) member pricing once you are a member.
+
+[ ] 7.4  WHAT NOT TO BUILD (protects your time)
+      [ ] NOT an SMS gateway. NO BTRC A2A licence. Bulk SMS is commoditised to
+            fractions of a taka and adds regulatory burden for no margin.
+      [ ] NOT a native mobile app. Your existing portals are responsive web and
+            guardians/teachers will use them in a browser.
+      [ ] NOT a full LMS, transport module or canteen system in year one.
+      [ ] NOT WhatsApp Business API automation yet. Decide after 10 customers
+            tell you they want it. (If you do add it, a BSP is fine - no
+            telecom licence needed. Never build your own gateway.)
+
+--------------------------------------------------------------------------------
+SECTION 8 - PHASE 6: THE DIFFERENTIATOR (Phase 1 of roadmap, after licensing)
+--------------------------------------------------------------------------------
+Everyone has a module list. Nobody sells the outcome. Build these in order.
+
+[ ] 8.1  Outstanding-fees reconciliation dashboard  <-- HIGHEST VALUE, DO FIRST
+      FILE : School-Management-system\src\app\(app)\fees\ (new view)
+      WHY  : This is the buying reason and the demo moment. "You know exactly
+             who has not paid, every day, without a single phone call."
+      DO   : Total outstanding; outstanding by class and section; ageing
+             buckets (1-30 / 31-60 / 61-90 / 90+ days); per-student dues
+             breakdown by fee category; month-on-month collection trend; and a
+             one-tap "generate reminder" action.
+      BUILD ON : the existing src\fees\ module, FeeRecord
+             (@@unique([studentId, categoryId, billingPeriod]) at
+             schema.prisma:1001), Invoice, Payment (with void/refund), and the
+             ACTIVE_LEDGER pattern (index.ts:65) that excludes voided rows.
+      NOTE : Get the ACTIVE_LEDGER filter right. Reversed rows are retained for
+             audit but must not count as money in or out. The codebase already
+             has this comment; do not omit the filter in aggregates or you will
+             silently double-count.
+
+[ ] 8.2  One-click Bangla report card to the guardian
+      FILE : School-Management-system\src\components\printing\ (reuse)
+      WHY  : Highest perceived value per hour of work in the whole codebase.
+             You already have report-card rendering, guardian contacts, and
+             jspdf + html2canvas. This is mostly glue.
+      DO   : PDF (or a hosted link) with the student's photo, roll, attendance
+             summary, subject-wise marks, GPA/grade, position in class, and the
+             class teacher's remarks. Signed and branded per school.
+      ALREADY HAVE: AI-generated remarks via Genkit
+             (School-Management-system\src\ai\flows). Great demo, weak buying
+             reason. Build it LAST.
+
+[ ] 8.3  Bangla fee and attendance reminders
+      DO   : Template-driven Bangla reminders the office can send from the
+             reconciliation screen. Start with copy-to-clipboard and a PDF
+             attachment the teacher/office sends manually over WhatsApp. That
+             delivers the value with zero integration and zero licence cost.
+             Automate delivery only in 8.4.
+
+[ ] 8.4  LATER: parent WhatsApp delivery and bKash fee collection
+      DO   : Only after 8.1-8.3 and after 10+ paying customers. Note that
+             bKash already sells a competing "Educational Institutions" fee
+             collection product, and that becoming a payment aggregator is its
+             own approval process. Use a licensed aggregator, never build your
+             own.
+
+--------------------------------------------------------------------------------
+SECTION 9 - PHASE 7: PRODUCTION AND COMPLIANCE HARDENING
+--------------------------------------------------------------------------------
+
+[ ] 9.1  Automated daily backups with a PROVEN restore
+      DO   : Neon point-in-time recovery plus a nightly logical dump to object
+             storage OUTSIDE Neon. Write a restore drill script and run it
+             monthly. An unverified backup is not a backup.
+      WHY  : You are moving children's personal data and schools' money records.
+             One lost customer database ends the business.
+
+[ ] 9.2  Structured logging and error alerting
+      DO   : morgan is the only logging today (index.ts:133). Add structured
+             request logging with a request id, and error alerting (Sentry or
+             equivalent) so you learn about a broken customer's problem before
+             they call you. Essential when you are the only engineer.
+
+[ ] 9.3  Health checks that actually check
+      DO   : /health returns {status:'ok'} unconditionally (index.ts:79). Make
+             it verify database connectivity. Keep /health unauthenticated (the
+             global gate from 2.1 must not block it) and keep it fast.
+
+[ ] 9.4  Uptime monitoring on the real endpoints
+      DO   : The repo has .github\workflows\keep-alive.yml. Confirm it is
+             actually hitting /health on the deployed backend, and add external
+             uptime monitoring. With one customer-visible instance, silent
+             downtime is the top churn risk.
+
+[ ] 9.5  Secrets hygiene
+      DO   : Move JWT_SECRET, DATABASE_URL, DIRECT_URL, Cloudinary keys and
+             NEXT_PUBLIC_API_URL into Railway/Vercel environment variables.
+             Confirm no .env is committed. Because the fallback secrets in 2.6
+             were in source, treat every previously issued token as compromised
+             and note this in the Phase 0 evidence file.
+
+[ ] 9.6  Continuous integration
+      DO   : Add a GitHub Actions workflow that, on every push: installs both
+             apps, runs prisma generate, runs backend typecheck + lint, runs
+             frontend typecheck + lint + build, applies migrations to an
+             ephemeral PostgreSQL, seeds it, and runs
+             scripts\verify-fee-engine.ts, scripts\verify-fee-collection.ts,
+             scripts\smoke-fee-endpoints.ts and scripts\test-tenant-isolation.ts.
+             Deploy to staging only if all pass.
+
+[ ] 9.7  Data protection for children's data
+      DO   : You now store personal data about minors - name, photo, DOB,
+             religion, blood group, guardian details, marks, and fees. Minimum:
+        [ ] Collect only what a school genuinely needs; make religion and
+              blood group optional (they are on the Student model today).
+        [ ] Encryption in transit (TLS everywhere) and at rest.
+        [ ] A documented, enforced data-retention and deletion policy, plus
+              per-student deletion on a school's written request.
+        [ ] A real signed-in-user audit log for admin actions.
+        [ ] Note there is no comprehensive Bangladesh data-protection Act in
+              force yet, but a draft exists and school/child data is treated
+              as sensitive. Get written consent from each school for the
+              processing, and do not claim "GDPR compliant" anywhere without a
+              lawyer - Section 284 of the internal multi-tenant doc suggests
+              GDPR, which is not your market's law.
+
+[ ] 9.8  Terms of service, privacy policy, and a data-processing agreement
+      DO   : Three documents in Bangla and English, on your own domain, linked
+             from the footer. For B2B schools these matter: a school's head is
+             signing for their institution's data. Include uptime commitment,
+              support hours, backup and restore commitment, and who owns the
+              data on termination (they do; export is provided; then deleted
+              after a stated window).
+
+[ ] 9.9  Trademark and company housekeeping
+      DO   : Register the company properly, check the chosen brand name is
+             available as a domain and as a BD trademark, and check the
+             original "yoursms.com" naming in docs\multi-tenant-strategy.md is
+             not something you are accidentally infringing.
+
+[ ] 9.10 Pre-launch penetration test
+      DO   : Before the public launch, have one competent person attempt
+             cross-tenant access. Your own scripts\test-tenant-isolation.ts
+             covers the automated baseline; a human finds the logic you forgot.
+
+--------------------------------------------------------------------------------
+SECTION 10 - PHASE 8: GO TO MARKET (starts Week 15, never fully finishes)
+--------------------------------------------------------------------------------
+Founder-led, in Bangla, in person. This is the motion that works in
+Bangladesh. Self-serve does not, and a solo part-time operator cannot afford
+to run two motions.
+
+[ ] 10.1 Fix the website into a selling tool
+      [ ] Headline in Bangla first, English second. Lead with the outcome
+            ("কে টাকা দেয়নি, প্রতিদিন সকালেই জানুন"), not with modules.
+      [ ] One primary call to action: "Book a demo" with a WhatsApp link to
+            YOUR number, and a phone number. Not a contact form.
+      [ ] Real screenshots (see 6.6).
+      [ ] Security and data-isolation statement in plain Bangla.
+      [ ] Mobile-first. Headmasters open this on a phone.
+
+[ ] 10.2 Make a 60-90 second Bangla demo video
+      DO   : One continuous take: a fee goes unpaid -> the dashboard shows who
+             owes what and for how long -> the office generates a reminder ->
+             the report card goes to the guardian -> the month closes. That is
+             the entire product in 90 seconds. This is the highest-leverage
+             single asset in the whole go-to-market plan.
+
+[ ] 10.3 Do one in-person demo per week, forever
+      DO   : Demo on the school's own data, on the school's own laptop, in
+             Bangla, with the headmaster and the office manager in the room.
+             Never demo on your data. Never demo over a screen share.
+      TARGET: Schools with 200-800 students in your area. Look for schools
+             currently using Excel or a notebook to track fees - that is your
+             target list, and it is free to build from local Facebook groups
+             and the DPE's published school directory.
+
+[ ] 10.4 Build the referral loop
+      DO   : After a school goes live, ask for three specific introductions, by
+             name. In this market the single strongest channel is a satisfied
+             TEACHER recommending you to a headmaster - teachers talk to other
+             teachers and influence principals. Build for that: make the
+             teacher portal genuinely good and cheap in the school's eyes.
+
+[ ] 10.5 Channels that work in Bangladesh
+      [ ] Facebook groups for school administrators and teachers, by district
+      [ ] BASIS (Bangladesh Association of Software and Information Services)
+            events and member introductions
+      [ ] Free listings on the Bangladesh comparison sites that already rank
+            for "school management software Bangladesh" - bidyaan.com and
+            fems.education both publish such listicles. Being listed is free
+            distribution and costs nothing but a submission.
+      [ ] Local IT firms and education consultants as resellers (see 10.7)
+      [ ] Admission-season and education-fair presence
+
+[ ] 10.6 Time your pipeline to the academic year
+      DO   : The Bangladeshi academic year starts in January, with admissions
+             and new fees booked in Nov-Feb. So: build pipeline Aug-Nov, sign
+             Dec-Jan, onboard Jan-Feb, and start renewal conversations again in
+             Oct-Nov of the following year. Signing a school in June means
+             onboarding them during their exams - bad for both of you.
+
+[ ] 10.7 Channel: white-label / reseller
+      DO   : Later, not now. Local IT shops and education consultants already
+             have school relationships and cannot build software. You supply
+             the engine, branding and support; they own the customer and take a
+             20-30% share. This solves the solo-part-time sales ceiling.
+
+[ ] 10.8 Channel: paid custom deployments as a cash-flow bridge
+      DO   : BD school software is frequently sold as one-off custom projects at
+             BDT 150,000-400,000. Very profitable, but NOT repeatable - do not
+             let it become your business model. Because Phase 1 gives you a
+             multi-tenant foundation anyway, take 1-2 custom deployments during
+             Phases 1-3 to fund your survival, with an explicit written
+             "customisation" line item and a contract stating it is not a
+             reusable product.
+
+--------------------------------------------------------------------------------
+SECTION 11 - DEFINITION OF DONE: THE SELL-READY GATE
+--------------------------------------------------------------------------------
+You may accept your FIRST paying school only when every line is true. Print
+this and check it literally.
+
+  SECURITY
+  [ ] Every API route except /health and / requires authentication (2.1)
+  [ ] Zero unauthenticated reads of student, result, finance or payroll data
+  [ ] No hardcoded password path anywhere (2.2, 2.3)
+  [ ] All passwords bcrypt-hashed (2.4)
+  [ ] No fallback JWT secret; server refuses to boot without JWT_SECRET (2.6)
+  [ ] CORS restricted to an explicit allowlist (2.8)
+  [ ] Data-wipe route deleted or hard-gated (2.9)
+  [ ] Rate limiting on login (2.13)
+  [ ] Password never stored in the browser (2.12)
+  [ ] Role derived server-side, never trusted from the request body (2.11)
+
+  TENANCY
+  [ ] Two or more schools coexist in production with colliding usernames,
+        admission numbers, exam type names and fee category codes (3.5)
+  [ ] scripts\test-tenant-isolation.ts passes across all endpoints (3.10)
+  [ ] Cross-tenant read-by-guessed-ID is impossible and tested
+  [ ] Tenant scoping enforced by ONE factory, not per-route (3.8)
+  [ ] No cross-tenant lookup parameter left on any endpoint (3.6)
+
+  DATA INTEGRITY
+  [ ] Highest-marks bug fixed per subject+class, inside a transaction (3.12)
+  [ ] Result lifecycle and grade-calculation bugs fixed (3.12)
+  [ ] Divide-by-zero guarded; attendance statuses enumed and normalised
+  [ ] Opening balances migrate correctly - a school's dues screen matches what
+        they already knew on day 1 (5.2)
+
+  COMMERCIAL
+  [ ] Plans, subscriptions, seat limits and the licence screen work (4.1-4.5)
+  [ ] Soft expiry: writes blocked at end of term, reads never (4.4)
+  [ ] An invoice/receipt issues, and a manual renewal works end to end (4.6)
+  [ ] Pricing page live in Bangla and English with the real prices (6.5)
+
+  HONESTY
+  [ ] No false trial/pricing/usage claims anywhere on the site (6.1)
+  [ ] No "SMS" branding that implies messaging (6.2)
+  [ ] No button that fakes sending anything (6.3)
+  [ ] No dead menu items in a live demo (6.4)
+
+  PRODUCT PROOF
+  [ ] Outstanding-fees reconciliation dashboard shipped (8.1)
+  [ ] One-click Bangla report card to guardian shipped (8.2)
+  [ ] Self-serve Excel migration wizard shipped (5.1)
+  [ ] One pilot school live, with a testimonial and a Bangla demo video (5.3)
+
+  OPERATIONS
+  [ ] Nightly backup outside Neon, with a PROVEN restore (9.1)
+  [ ] Error alerting reaches you (9.2)
+  [ ] Uptime monitoring on the real endpoint (9.4)
+  [ ] CI runs typecheck, lint, build, migrations and all verification scripts (9.6)
+  [ ] ToS, privacy policy and DPA signed by the school before go-live (9.8)
+
+--------------------------------------------------------------------------------
+SECTION 12 - SUGGESTED SEQUENCE AND STOP-RULE
+--------------------------------------------------------------------------------
+
+WEEKS 1-2   Phase 0  Security + remove false claims.
+            STOP-RULE: Do not demo this to any real headmaster before the
+            Section 2.16 gate passes. An open finance endpoint will end the
+            business.
+
+WEEKS 3-8   Phase 1  Multi-tenancy. Highest technical risk.
+            STOP-RULE: Never run migrate reset on the live database. Never
+            apply a non-additive change without a verified restore (3.1).
+
+WEEKS 9-11  Phase 2  Licensing and billing.
+
+WEEKS 12-14 Phase 3  Migration wizard + first pilot.
+WEEK  15+   Phase 8  Start selling. Ship Section 8 features as you sell.
+
+DISCIPLINE   Do not start Phase 5 (differentiator) or Phase 7 (infrastructure
+            polish) before you have signed a customer. The instinct to keep
+            building is the most likely way this never becomes a business.
+
+--------------------------------------------------------------------------------
+SECTION 13 - QUICK REFERENCE: FILE INVENTORY
+--------------------------------------------------------------------------------
+
+CANONICAL (edit these)
+  School-Management-System-Backend\src\index.ts         9,413 lines, 206 routes
+  School-Management-System-Backend\src\auth.ts         authMiddleware (used)
+  School-Management-System-Backend\src\checkRole.ts
+  School-Management-System-Backend\src\fees\            routes, records,
+                                                         generation,
+                                                         monthly-generation, shared
+  School-Management-System-Backend\src\middleware\      auth (DUPLICATE),
+                                                         errorHandler
+  School-Management-System-Backend\prisma\schema.prisma 49 models - canonical
+  School-Management-system\src\lib\api.ts               admin/teacher REST client
+  School-Management-system\src\lib\student-api.ts
+  School-Management-system\src\lib\translations.ts    en / Bangla strings
+  School-Management-system\src\context\LanguageContext.tsx
+  School-Management-system\src\app\(auth)\login\page.tsx
+  School-Management-system\src\components\home-page\   Navbar, Hero, Stats,
+                                                         Features, CTA, Footer
+  School-Management-system\src\components\finance\fee-table-view.tsx
+  School-Management-system\src\ai\                       Genkit report remarks
+
+DELETE OR IGNORE
+  School-Management-system\prisma\schema.prisma          STALE DUPLICATE (2.15)
+  School-Management-System-Backend\src\middleware\auth.ts  duplicate (2.7)
+  *.log, be-out.log, backend.log, frontend*.log          runtime noise
+  School-Management-system\README.md                     5-line Firebase stub
+
+READ AND RESPECT (already know the answer, don't re-research)
+  current-bugs.txt                     20 documented correctness bugs
+  CODEBASE_MAP.txt                    module map (verify line numbers)
+  DATA_RESTORATION_STATUS.md          prior data loss
+  FEE_SYSTEM_RECOVERY_GUIDE.md        fee data recovery
+  FEE_SYSTEM_IMPLEMENTATION_SUMMARY.md
+  AUDIT_FIXES_COMPLETE.md
+  IMPLEMENTATION_GUIDE.md, QUICK_START.md, FINAL_COMPLETION_REPORT.md
+  CURRENT_SYSTEM_STATUS.md
+  School-Management-system\docs\multi-tenant-strategy.md   tenancy draft
+                                   (its prisma.$use() is Prisma v4, deprecated)
+
+VERIFICATION SCRIPTS (your regression net - there are no unit tests)
+  School-Management-System-Backend\scripts\verify-fee-engine.ts
+  School-Management-System-Backend\scripts\verify-fee-collection.ts
+  School-Management-System-Backend\scripts\smoke-fee-endpoints.ts
+  School-Management-System-Backend\scripts\mint-test-token.ts
+  School-Management-System-Backend\scripts\cleanup-fee-verification-data.ts
+  School-Management-System-Backend\scripts\backfill-admission-status.ts
+  School-Management-System-Backend\scripts\seed-fee-categories.ts
+  School-Management-System-Backend\scripts\test-tenant-isolation.ts  (CREATE)
+
+COMMANDS
+  Backend  dev        npm run dev            (port 4000, ts-node-dev)
+  Backend  build      npm run build          (prisma generate && tsc)
+  Backend  typecheck  npm run typecheck      (ADD THIS - does not exist yet)
+  Backend  lint       npm run lint           (ADD THIS - does not exist yet)
+  Backend  migrate    npm run prisma:migrate (dev only, never on production)
+  Backend  deploy-db  npm run prisma:deploy  (production)
+  Frontend dev        npm run dev            (port 9002, NOT 3000)
+  Frontend lint       npm run lint
+  Frontend typecheck  npm run typecheck
+  Frontend build      npm run build
+
+================================================================================
+END OF DOCUMENT
+================================================================================

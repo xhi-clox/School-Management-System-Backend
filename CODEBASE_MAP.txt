@@ -1,0 +1,789 @@
+================================================================================
+CODEBASE MAP — Academify / NexGrad School Management System
+================================================================================
+Maintain this file as the single source of truth for AI codebase navigation.
+Read this BEFORE modifying, debugging, or adding features. It lets an AI
+identify the 3–8 relevant files without scanning the entire repo.
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+A full-featured school management system ("Academify" / "NexGrad") with three
+roles: Admin (dashboard), Teacher (portal), Student (portal). It spans academics,
+results/grading, finance, inventory/store, payroll, attendance, class routines,
+admissions, promotions, ID cards, report cards, and AI-generated feedback.
+
+Architecture:
+- FRONTEND: Next.js 15 (App Router) React 19 app -> "School-Management-system/"
+- BACKEND:  Express + Prisma + PostgreSQL REST API -> "School-Management-System-Backend/"
+- The frontend calls the backend REST API over HTTP. There is NO Next.js server
+  action / route-handler data layer for core features (only /actions.ts for AI).
+- IMPORTANT: The backend is MONOLITHIC — nearly all routes/handlers live in a
+  single file: School-Management-System-Backend/src/index.ts (~5,475 lines).
+  There is no controllers/services folder split.
+
+================================================================================
+2. TECHNOLOGY STACK
+================================================================================
+FRONTEND (School-Management-system/package.json):
+- Next.js 15.5.9 (App Router, "next dev --turbopack"), React 19
+- Tailwind CSS 3.4 + shadcn/ui (Radix primitives), components.json
+- State: React context (AuthContext, LanguageContext), no Redux
+- Forms: react-hook-form + zod
+- Charts: recharts; Carousel: embla-carousel-react; Motion: framer-motion
+- Docs/print: jspdf, html2canvas, jsbarcode, jszip
+- AI: Google Genkit (@genkit-ai/google-genai)
+- Fonts: Inter / Poppins / Space Grotesk / Hind Siliguri / Playfair Display
+
+BACKEND (School-Management-System-Backend/package.json):
+- Node.js >=20, Express 4, TypeScript, ts-node-dev (dev)
+- Prisma 6 + PostgreSQL (DATABASE_URL / DIRECT_URL)
+- Auth: jsonwebtoken (JWT), bcryptjs
+- Validation: zod; Body: express.json 15mb
+- Images: cloudinary (base64 -> CDN URL); Security: helmet; Logging: morgan
+- CORS allows all origins (config lists Vercel prod + localhost + env CORS_ORIGINS)
+
+================================================================================
+3. DIRECTORY STRUCTURE (top level)
+================================================================================
+School-Management-system/   <- FRONTEND (Next.js)
+  src/app/                  <- App Router pages (route groups)
+    (app)/  admin dashboard pages (main feature routes)
+    (auth)/ login
+    student/  student portal
+    teacher/  teacher portal
+  src/components/           <- feature + shared UI components
+  src/context/              <- AuthContext, LanguageContext
+  src/hooks/                <- use-dashboard, use-institute, use-report-design, etc.
+  src/lib/                  <- api clients, db (legacy), types, translations, utils
+  src/ai/                   <- Genkit AI flows
+  prisma/schema.prisma      <- DB schema (DUPLICATE/legacy relative to backend)
+  dash/                     <- separate React/Vite prototype (dashboard)
+  data/                     <- legacy JSON mock data files (used by legacy src/lib/db.ts)
+  uxpilot-react-export-*/   <- old Vite export artifact
+  public/                   <- images, uploads, icon
+
+School-Management-System-Backend/  <- BACKEND (Express API)
+  src/index.ts              <- ALL routes + handlers + business logic
+  src/middleware/auth.ts    <- JWT auth middleware
+  src/middleware/errorHandler.ts
+  src/auth.ts               <- DUPLICATE of middleware/auth.ts
+  src/checkRole.ts          <- role guard
+  src/cloudinary.ts         <- image upload helper
+  src/seed*.ts, seed-*.ts   <- seed scripts
+  prisma/schema.prisma      <- canonical DB schema (SOURCE OF TRUTH)
+  prisma/migrations/        <- SQL migrations
+  dist/                     <- compiled output
+  .github/workflows/keep-alive.yml
+
+Root of working dir (C:\Users\Walton\Documents\SMS-Backend):
+- backend.log / frontend.log, backend-err.log / frontend-err.log (runtime logs)
+- various *.html mockups, id_card_generator.html, *.jpg
+
+================================================================================
+4. FEATURE LOOKUP INDEX (fast entry points)
+================================================================================
+Authentication / Login ..... -> src/index.ts /auth/login; frontend login page
+Admin Dashboard ............ -> src/index.ts /dashboard/*; app/(app)/dashboard
+Student Management ........ -> src/index.ts /students*; app/(app)/students
+Teacher Management ........ -> src/index.ts /teachers*; app/(app)/teachers
+Staff (non-teaching) ....... -> src/index.ts /staff*; app/(app)/finance/payroll
+Classes / Subjects ......... -> src/index.ts /classes*,/subjects*; app/(app)/academics
+Attendance ................. -> src/index.ts /attendance*; app/(app)/attendance
+Teacher Attendance ......... -> src/index.ts /attendance/teachers*
+Class Routine .............. -> src/index.ts /class-routine*; app/(app)/academics/class-routine-management
+Exam Types / Exams ......... -> src/index.ts /exam-types*,/exams; app/(app)/exams
+Exam Schedule .............. -> src/index.ts /schedules; app/(app)/exams/exam-schedule
+Results / Marks ............ -> src/index.ts /results*,/grading; app/(app)/results, /exams/marks-entry
+Grading System ............. -> src/index.ts /grading*; app/(app)/settings/grading
+Admission .................. -> src/index.ts /students/admission,/admission-packages*; app/(app)/students/add
+Invoices / Payments ........ -> src/index.ts /invoices*,/payments; app/(app)/finance/fees/invoices
+Tuition / Fee structures ... -> src/index.ts /tuition/*; app/(app)/finance/fees, settings/fees
+Fees (StudentFee) .......... -> src/index.ts /fees*; app/(app)/finance/fees
+Expenses / Income / Ledger . -> src/index.ts /expenses*,/finance/*; app/(app)/finance
+Payroll (teachers/staff) ... -> src/index.ts /salaries*,/staff; app/(app)/finance/payroll
+Store / Inventory .......... -> src/index.ts /store/*; app/(app)/store
+Promotion / Archive ........ -> src/index.ts /students/promote,/promotions/archive; app/(app)/promotion
+Institute Profile .......... -> src/index.ts /institute; app/(app)/settings/institute
+Notifications .............. -> src/index.ts /notifications*; app/(app) header
+Users (admin) .............. -> src/index.ts /users; app/(app)/settings/users
+Permissions (teachers) ..... -> src/index.ts /permissions; app/(app)/settings/permissions
+Class-Subject-Teacher ....... -> src/index.ts /class-subject-teachers; app/(app)/settings/class-subjects
+Teacher Portal ............ -> src/index.ts /teacher/*; app/teacher/*
+Student Portal ............ -> src/index.ts /student/*; app/student/*
+Document generation ........ -> frontend components (id-card, printing) + lib/id-card-export, docs-service
+AI report-card remarks .... -> src/app/actions.ts; src/ai/flows/ai-report-card-remarks-generator-flow; app/(app)/tools/report-card-generator
+
+================================================================================
+5. FEATURE → FILE MAP (FRONTEND + BACKEND + DB)
+================================================================================
+NOTE: Backend "files" all live in School-Management-System-Backend/src/index.ts.
+Line anchors are given as a starting reference (approximate).
+
+-------------------------- AUTH & SESSIONS --------------------------
+Frontend:
+- src/app/(auth)/login/page.tsx        (login UI, role switcher)
+- src/context/AuthContext.tsx          (login/logout, localStorage + cookie)
+- src/components/ProtectedRoute.tsx    (route guard)
+Backend:
+- src/index.ts  POST /auth/login (lines ~3968)  JWT issue /  role-based checks
+- src/middleware/auth.ts  (authMiddleware JWT verify)
+- src/checkRole.ts       (role guard)
+DB: User, StudentLogin, TeacherLogin, Teacher
+Notes: Logins are SIMPLIFIED/INSECURE (see Business Logic). Passwords mostly plaintext or hardcoded test values.
+
+-------------------------- DASHBOARD (ADMIN) --------------------------
+Frontend:
+- src/app/(app)/dashboard/page.tsx
+- src/components/dashboard/* (stat-card, charts, activity-feed, command-palette, etc.)
+- src/hooks/use-dashboard.ts
+Backend:
+- src/index.ts /dashboard/stats, /dashboard/attendance/summary/weekly, /dashboard/financial-details
+DB: many (Student, Attendance, Fee, Invoice, Result, Exam, Expense...)
+
+-------------------------- STUDENT MANAGEMENT --------------------------
+Frontend:
+- src/app/(app)/students/page.tsx
+- src/app/(app)/students/[id]/page.tsx
+- src/app/(app)/students/add/page.tsx
+- src/app/(app)/students/bulk-import/page.tsx
+- src/app/(app)/students/id-cards/page.tsx
+- src/app/(app)/students/print-list/page.tsx
+- src/app/(app)/students/admission-letter/page.tsx
+- src/app/(app)/students/manage-login/page.tsx
+- src/app/(app)/students/[id]/id-card/page.tsx
+- src/components/students/* (add-student-form/dialog, edit-student-dialog)
+- src/lib/api.ts  (api.getStudents/createStudent/updateStudent/deleteStudent/...)
+Backend:
+- src/index.ts GET/POST/PUT/DELETE /students (697/759/884/913)
+- src/index.ts /students/rolls/used, /students/:id/history
+- src/index.ts POST /students/admission (3065), POST /students/promote (943)
+DB: Student, Guardian, StudentLogin, StudentAcademicRecord, AdmissionPackage
+
+-------------------------- TEACHER MANAGEMENT --------------------------
+Frontend:
+- src/app/(app)/teachers/page.tsx
+- src/app/(app)/teachers/[id]/page.tsx
+- src/app/(app)/teachers/manage-login/page.tsx
+- src/components/teachers/* (add/edit-teacher-dialog)
+Backend:
+- src/index.ts GET/POST/PUT/DELETE /teachers (1959/1964/1989/2012)
+- /teachers/logins, /permissions (surface/assign feature)
+DB: Teacher, TeacherLogin, TeacherPermission, TeacherSalary, ClassSubjectTeacher
+
+-------------------------- CLASSES & SUBJECTS --------------------------
+Frontend:
+- src/app/(app)/academics/classes/page.tsx
+- src/app/(app)/academics/subjects/page.tsx
+- src/components/academics/* (add-class/section/subject dialogs)
+Backend:
+- src/index.ts /classes* (2216+), /subjects* (2278+)
+DB: SchoolClass, Subject, ClassSubjectTeacher
+
+-------------------------- ATTENDANCE --------------------------
+Frontend:
+- src/app/(app)/attendance/page.tsx
+- src/app/(app)/attendance/reports/page.tsx
+- src/app/(app)/exams/attendance-reports/page.tsx
+Backend:
+- src/index.ts GET /attendance (2326), POST /attendance/save (2928), /attendance/matrix (2575), /attendance/teachers (2690), /attendance/teachers/save (2902)
+DB: Attendance (student), TeacherAttendance
+
+-------------------------- CLASS ROUTINE --------------------------
+Frontend:
+- src/app/(app)/academics/class-routine-management/page.tsx
+- src/components/routine-management/* (routine-table, views, form)
+- src/components/class-routine/* (edit-entry-modal, period-edit-form, subject-card)
+Backend:
+- src/index.ts /class-routine/* (classes, teachers, subjects, rooms, time-slots, periods, timetable, update-entry)
+DB: RoutineEntry, RoutinePeriod
+Note: /class-routine/rooms returns HARDCODED mock rooms (no Room model).
+
+-------------------------- EXAMS & EXAM SCHEDULE --------------------------
+Frontend:
+- src/app/(app)/exams/page.tsx
+- src/app/(app)/exams/exam-schedule/page.tsx
+- src/app/(app)/exams/exam-seat-plan/page.tsx, seat-plan-generator, admit-card-generator, routine-generator
+- src/app/(app)/class-schedule/page.tsx
+- src/components/exam-seat-plan/exam-seat-plan-card.tsx
+Backend:
+- src/index.ts /exam-types* (1333+), /exams (1376/1384), /schedules (1811-1882)
+DB: ExamType, Exam, ExamSchedule
+
+-------------------------- RESULTS / MARKS / GRADING --------------------------
+Frontend:
+- src/app/(app)/results/page.tsx
+- src/app/(app)/results/class/page.tsx
+- src/app/(app)/results/student/[id]/page.tsx
+- src/app/(app)/exams/marks-entry/page.tsx
+- src/app/(app)/exams/marksheet-generator/page.tsx
+- src/app/(app)/exams/merit-list/page.tsx
+- src/app/(app)/settings/grading/page.tsx
+Backend:
+- src/index.ts GET /results (1409), POST /results/bulk (1423),
+  /results/overview (1655), /results/class (1738), /results/student (1768)
+- /grading (3630), /grading/bulk (3650)
+- Helpers: buildExamReport (1553), subjectStatsForReport (1630), rankStudents (1649)
+DB: Result, GradingSystem, ExamType, Student, Subject, ExamSchedule
+See BUSINESS LOGIC section for grade/GPA/pass-fail computations.
+
+-------------------------- ADMISSION & PACKAGES --------------------------
+Frontend:
+- src/app/(app)/fees/admission-setup/page.tsx
+- src/app/(app)/students/add/page.tsx
+Backend:
+- src/index.ts /admission-packages* (2955+), POST /students/admission (3065)
+DB: AdmissionPackage, AdmissionFeeItem, Student, Guardian, Invoice
+
+-------------------------- INVOICES & PAYMENTS --------------------------
+Frontend:
+- src/app/(app)/finance/fees/invoices/page.tsx
+- src/app/(app)/fees/payments/[invoiceId]/page.tsx
+- src/app/(app)/finance/fees/assignments/page.tsx
+Backend:
+- src/index.ts /invoices (3335), /invoices/from-package (3348), /invoices/simple (3388), /invoices/:id (3453)
+- /payments (3265)
+DB: Invoice, InvoiceItem, Payment, Student
+
+-------------------------- TUITION / FEE STRUCTURES --------------------------
+Frontend:
+- src/app/(app)/finance/fees/page.tsx
+- src/app/(app)/finance/fees/reports/page.tsx
+- src/app/(app)/settings/fees/page.tsx
+- src/app/(app)/finance/fees/assignments/page.tsx
+Backend:
+- src/index.ts /tuition/structures*, /tuition/assignments* (2351-2446), POST /tuition/generate-monthly (2453)
+DB: FeeStructure, StudentFeeAssignment, FeeParticular, Invoice
+
+-------------------------- MANUAL FEES (StudentFee) --------------------------
+Frontend:
+- src/app/(app)/finance/income/page.tsx, /finance/fees
+Backend:
+- src/index.ts /fees (2031), /fees/:id (2050), /fees/:id/pay (2065), /fees/:id (2082)
+DB: StudentFee, Student
+
+-------------------------- FINANCE / LEDGER / REPORTS --------------------------
+Frontend:
+- src/app/(app)/finance/page.tsx
+- src/app/(app)/finance/transactions/page.tsx
+- src/app/(app)/finance/income/page.tsx, /finance/expenses/page.tsx, /finance/reports/page.tsx
+Backend:
+- src/index.ts /expenses* (2164+), /finance/transactions (3560), /finance/income (3573),
+  /finance/reports/summary (3582), /finance/reports/fees (3607), /dashboard/financial-details (634)
+DB: LedgerEntry, SchoolExpense, Invoice, Payment
+
+-------------------------- PAYROLL (TEACHERS + STAFF) --------------------------
+Frontend:
+- src/app/(app)/finance/payroll/salaries/page.tsx
+- src/app/(app)/finance/payroll/staff-salaries/page.tsx
+- src/app/(app)/finance/payroll/payments/page.tsx
+- src/components/finance/process-salaries-dialog.tsx, process-staff-salaries-dialog.tsx
+Backend:
+- src/index.ts /salaries* (2097+), /salaries/process, /salaries/:id/pay
+- /staff* (3466+), /salaries/staff* (3501+)
+DB: TeacherSalary, StaffSalary, Teacher, Staff
+
+-------------------------- STORE / INVENTORY --------------------------
+Frontend:
+- src/app/(app)/store/products, suppliers, purchases, sales, inventory, reports
+Backend:
+- src/index.ts /store/products (2713), /store/suppliers (2747), /store/purchases (2764),
+  /store/sales (2816), /store/inventory (2863), /store/reports/profit (2873)
+DB: Product, Supplier, Purchase, PurchaseItem, Sale, SaleItem, Student
+
+-------------------------- PROMOTION / ARCHIVE --------------------------
+Frontend:
+- src/app/(app)/promotion/page.tsx
+- src/app/(app)/promotion/archive/page.tsx
+- src/components/promotion/promotion-wizard.tsx
+Backend:
+- src/index.ts POST /students/promote (943), GET /promotions/archive (1191),
+  GET /students/:id/history (1096)
+DB: Student, StudentAcademicRecord
+
+-------------------------- INSTITUTE PROFILE --------------------------
+Frontend:
+- src/app/(app)/settings/institute/page.tsx
+- src/components/settings/institute-profile-form.tsx
+- src/hooks/use-institute.ts
+Backend:
+- src/index.ts GET/POST /institute (1897/1921)
+DB: Institute
+
+-------------------------- USERS / PERMISSIONS --------------------------
+Frontend:
+- src/app/(app)/settings/users/page.tsx
+- src/app/(app)/settings/permissions/page.tsx
+- src/app/(app)/settings/class-subjects/page.tsx
+Backend:
+- src/index.ts /users (1953), /permissions (3803), /permissions/:teacherId (3831),
+  /class-subject-teachers (3862+)
+DB: User, TeacherPermission, ClassSubjectTeacher, Teacher
+
+-------------------------- NOTIFICATIONS --------------------------
+Frontend: (header) uses api.getNotifications
+Backend:
+- src/index.ts /notifications (247), /notifications/:id/read (262), /notifications/read-all (276)
+DB: Notification
+
+-------------------------- TEACHER PORTAL --------------------------
+Frontend:
+- src/app/teacher/layout.tsx, dashboard, attendance, marks-entry
+- src/components/teacher/sidebar.tsx
+- src/components/layout/teacher-*.tsx
+Backend:
+- src/index.ts /teacher/dashboard (4120), /teacher/classes (4337), /teacher/classes/:id/students (4377),
+  /teacher/subjects (4428), /teacher/attendance GET/POST (4454/4523), /teacher/exams (4581), /teacher/marks (4912)
+DB: Teacher, SchoolClass, Student, Attendance, Result, Exam, ClassSubjectTeacher, TeacherPermission
+
+-------------------------- STUDENT PORTAL --------------------------
+Frontend:
+- src/app/student/layout.tsx, dashboard, attendance, exam-schedule, fees, results,
+  notices, messages, assignments, profile, settings
+- src/components/layout/student-*.tsx
+- src/lib/student-api.ts  (studentFetch / studentIdOf)
+Backend:
+- src/index.ts /student/dashboard (5052), /student/profile (5158), /student/results (5196),
+  /student/fees (5285), /student/attendance (5330), /student/exam-schedule (5368),
+  /student/notices (5406) [returns []], /student/messages (5415) [returns []], /student/assignments (5424) [returns []]
+DB: Student, Attendance, Result, Invoice, StudentFee, ExamSchedule
+
+-------------------------- DOCUMENT GENERATION (ID CARD / ADMIT / REPORT CARD) ----------
+Frontend (mostly client-side generation, no backend):
+- src/components/id-card/* (id-card-premium, style1, style2)
+- src/components/printing/print-layout.tsx
+- src/lib/id-card-export.ts         (safe filename, wait for images, export PDF)
+- src/lib/docs-service.ts           (external docs service via NEXT_PUBLIC_DOCS_URL)
+- src/components/tools/report-card-generator-form.tsx
+- src/app/(app)/exams/admit-card-generator, marksheet-generator, seat-plan-generator
+DB: Student, ExamSchedule
+
+-------------------------- AI FEATURES (GENKIT) --------------------------
+Frontend:
+- src/app/actions.ts                  (server action generateRemark)
+- src/ai/genkit.ts, src/ai/dev.ts
+- src/ai/flows/ai-report-card-remarks-generator-flow.ts
+- src/ai/flows/ai-announcement-composer-flow.ts
+- src/ai/flows/ai-parent-message-drafts-flow.ts
+- src/app/(app)/tools/report-card-generator/page.tsx
+Backend: none (runs in frontend server process)
+
+================================================================================
+6. DATABASE → FEATURE MAP  (canonical schema: School-Management-System-Backend/prisma/schema.prisma)
+================================================================================
+MODEL: User  (admin accounts)
+  Used by: Auth, Settings>Users
+MODEL: Notification  -> user
+  Used by: Notifications
+MODEL: Parent  -> user, students
+  Used by: Auth (Parent role defined but portal not built)
+MODEL: Student
+  Used by: Student Mgt, Admission, Attendance, Results, Fees, Invoices, Store,
+           Promotion, ID Cards, Student Portal, Teacher Portal
+  Relations: fees(StudentFee[]), attendance, results, invoices, assignments,
+             sales, guardian, login, parent, academicHistory
+MODEL: Guardian  (1:1 Student)
+  Used by: Student profile/admission
+MODEL: StudentLogin  (1:1 Student)
+  Used by: Student portal auth, Manage Login
+MODEL: TeacherLogin  (1:1 Teacher)
+  Used by: Teacher auth login management
+MODEL: Teacher
+  Used by: Teacher Mgt, Payroll, Attendance, Class assignment, Class routine,
+           Teacher Portal, Permissions
+  Relations: salaries, attendance(TeacherAttendance), classes(SchoolClass),
+             login, permission, classSubjects(ClassSubjectTeacher)
+MODEL: TeacherPermission  (1:1 Teacher)  -> attendanceMode/marksMode + classId lists
+  Used by: Permissions feature, Teacher portal scoping
+MODEL: ClassSubjectTeacher  -> teacher, class, subject (unique [classId,subjectId])
+  Used by: Class-Subject-Teacher assignment; teacher exam/class scoping
+MODEL: Staff + StaffSalary
+  Used by: Payroll (non-teaching), Finance
+MODEL: StudentFee  -> student
+  Used by: Fees (manual)
+MODEL: TeacherSalary -> teacher
+  Used by: Payroll
+MODEL: SchoolExpense
+  Used by: Finance/Expenses
+MODEL: SchoolClass  -> teacher
+  Used by: Classes, Student Mgt, Admission, Exam schedule, Routine, Tuition
+MODEL: AdmissionPackage + AdmissionFeeItem
+  Used by: Admission, Fees config
+MODEL: Invoice + InvoiceItem + Payment
+  Used by: Fees/Invoices, Payments, Admission, Tuition, Finance reports
+MODEL: LedgerEntry
+  Used by: Finance transactions/income/reports
+MODEL: FeeStructure + StudentFeeAssignment
+  Used by: Tuition/Fee structures, Monthly generation
+MODEL: Subject
+  Used by: Subjects, Exams, Results, Routine
+MODEL: Attendance (student)  @@unique([studentId,date])
+  Used by: Attendance, Reports, Student/Teacher portal
+MODEL: TeacherAttendance  @@unique([teacherId,date])
+  Used by: Teacher attendance
+MODEL: ExamType + Exam
+  Used by: Exams, Results, Grading
+MODEL: Result  @@unique([studentId,examId,subjectId])
+  Used by: Results, Marks entry, Grading, Reports
+MODEL: ExamSchedule  @@unique([examId,subjectId,classId])
+  Used by: Exam schedule, Admit cards, Seat plan, Results full-marks
+MODEL: GradingSystem -> examType
+  Used by: Grading config, Results calc
+MODEL: Institute
+  Used by: Institute profile
+MODEL: FeeParticular
+  Used by: Settings>Fees
+MODEL: StudentAcademicRecord -> student
+  Used by: Promotion/Archive, History
+MODEL: RoutineEntry + RoutinePeriod
+  Used by: Class Routine
+
+NOTE: Two Prisma schemas exist:
+  - School-Management-System-Backend/prisma/schema.prisma  (CANONICAL, used by running API)
+  - School-Management-system/prisma/schema.prisma          (frontend copy, mostly identical but
+      LACKS Notification, TeacherLogin, TeacherPermission, ClassSubjectTeacher, GradingSystem
+      relations, FeeParticular, Institute; money fields are Float not Decimal). It is NOT used at
+      runtime by core features (frontend talks to backend API). Verify before trusting it.
+
+================================================================================
+7. API → FEATURE MAP  (all in School-Management-System-Backend/src/index.ts)
+================================================================================
+AUTH:  POST /auth/login  (JWT; role via 'role' body)
+PROFILE: GET/PUT /profile (auth)
+NOTIFICATIONS: GET /notifications, POST /notifications/:id/read, POST /notifications/read-all
+DASHBOARD: GET /dashboard/stats, GET /dashboard/attendance/summary/weekly, GET /dashboard/financial-details
+ADMIN RESET: DELETE /admin/reset-data
+STUDENTS: GET /students, GET /students/rolls/used, GET /students/:id, POST /students,
+          PUT /students/:id, DELETE /students/:id, POST /students/promote,
+          GET /students/:id/history|attendance|results|fees, POST /students/admission,
+          GET/POST/PUT/DELETE /students/logins
+PROMOTIONS: GET /promotions/archive
+EXAM TYPES: GET/POST /exam-types, DELETE /exam-types/:id
+EXAMS: GET/POST /exams
+RESULTS: GET /results, POST /results/bulk, GET /results/overview|class|student
+SCHEDULES: GET/POST /schedules, DELETE /schedules/:id
+INSTITUTE: GET/POST /institute
+USERS: GET /users
+TEACHERS: GET/POST /teachers, PUT/DELETE /teachers/:id, GET/POST/PUT/DELETE /teachers/logins
+FEES: GET/POST /fees, PUT /fees/:id, POST /fees/:id/pay, DELETE /fees/:id
+SALARIES (teacher): GET /salaries, POST /salaries/process, POST /salaries/:id/pay, DELETE /salaries/:id
+EXPENSES: GET/POST /expenses, PUT/DELETE /expenses/:id
+CLASSES: GET/POST /classes, PUT/DELETE /classes/:id
+SUBJECTS: GET/POST /subjects, PUT/DELETE /subjects/:id
+ATTENDANCE: GET /attendance, GET /attendance/matrix, POST /attendance/save, GET/POST /attendance/teachers
+TUITION STRUCTURES: GET/POST/PUT/DELETE /tuition/structures
+TUITION ASSIGNMENTS: GET/POST/PUT/DELETE /tuition/assignments
+TUITION GENERATE: POST /tuition/generate-monthly
+STORE: GET/POST /store/products, PUT /store/products/:id, GET/POST /store/suppliers,
+       GET/POST /store/purchases, GET/POST /store/sales, GET /store/inventory,
+       GET /store/reports/profit
+ADMISSION PACKAGES: GET/POST/PUT/DELETE /admission-packages
+INVOICES: GET /invoices, POST /invoices/from-package, POST /invoices/simple, GET /invoices/:id
+PAYMENTS: POST /payments
+STAFF: GET/POST /staff, PUT/DELETE /staff/:id, GET /salaries/staff, POST /salaries/staff/process,
+       POST /salaries/staff/:id/pay
+FINANCE: GET /finance/transactions, GET /finance/income, GET /finance/reports/summary, GET /finance/reports/fees
+GRADING: GET /grading, POST /grading/bulk
+FEE PARTICULARS: GET /fee-particulars, POST /fee-particulars/bulk
+PERMISSIONS: GET /permissions, PUT /permissions/:teacherId
+CLASS-SUBJECT-TEACHER: GET/POST /class-subject-teachers, PUT/DELETE /class-subject-teachers/:id
+CLASS ROUTINE: GET /class-routine/classes|teachers|subjects|rooms|time-slots|timetable,
+               POST /class-routine/periods/save|reorder, DELETE /class-routine/periods/:id,
+               POST /class-routine/update-entry
+TEACHER PORTAL: GET /teacher/dashboard, /teacher/classes, /teacher/classes/:id/students,
+                /teacher/subjects, GET+POST /teacher/attendance, /teacher/exams, POST /teacher/marks
+STUDENT PORTAL: GET /student/dashboard|profile|results|fees|attendance|exam-schedule|notices|messages|assignments
+HEALTH: GET /health, GET /test-db
+
+Auth requirements:
+- Protected (authMiddleware): /profile, /dashboard/stats, /students*, /teachers*, /results/overview|class|student,
+  /permissions*, /class-subject-teachers*, /users, /notifications*, teacher-portal routes
+- Admin-only (checkRole['Admin']): /users, /teachers POST/PUT/DELETE, /students POST/PUT/DELETE/promote/history,
+  /students/logins (create/update/delete), /teachers/logins, /permissions*, /class-subject-teachers*,
+  /results/overview|class|student
+- Teacher-only (checkRole['Teacher']): all /teacher/* routes
+- Many CRUD routes have NO auth (e.g. /fees, /classes, /subjects, /attendance*, /exams, /schedules,
+  /tuition/*, /store/*, /finance/*, /grading, /expenses, /salaries, /invoices, /payments,
+  /students/logins GET/POST/PUT/DELETE (public!), /admission-packages, /institute, /student/*, /class-routine/*)
+
+================================================================================
+8. SHARED / HIGH-IMPACT FILES
+================================================================================
+HIGH IMPACT — backend:
+- School-Management-System-Backend/src/index.ts  (ALL routes + handlers)
+  -> Every backend change touches this one file. Splitting it is a large refactor.
+- School-Management-System-Backend/prisma/schema.prisma  (canonical DB)
+  -> Any schema/data change; run `npx prisma migrate ...` after edits.
+- School-Management-System-Backend/src/middleware/auth.ts + src/checkRole.ts (auth guards)
+
+HIGH IMPACT — frontend:
+- src/lib/api.ts  (the single REST API client for ALL admin/teacher features)
+  -> Adding/renaming an endpoint updates this. Used by most (app) pages.
+- src/lib/student-api.ts  (REST client for student portal)
+- src/context/AuthContext.tsx (auth state used by layouts + guards, localStorage token)
+- src/context/LanguageContext.tsx (i18n en/bn)
+- src/lib/types.ts  (shared TS types for backend entities)
+- src/components/ui/* (shadcn primitives used everywhere)
+- src/app/(app)/layout.tsx + src/app/layout.tsx (providers + routing guard)
+
+================================================================================
+9. BUSINESS LOGIC (actual implementations — read these before changing behavior)
+================================================================================
+A) RESULT / GRADE CALCULATION  (src/index.ts POST /results/bulk, lines 1423-1549)
+   Input: per-student { written, mcq, practical }
+   - totalMarks = written + mcq + practical
+   - Highest marks computed across this batch + existing results for (exam,subject)
+   - Pass/fail: isFail if (written < writtenPass) OR (mcq>0 && mcq<mcqPass) OR (total < totalPass)
+     (threshol/grade from GradingSystem rows for the exam's ExamType)
+   - fullMarks resolved from ExamSchedule for the student's class (default 100)
+   - percent = totalMarks/fullMarks*100; grade from GradingSystem band (or 'F' on fail)
+   - Upserts Result rows; then updateMany to sync highestMarks for all rows of (exam,subject)
+   NOTE: teacher /teacher/marks (4912) saves pre-computed total/grade/gp directly (different path).
+
+B) EXAM REPORT / OVERALL GRADE & GPA  (src/index.ts buildExamReport 1553-1628 + overview 1655)
+   - Per student: sum totalMarks & fullMarks; gpa = (sum gp)/(#gp); percentage = total/full*100
+   - Fail grades set derived from GradingSystem status='FAIL' (default 'F'); if any FAIL grade -> overall grade 'F'
+   - subjectStatsForReport (1630): average % and pass rate per subject
+   - rankStudents (1649): sort by gpa desc, then percentage desc, then name
+   - Overview computes pass rate, class performance, top-10, at-risk (failed or gpa<2.0), weakest subjects.
+
+C) MONTHLY TUITION GENERATION  (POST /tuition/generate-monthly, 2453)
+   For each Active student: skip if a 'tuition' invoice already exists for billingMonth.
+   Amount priority: (1) matching StudentFeeAssignment (customAmount ?? feeStructure.amount) minus
+   discountPercent; (2) class AdmissionPackage tuition feeItem. If <=0 skip.
+   Optional prorate: if admissionDate is in target month, amount * remainingDays/totalDays.
+   Creates Invoice type='tuition' due on dueDay; invoice item "Monthly Tuition - YYYY-MM".
+
+D) PAYMENT LOGIC + INVOICE STATUS  (POST /payments 3265)
+   newPaid = inv.paid + amount; status = paid if newPaid>=total else partial.
+   Creates Payment row + increments invoice (also likely creates LedgerEntry income — verify).
+   /invoices/from-package and /invoices/simple build invoices (+optional initial payment).
+
+E) ADMISSION  (POST /students/admission 3065)
+   - Requires packageId; copies pkg class name/section; admission number auto "ADM-00000" or manual (regex 1-5 digits -> ADM-xxxxx); rejects duplicate roll in class/section.
+   - Creates Student (status pending_payment), upserts Guardian, creates Invoice type=admission
+     with all package fee items; all in one $transaction.
+
+F) PROMOTION / GRADUATE / RETAIN  (POST /students/promote 943)
+   - Only Active students; promote re-assigns roll per destination class/section (max+1) and
+     writes a StudentAcademicRecord (status Promoted). Graduate sets status and writes record.
+     Retain bumps year and writes Retained record. All in one transaction.
+
+G) ATTENDANCE MATRIX  (GET /attendance/matrix 2575)
+   Month grid, per-student records mapped to P/A/L/LV letters, daily totals, percentage of days present.
+
+H) STORE PROFIT  (GET /store/reports/profit 2873)
+   Aggregates sales/purchases per product: revenue, sold qty, profit (likely revenue - cost). Read source.
+
+I) FINANCE SUMMARY  (GET /finance/reports/summary 3582)
+   totalIncome/totalExpense/netProfit from LedgerEntry; grouped by category.
+
+J) AUTH (INSECURE/SIMPLIFIED)
+   - Admin: password must equal 'fresh_password_2026' OR match bcrypt hash (only for admins w/ bcrypt)
+   - Teacher: password may equal employeeId, email prefix, or ANY of 'password'/'test'/'123456'
+     (hardcoded test passwords — do NOT treat as secure)
+   - Student: via StudentLogin.password plaintext compare, or fallback accepts ANY password for a
+     student matched by email/admissionNo (very insecure)
+   - JWT secret falls back to 'fallback-secret'; 7-day expiry.
+
+K) INSTITUTE PROFILE
+   /institute requires ?email; auto-creates default row on GET if missing; upserts on POST.
+
+================================================================================
+10. CROSS-FEATURE DEPENDENCIES
+================================================================================
+RESULTS/MARKS depends on: Students, Classes, Subjects, Exams, ExamSchedule(full marks),
+                            GradingSystem, ExamType
+TUITION/FEES depends on: Students, FeeStructure, StudentFeeAssignment, AdmissionPackage,
+                            FeeParticular, Invoices, Payments, SchoolClass
+PAYROLL depends on: Teachers, Staff, TeacherSalary, StaffSalary
+ATTENDANCE depends on: Students, SchoolClass, Attendance, TeacherAttendance
+PROMOTION depends on: Students, StudentAcademicRecord, SchoolClass
+ADMISSION depends on: AdmissionPackage, SchoolClass, Student, Guardian, Invoice
+FINANCE depends on: Invoices, Payments, LedgerEntry, SchoolExpense, Salaries, FeeStructure
+STORE depends on: Products, Suppliers, Purchases, Sales, Students (cash sales to students)
+TEACHER PORTAL depends on: TeacherPermission, ClassSubjectTeacher, Students, Attendance, Results, Exams
+STUDENT PORTAL depends on: Students, Attendance, Results, ExamSchedule, Invoices, StudentFee
+CLASS ROUTINE depends on: SchoolClass, Subject, Teacher, RoutineEntry, RoutinePeriod
+
+================================================================================
+11. TASK → RELEVANT FILES  (quick lookup)
+================================================================================
+"Add publish-result button on Result page"
+  -> src/app/(app)/results/page.tsx
+  -> src/lib/api.ts (add api method)
+  -> src/index.ts (add/verify /results endpoint + auth)
+  -> prisma schema Result model
+"Result calculation / grading"
+  -> src/index.ts POST /results/bulk + buildExamReport + /grading
+  -> prisma Result, GradingSystem, ExamType
+  -> src/app/(app)/exams/marks-entry/page.tsx, settings/grading
+"Marksheet / merit list / report card"
+  -> src/app/(app)/exams/marksheet-generator, merit-list, tools/report-card-generator
+  -> src/components/tools/report-card-generator-form.tsx, src/app/actions.ts, ai flow
+"Monthly tuition / fee generation"
+  -> src/index.ts /tuition/generate-monthly, /tuition/structures, /tuition/assignments
+  -> prisma FeeStructure, StudentFeeAssignment, Invoice
+  -> src/app/(app)/finance/fees/*
+"Student promotion / archive"
+  -> src/index.ts /students/promote, /promotions/archive, /students/:id/history
+  -> prisma StudentAcademicRecord
+  -> src/app/(app)/promotion/*
+"Payroll / teacher salary"
+  -> src/index.ts /salaries*, /staff*
+  -> prisma TeacherSalary, StaffSalary, Teacher, Staff
+  -> src/app/(app)/finance/payroll/*
+"Delete a school expense"
+  -> src/index.ts /expenses (DELETE), prisma SchoolExpense
+  -> src/app/(app)/finance/expenses/page.tsx
+"Change student portal results"
+  -> src/index.ts /student/results; src/app/student/results/page.tsx; src/lib/student-api.ts
+"Edit teacher permissions"
+  -> src/index.ts /permissions; prisma TeacherPermission; src/app/(app)/settings/permissions
+"Class routine timetable"
+  -> src/index.ts /class-routine/*; prisma RoutineEntry/RoutinePeriod;
+     src/app/(app)/academics/class-routine-management, components/routine-management
+"Admission flow"
+  -> src/index.ts /students/admission, /admission-packages; prisma AdmissionPackage, Student, Guardian, Invoice;
+     src/app/(app)/students/add, fees/admission-setup
+"Bulk import students"
+  -> src/app/(app)/students/bulk-import/page.tsx (client) + src/index.ts /students (POST create)
+"Institute name/logo"
+  -> src/index.ts /institute; prisma Institute; src/hooks/use-institute.ts;
+     src/app/(app)/settings/institute, components/settings/institute-profile-form
+"Ai report card remarks"
+  -> src/app/actions.ts, src/ai/flows/ai-report-card-remarks-generator-flow.ts,
+     src/components/tools/report-card-generator-form.tsx, tools page
+"Login / auth behavior"
+  -> src/index.ts /auth/login; src/middleware/auth.ts; src/context/AuthContext.tsx;
+     src/app/(auth)/login/page.tsx; src/components/ProtectedRoute.tsx
+
+================================================================================
+12. FRONTEND PAGES & COMPONENTS MAP (the src/app routes + key comps)
+================================================================================
+Admin layout group: src/app/(app)/
+  dashboard/, academics/{classes,subjects,class-routine-management}, announcements/,
+  attendance/{,reports}, class-schedule/, exams/{,admit-card-generator,attendance-reports,
+    exam-schedule,exam-seat-plan,marks-entry,marksheet-generator,merit-list,routine-generator,
+    seat-plan-generator}, fees/{admission-setup,payments/[invoiceId]}, finance/{,expenses,fees{,assignments,
+    invoices,reports},income,payroll/{payments,salaries,staff-salaries},reports,transactions},
+  profile/, promotion/{,archive}, results/{,class,student/[id]}, settings/{,class-subjects,fees,
+    grading,institute,permissions,users}, store/{inventory,products,purchases,reports,sales,suppliers},
+  students/{,add,admission-letter,bulk-import,id-cards,manage-login,print-list,[id]{,id-card}},
+  teachers/{,manage-login,[id]}, tools/report-card-generator
+Auth group: (auth)/login
+Home: page.tsx (marketing)
+Student portal: src/app/student/{dashboard,attendance,exam-schedule,fees,messages,notices,profile,results,settings,assignments}
+Teacher portal: src/app/teacher/{dashboard,attendance,marks-entry}
+Shared component dirs: src/components/{academics,class-routine,dashboard,exam-seat-plan,finance,
+  home-page,id-card,layout,printing,promotion,reports,routine-management,settings,students,teacher,
+  teachers,tools,ui}
+
+================================================================================
+13. MOCK / LEGACY / UNUSED CODE  (do NOT delete; flag only)
+================================================================================
+- src/lib/db.ts  (JSON-file "database") -> Only imported by src/lib/checkRole.ts (legacy Next
+  server auth helper, NOT used by the app pages). App pages use src/lib/api.ts. Appears LEGACY.
+- src/lib/checkRole.ts  -> Legacy Next.js-side role guard referencing db.ts; appears unused by app
+  (search: only defined). LIKELY UNUSED.
+- src/lib/data.ts  (hardcoded mock students/teachers/...) -> used only by the static
+  announcements page (src/app/(app)/announcements/page.tsx). The announcements feature has no
+  backend CRUD — it is effectively a static mock page.
+- src/lib/mock-data.ts, placeholder-images.ts/json -> mock/sample assets. UNCERTAIN if used.
+- data/*.json  (JSON seed/mock data files) -> written by legacy src/lib/db.ts. Not used by core flow.
+- dash/  -> separate React/Vite prototype (its own package? no package.json found — a static export
+  referencing components). Appears to be an OLD/unused prototype of the admin dashboard.
+- uxpilot-react-export-1786622651203/ -> old Vite export artifact. UNUSED.
+- School-Management-system/prisma/schema.prisma -> frontend copy; diverges from backend schema and is
+  NOT authoritative. Verify before relying on it.
+- server/ (frontend) -> EMPTY directory.
+- Some portal endpoints return static empty arrays: /student/notices, /student/messages,
+  /student/assignments (backend returns hardcoded []). Announcements/messages/assignments have no
+  real backend storage.
+
+================================================================================
+14. POTENTIAL DUPLICATE / OVERLAPPING LOGIC
+================================================================================
+- AUTH MIDDLEWARE DUPLICATED: src/auth.ts AND src/middleware/auth.ts are IDENTICAL copies.
+  src/index.ts imports from './auth' (src/auth.ts). Keep both in sync or standardize.
+- RESULT SAVE PATHS: Admin uses POST /results/bulk (server computes grade); Teacher uses
+  POST /teacher/marks (client sends grade/gp, server just stores). Two code paths for saving results
+  that could drift.
+- GRADE CALC: appears only server-side (results/bulk + teacher/marks receives from client). Verify
+  no frontend duplicate exists before editing.
+- CLASS ROUTINE ROOMS: backend returns hardcoded mock room list (no Room model) while
+  src/lib/mock-data.ts also defines room-like sample data (UNCERTAIN usage).
+- STUDENT FEES: two models — StudentFee (manual /fees*) and Invoice (tuition/admission via /tuition,
+  /invoices). Student portal sums StudentFee for "fee status" which may not reflect Invoice-based
+  tuition. Verify before changing fee reporting.
+
+================================================================================
+15. ARCHITECTURAL RULES (observed patterns — follow them)
+================================================================================
+Backend:
+- Monolithic: routes + controllers + services all inline in src/index.ts. When adding features,
+  append handlers there (or consider extracting, but don't break existing).
+- Validation with zod schemas inside each handler (safeParse -> 400 on fail).
+- Prisma is the sole DB access layer (PrismaClient). Money fields are Prisma.Decimal; the app
+  serializes Decimal to numbers globally (see top of src/index.ts).
+- Auth: authMiddleware (JWT) then checkRole([...]) for protected routes.
+- Images: base64 photos converted to Cloudinary URLs by a global body middleware before handlers.
+Frontend:
+- All API calls go through src/lib/api.ts (admin/teacher) or src/lib/student-api.ts (student portal).
+- Data fetching is client-side ('use client' + useEffect/useState) toward the REST API.
+- UI components via src/components/ui/* (shadcn). Feature pages import from @/components/feature.
+- Auth via AuthContext + localStorage token/user.
+- i18n via LanguageContext (en/bn). Some pages still have hardcoded strings.
+
+================================================================================
+16. IMPORTANT CONFIGURATION / ENVIRONMENT
+================================================================================
+Backend (.env): DATABASE_URL, DIRECT_URL (postgres). Runtime also reads JWT_SECRET (fallback),
+ CORS_ORIGINS, CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET, PORT (default 4000).
+Frontend (.env): DATABASE_URL (unused at runtime by core flow). NEXT_PUBLIC_API_URL (base for REST;
+ dev defaults to '/api' proxied to http://127.0.0.1:4000 via next.config rewrites).
+ NEXT_PUBLIC_DOCS_URL used by src/lib/docs-service.ts.
+Deploy notes: DEPLOYMENT_FIX_GUIDE.md, RAILWAY_ENV_SETUP.md in frontend; Railway (backend), Vercel (frontend).
+
+================================================================================
+17. KNOWN ISSUES / WARNINGS
+================================================================================
+WARNING: Auth is insecure by design (plaintext/hardcoded passwords, teacher/admin test passwords,
+ student fallback accepts any password). Treat as non-production unless hardened.
+WARNING: Many data-mutating routes have NO auth middleware (fees, classes, subjects, attendance,
+ exams, tuition, store, finance, grading, invoices, payments, students/logins...). Any frontend can
+ call them.
+WARNING: src/index.ts is ~5,475 lines — large edits risk merge/typo issues.
+WARNING: announcements/messages/assignments are mock-only (no real backend storage).
+WARNING: frontend prisma/schema.prisma diverges from backend canonical schema.
+WARNING: /class-routine/rooms uses hardcoded data (rooms not in DB).
+Log files (backend.log, backend-err.log, frontend*.log, ts_errors.txt) exist at repo root — useful
+ for diagnosing past runtime/type errors but not part of the app.
+
+================================================================================
+18. AI USAGE INSTRUCTIONS
+================================================================================
+IMPORTANT:
+Before modifying the project:
+1. Read CODEBASE_MAP.txt first.
+2. Identify the feature involved in the user's request.
+3. Use the FEATURE LOOKUP INDEX and TASK → RELEVANT FILES sections.
+4. Identify the smallest set of files required.
+5. Read those files in detail.
+6. Follow their existing architecture and patterns.
+7. Check related dependencies before modifying shared/high-impact files
+   (esp. src/lib/api.ts, src/index.ts, prisma/schema.prisma, src/middleware/auth.ts, AuthContext).
+8. Do NOT scan the entire repository unless:
+   - CODEBASE_MAP.txt is outdated,
+   - the requested feature cannot be located,
+   - the change crosses multiple undocumented modules,
+   - or the task explicitly requires a full-codebase analysis.
+9. Do not create duplicate functionality if an existing implementation can be reused.
+10. Do not modify unrelated files.
+11. After making significant architectural changes, update CODEBASE_MAP.txt.
+12. When uncertain about a file's purpose or relationship, inspect the actual source code
+    instead of guessing.
+
+================================================================================
+END OF CODEBASE MAP
+================================================================================
