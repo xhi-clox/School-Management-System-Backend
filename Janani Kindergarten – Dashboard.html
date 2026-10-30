@@ -1,0 +1,1558 @@
+ im<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Janani Kindergarten – Dashboard</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        --bg: #0b1030;
+        --glow: rgba(0, 117, 255, 0.55);
+        --glass: linear-gradient(
+          127deg,
+          rgba(9, 14, 48, 0.94) 19%,
+          rgba(11, 17, 58, 0.55) 76%
+        );
+        --edge: rgba(255, 255, 255, 0.08);
+        --ink: #fff;
+        --mut: #a0aec0;
+        --brand: #0075ff;
+        --cyan: #21d4fd;
+        --good: #01b574;
+        --bad: #f0616d;
+        --tile: rgba(3, 8, 34, 0.6);
+        --side: rgba(8, 13, 45, 0.85);
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme="dark"]) {
+          --bg: #e9eefb;
+          --glow: rgba(0, 117, 255, 0.22);
+          --glass: linear-gradient(
+            127deg,
+            #fff 19%,
+            rgba(255, 255, 255, 0.7) 76%
+          );
+          --edge: rgba(20, 30, 80, 0.08);
+          --ink: #111a3d;
+          --mut: #5b6789;
+          --tile: rgba(0, 117, 255, 0.07);
+          --side: rgba(255, 255, 255, 0.9);
+          --bad: #d1364a;
+        }
+      }
+      :root[data-theme="light"] {
+        --bg: #e9eefb;
+        --glow: rgba(0, 117, 255, 0.22);
+        --glass: linear-gradient(
+          127deg,
+          #fff 19%,
+          rgba(255, 255, 255, 0.7) 76%
+        );
+        --edge: rgba(20, 30, 80, 0.08);
+        --ink: #111a3d;
+        --mut: #5b6789;
+        --tile: rgba(0, 117, 255, 0.07);
+        --side: rgba(255, 255, 255, 0.9);
+        --bad: #d1364a;
+      }
+      html {
+        scroll-padding-top: env(safe-area-inset-top, 0px);
+        background: var(--bg);
+      }
+      *,
+      *:before,
+      *:after {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font:
+          14px/1.5 "Plus Jakarta Sans",
+          "Hind Siliguri",
+          system-ui,
+          sans-serif;
+        background:
+          radial-gradient(
+            ellipse 80% 50% at 60% 105%,
+            var(--glow),
+            transparent 70%
+          ),
+          radial-gradient(
+            ellipse 60% 40% at 10% -10%,
+            rgba(33, 212, 253, 0.12),
+            transparent
+          ),
+          var(--bg);
+        -webkit-font-smoothing: antialiased;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+      }
+      :focus-visible {
+        outline: 2px solid var(--cyan);
+        outline-offset: 2px;
+      }
+      .app {
+        display: grid;
+        grid-template-columns: 240px 1fr;
+        gap: 20px;
+        padding: 20px;
+        max-width: 1500px;
+        margin: 0 auto;
+      }
+      .side {
+        position: sticky;
+        top: 20px;
+        height: calc(100vh - 40px);
+        border-radius: 20px;
+        background: var(--side);
+        border: 1px solid var(--edge);
+        padding: 22px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        backdrop-filter: blur(20px);
+      }
+      .brand {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 0 8px 18px;
+        border-bottom: 1px solid var(--edge);
+        margin-bottom: 12px;
+      }
+      .brand i {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: var(--brand);
+        display: grid;
+        place-items: center;
+        font-style: normal;
+        font-size: 16px;
+      }
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 0;
+        background: none;
+        text-align: left;
+        color: var(--mut);
+        font-weight: 600;
+        font-size: 13px;
+        width: 100%;
+      }
+      .nav b {
+        width: 30px;
+        height: 30px;
+        border-radius: 10px;
+        background: var(--tile);
+        display: grid;
+        place-items: center;
+        font-size: 14px;
+        font-weight: 400;
+      }
+      .nav:hover {
+        color: var(--ink);
+      }
+      .nav.on {
+        background: var(--tile);
+        color: var(--ink);
+        box-shadow: 0 0 0 1px var(--edge);
+      }
+      .nav.on b {
+        background: var(--brand);
+      }
+      .grp {
+        font-size: 12px;
+        font-weight: 700;
+        padding: 14px 12px 4px;
+      }
+      .help {
+        margin-top: auto;
+        border-radius: 16px;
+        padding: 16px;
+        background: linear-gradient(135deg, #0075ff, #7a4dff 70%, #21d4fd);
+        color: #fff;
+      }
+      .help b {
+        display: block;
+        font-size: 14px;
+      }
+      .help p {
+        font-size: 12px;
+        opacity: 0.85;
+        margin: 2px 0 10px;
+      }
+      .help button {
+        width: 100%;
+        border: 0;
+        border-radius: 10px;
+        padding: 8px;
+        background: rgba(6, 10, 40, 0.75);
+        color: #fff;
+        font-weight: 700;
+        font-size: 11px;
+      }
+      main {
+        display: grid;
+        gap: 20px;
+        min-width: 0;
+        align-content: start;
+      }
+      .bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .crumb {
+        font-size: 12px;
+        color: var(--mut);
+      }
+      .crumb + h1 {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .tools {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .search {
+        background: var(--tile);
+        border: 1px solid var(--edge);
+        border-radius: 14px;
+        padding: 8px 14px;
+        color: var(--ink);
+        font: inherit;
+        font-size: 13px;
+        width: 190px;
+      }
+      .ib {
+        border: 1px solid var(--edge);
+        background: var(--tile);
+        border-radius: 12px;
+        height: 36px;
+        padding: 0 12px;
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .card {
+        background: var(--glass);
+        border: 1px solid var(--edge);
+        border-radius: 20px;
+        padding: 20px;
+        backdrop-filter: blur(20px);
+        min-width: 0;
+      }
+      .card h2 {
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .sub {
+        color: var(--mut);
+        font-size: 12px;
+      }
+      .up {
+        color: var(--good);
+        font-weight: 700;
+      }
+      .dn {
+        color: var(--bad);
+        font-weight: 700;
+      }
+      .g {
+        display: grid;
+        gap: 20px;
+      }
+      .k4 {
+        grid-template-columns: repeat(4, 1fr);
+      }
+      .r1 {
+        grid-template-columns: 1.25fr 1.2fr 1fr;
+      }
+      .r2 {
+        grid-template-columns: 1.6fr 1fr;
+      }
+      .r3 {
+        grid-template-columns: 1.6fr 1fr;
+      }
+      .kpi {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 16px 20px;
+      }
+      .kpi p {
+        font-size: 12px;
+        color: var(--mut);
+        font-weight: 600;
+      }
+      .kpi h3 {
+        font-size: 19px;
+        font-weight: 800;
+        margin-top: 2px;
+      }
+      .kpi h3 small {
+        font-size: 12px;
+        margin-left: 6px;
+      }
+      .ico {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        background: var(--brand);
+        display: grid;
+        place-items: center;
+        font-size: 19px;
+        box-shadow: 0 6px 18px -6px var(--brand);
+        flex: none;
+      }
+      .ring-card {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 18px;
+      }
+      .ring {
+        position: relative;
+        width: 64px;
+        height: 64px;
+        flex: none;
+      }
+      .ring svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+        filter: drop-shadow(0 0 8px rgba(0, 117, 255, 0.45));
+      }
+      .ring div {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        line-height: 1.05;
+      }
+      .ring b {
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .ring span {
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: var(--mut);
+        margin-top: 2px;
+      }
+      .rc {
+        min-width: 0;
+      }
+      .rc h3 {
+        font-size: 24px;
+        font-weight: 800;
+        line-height: 1;
+      }
+      .rc p {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--mut);
+        margin: 3px 0 4px;
+      }
+      .dots {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--mut);
+      }
+      .dots span {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+      .dots i {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+      }
+      .dots .d1 {
+        background: var(--brand);
+      }
+      .dots .d2 {
+        background: var(--mut);
+        opacity: 0.5;
+      }
+      .hero {
+        position: relative;
+        overflow: hidden;
+        min-height: 250px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        background:
+          radial-gradient(
+            circle at 78% 40%,
+            rgba(0, 117, 255, 0.55),
+            transparent 55%
+          ),
+          linear-gradient(135deg, #0a1a6a, #050a30);
+      }
+      .hero .t {
+        position: relative;
+        z-index: 1;
+        color: #fff;
+      }
+      .hero h2 {
+        font-size: 24px;
+        margin: 2px 0 8px;
+      }
+      .hero p {
+        color: #c3cdea;
+        max-width: 190px;
+      }
+      .hero .go {
+        position: relative;
+        z-index: 1;
+        border: 0;
+        background: none;
+        color: #fff;
+        font-weight: 700;
+        font-size: 12px;
+        text-align: left;
+        padding: 0;
+      }
+      .hero svg {
+        opacity: 1;
+      }
+      .inst {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        width: 100%;
+        text-align: left;
+        padding: 10px;
+        margin-bottom: 8px;
+        border-radius: 14px;
+        background: var(--tile);
+        border: 1px solid var(--edge);
+      }
+      .inst:hover {
+        box-shadow: 0 0 0 1px var(--brand);
+      }
+      .inst svg {
+        width: 34px;
+        height: 34px;
+        flex: none;
+      }
+      .inst span {
+        min-width: 0;
+        flex: 1;
+      }
+      .inst b {
+        display: block;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+      .inst em {
+        font-style: normal;
+        font-size: 11px;
+        color: var(--mut);
+      }
+      .inst u {
+        text-decoration: none;
+        color: var(--mut);
+        font-size: 13px;
+      }
+      .pill-i {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        padding: 3px 12px 3px 3px;
+        border-radius: 99px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #fff;
+        margin-bottom: 12px;
+      }
+      .pill-i svg {
+        width: 24px;
+        height: 24px;
+      }
+      .hero > svg {
+        position: absolute;
+        right: 0;
+        top: 0;
+        height: 100%;
+        width: 64%;
+      }
+      .brand {
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+        padding-bottom: 14px;
+      }
+
+      .gauge {
+        position: relative;
+        width: 100%;
+        max-width: 220px;
+        margin: 8px auto 0;
+      }
+      .gauge svg {
+        width: 100%;
+        display: block;
+      }
+      .gauge .c {
+        position: absolute;
+        inset: auto 0 12% 0;
+        text-align: center;
+      }
+      .gauge .c b {
+        font-size: 32px;
+        font-weight: 800;
+        line-height: 1;
+      }
+      .gauge .c span {
+        display: block;
+        font-size: 12px;
+        color: var(--mut);
+      }
+      .tiles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      .tile {
+        background: var(--tile);
+        border-radius: 14px;
+        padding: 12px 14px;
+      }
+      .tile p {
+        font-size: 12px;
+        color: var(--mut);
+      }
+      .tile b {
+        font-size: 16px;
+      }
+      .refer {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        align-items: center;
+      }
+      .refer .tiles {
+        grid-template-columns: 1fr;
+        margin: 0;
+      }
+      .chart svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      .chart text {
+        fill: var(--mut);
+        font-size: 11px;
+        font-family: inherit;
+      }
+      .seg {
+        display: inline-flex;
+        gap: 4px;
+        margin-top: 8px;
+      }
+      .seg button {
+        border: 1px solid var(--edge);
+        background: var(--tile);
+        border-radius: 10px;
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--mut);
+      }
+      .seg button[aria-pressed="true"] {
+        background: var(--brand);
+        color: #fff;
+        border-color: transparent;
+      }
+      .bars {
+        background: linear-gradient(
+          180deg,
+          rgba(0, 117, 255, 0.9),
+          rgba(3, 8, 34, 0.9)
+        );
+        border-radius: 16px;
+        padding: 14px 12px 8px;
+        margin-bottom: 14px;
+      }
+      .bars svg {
+        width: 100%;
+        display: block;
+      }
+      .bars text {
+        fill: #dbe6ff;
+        font-size: 11px;
+        font-family: inherit;
+      }
+      .mini {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .mini div {
+        font-size: 12px;
+        color: var(--mut);
+      }
+      .mini b {
+        display: block;
+        font-size: 15px;
+        color: var(--ink);
+      }
+      .mini i {
+        display: block;
+        height: 3px;
+        border-radius: 3px;
+        background: var(--brand);
+        margin-top: 5px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      th {
+        text-align: left;
+        color: var(--mut);
+        font-size: 12px;
+        font-weight: 600;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--edge);
+      }
+      td {
+        padding: 12px 0;
+        border-bottom: 1px solid var(--edge);
+        font-weight: 600;
+      }
+      tr:last-child td {
+        border: 0;
+      }
+      .pb {
+        height: 4px;
+        background: var(--edge);
+        border-radius: 4px;
+        overflow: hidden;
+        width: 110px;
+        margin-top: 4px;
+      }
+      .pb i {
+        display: block;
+        height: 100%;
+        background: var(--brand);
+      }
+      .tl {
+        list-style: none;
+        margin: 14px 0 0;
+        padding: 0;
+      }
+      .tl li {
+        display: flex;
+        gap: 12px;
+        padding-bottom: 16px;
+        position: relative;
+      }
+      .tl li:not(:last-child):before {
+        content: "";
+        position: absolute;
+        left: 11px;
+        top: 26px;
+        bottom: 2px;
+        width: 1px;
+        background: var(--edge);
+      }
+      .dot {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: var(--tile);
+        border: 1px solid var(--edge);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        flex: none;
+        color: var(--cyan);
+      }
+      .tl b {
+        display: block;
+        font-size: 13px;
+      }
+      .tl small {
+        color: var(--mut);
+        font-size: 11px;
+      }
+      .att {
+        display: flex;
+        flex-direction: column;
+        padding: 16px;
+      }
+      .att h2 {
+        font-size: 15px;
+      }
+      .att-top {
+        display: flex;
+        gap: 10px;
+        align-items: stretch;
+        margin-top: 12px;
+      }
+      .ringA {
+        position: relative;
+        width: 84px;
+        height: 84px;
+        flex: none;
+        align-self: center;
+      }
+      .ringA svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .ringA .c {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+      .ringA b {
+        font-size: 18px;
+        font-weight: 800;
+        line-height: 1.1;
+      }
+      .ringA span {
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: var(--mut);
+      }
+      .wk2 {
+        flex: 1;
+        min-width: 0;
+        background: var(--tile);
+        border: 1px solid var(--edge);
+        border-radius: 14px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+      }
+      .wh {
+        display: flex;
+        justify-content: space-between;
+        gap: 2px 8px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      .wh span {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        color: var(--mut);
+      }
+      .wh em {
+        font-style: normal;
+        font-size: 10.5px;
+        font-weight: 700;
+        color: var(--bad);
+      }
+      .wb {
+        flex: 1;
+        display: flex;
+        align-items: flex-end;
+        gap: 6px;
+        margin-top: 8px;
+        min-height: 58px;
+      }
+      .wb > div {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        align-items: stretch;
+        gap: 5px;
+        height: 100%;
+      }
+      .wb i {
+        display: block;
+        border-radius: 5px;
+        background: linear-gradient(90deg, #0075ff, #5a8dff);
+      }
+      .wb i.hi {
+        background: linear-gradient(180deg, #5aa2ff, #0075ff);
+        border-radius: 7px;
+      }
+      .wb span {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--mut);
+        text-align: center;
+      }
+      .at3 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .at3 > div {
+        background: var(--tile);
+        border: 1px solid var(--edge);
+        border-radius: 12px;
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+      }
+      .at3 i {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        margin-bottom: 3px;
+      }
+      .at3 b {
+        font-size: 18px;
+        font-weight: 800;
+        line-height: 1.1;
+      }
+      .at3 span {
+        font-size: 11px;
+        color: var(--mut);
+        font-weight: 500;
+      }
+      @media (max-width: 560px) {
+        .att-top {
+          flex-direction: column;
+        }
+      }
+      #toast {
+        position: fixed;
+        left: 50%;
+        bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+        transform: translate(-50%, 20px);
+        background: var(--brand);
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 12px;
+        opacity: 0;
+        pointer-events: none;
+        transition: 0.25s;
+        font-weight: 600;
+      }
+      #toast.on {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+      @media (max-width: 1100px) {
+        .k4 {
+          grid-template-columns: 1fr 1fr;
+        }
+        .r1 {
+          grid-template-columns: 1fr 1fr;
+        }
+        .r1 > .hero {
+          grid-column: 1/-1;
+        }
+        .r2,
+        .r3 {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 860px) {
+        .app {
+          grid-template-columns: 1fr;
+          padding: 12px;
+        }
+        .side {
+          position: static;
+          height: auto;
+          flex-direction: row;
+          overflow-x: auto;
+          padding: 10px;
+        }
+        .brand,
+        .grp,
+        .help {
+          display: none;
+        }
+        .nav {
+          width: auto;
+          white-space: nowrap;
+        }
+        .search {
+          display: none;
+        }
+      }
+      @media (max-width: 560px) {
+        .k4,
+        .r1 {
+          grid-template-columns: 1fr;
+        }
+        .refer {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <linearGradient id="cg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#21d4fd" />
+          <stop offset="1" stop-color="#0075ff" />
+        </linearGradient>
+        <symbol id="crest" viewBox="0 0 40 40">
+          <rect width="40" height="40" rx="11" fill="#fff" />
+          <path
+            d="M20 6l11 4v9c0 8-5 13-11 15C14 32 9 27 9 19v-9z"
+            fill="url(#cg)"
+          />
+          <path
+            d="M14 20l6-5 6 5M16 25h8"
+            stroke="#fff"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            fill="none"
+          />
+        </symbol>
+      </defs>
+    </svg>
+    <div class="app">
+      <aside class="side" aria-label="Main navigation">
+        <button class="inst" data-t="Switch institution">
+          <svg aria-hidden="true"><use href="#crest" /></svg
+       
+        </div>
+      </aside>
+
+      <main>
+        
+
+        <section class="g k4" aria-label="Key numbers">
+          <div class="card ring-card">
+            <div class="ring">
+              <svg viewBox="0 0 100 100" aria-hidden="true">
+                <defs>
+                  <linearGradient id="rg1" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#0075ff" />
+                    <stop offset="1" stop-color="#21d4fd" />
+                  </linearGradient>
+                </defs>
+                <circle
+                  cx="50"
+                  cy="50"
+                  r="41"
+                  fill="none"
+                  stroke="url(#rg1)"
+                  stroke-width="12"
+                />
+              </svg>
+              <div><b>100%</b><span>ACTIVE</span></div>
+            </div>
+            <div class="rc">
+              <h3>112</h3>
+              <p>Total Students</p>
+              <div class="dots">
+                <span><i class="d1"></i>112 active</span
+                ><span><i class="d2"></i>0 inactive</span>
+              </div>
+            </div>
+          </div>
+          <div class="card ring-card">
+            <div class="ring">
+              <svg viewBox="0 0 100 100" aria-hidden="true">
+                <defs>
+                  <linearGradient id="rg2" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#0075ff" />
+                    <stop offset="1" stop-color="#21d4fd" />
+                  </linearGradient>
+                </defs>
+                <circle
+                  cx="50"
+                  cy="50"
+                  r="41"
+                  fill="none"
+                  stroke="url(#rg2)"
+                  stroke-width="12"
+                />
+              </svg>
+              <div><b>100%</b><span>STAFF</span></div>
+            </div>
+            <div class="rc">
+              <h3>1</h3>
+              <p>Total Teachers</p>
+              <div class="dots">
+                <span><i class="d1"></i>1 active</span
+                ><span><i class="d2"></i>0 inactive</span>
+              </div>
+            </div>
+          </div>
+          <div class="card kpi">
+            <div>
+              <p>Collected today</p>
+              <h3>৳0 <small class="dn">0%</small></h3>
+            </div>
+            <div class="ico">৳</div>
+          </div>
+          <div class="card kpi">
+            <div>
+              <p>Outstanding fees</p>
+              <h3>৳60,780</h3>
+            </div>
+            <div class="ico">⚠</div>
+          </div>
+        </section>
+
+        <section class="g r1">
+          <div class="card hero">
+            <div class="t">
+              <span class="pill-i"
+                ><svg aria-hidden="true"><use href="#crest" /></svg>Janani
+                Kindergarten</span
+              >
+              <p class="sub" style="color: #c3cdea">Welcome back,</p>
+              <h2>Jane Admin</h2>
+              <p>Attendance hasn’t been taken yet today.</p>
+            </div>
+            <button class="go" data-t="Take attendance">
+              Take attendance →
+            </button>
+            <svg viewBox="0 0 260 250" aria-hidden="true">
+              <defs>
+                <linearGradient id="t1" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#7fe6ff" />
+                  <stop offset="1" stop-color="#0075ff" />
+                </linearGradient>
+                <linearGradient id="t2" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#0a5be0" />
+                  <stop offset="1" stop-color="#0a2a7a" />
+                </linearGradient>
+                <linearGradient id="t3" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0" stop-color="#cfefff" />
+                  <stop offset="1" stop-color="#5ab8ff" />
+                </linearGradient>
+                <radialGradient id="t4" cx="35%" cy="30%" r="75%">
+                  <stop offset="0" stop-color="#9beaff" />
+                  <stop offset=".6" stop-color="#1a7bff" />
+                  <stop offset="1" stop-color="#0a2a9a" />
+                </radialGradient>
+                <filter id="gl" x="-30%" y="-30%" width="160%" height="160%">
+                  <feGaussianBlur stdDeviation="6" result="b" />
+                  <feMerge>
+                    <feMergeNode in="b" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
+              <ellipse
+                cx="135"
+                cy="222"
+                rx="95"
+                ry="14"
+                fill="#21d4fd"
+                opacity=".25"
+                filter="url(#gl)"
+              />
+              <g filter="url(#gl)">
+                <path
+                  d="M42 196L135 218L228 196L228 186L135 208L42 186Z"
+                  fill="#0a2a7a"
+                />
+                <path d="M42 176L135 198L135 208L42 186Z" fill="url(#t2)" />
+                <path d="M228 176L135 198L135 208L228 186Z" fill="#0b3fb0" />
+                <path d="M46 150L135 170L135 198L46 176Z" fill="url(#t3)" />
+                <path d="M224 150L135 170L135 198L224 176Z" fill="#8fd4ff" />
+                <path
+                  d="M46 150C80 138 110 148 135 170M224 150C190 138 160 148 135 170"
+                  stroke="#fff"
+                  stroke-width="2"
+                  fill="none"
+                  opacity=".8"
+                />
+                <g stroke="#3a8bff" stroke-width="1.5" opacity=".7">
+                  <path
+                    d="M62 158L125 174M62 166L125 182M148 174L210 158M148 182L210 166"
+                  />
+                </g>
+              </g>
+              <g filter="url(#gl)">
+                <path
+                  d="M100 100L100 122Q135 142 170 122L170 100L135 116Z"
+                  fill="url(#t2)"
+                />
+                <path d="M135 52L216 82L135 112L54 82Z" fill="url(#t1)" />
+                <path d="M135 52L216 82L135 82Z" fill="#fff" opacity=".18" />
+                <path
+                  d="M135 82L206 88L206 122"
+                  stroke="#ffd166"
+                  stroke-width="3"
+                  fill="none"
+                  stroke-linecap="round"
+                />
+                <path d="M206 120l-4 22h8z" fill="#ffd166" />
+                <circle cx="135" cy="82" r="4" fill="#0a2a7a" />
+              </g>
+              <g filter="url(#gl)">
+                <circle cx="216" cy="28" r="20" fill="url(#t4)" />
+                <g fill="none" stroke="#cfefff" stroke-width="1.3" opacity=".8">
+                  <ellipse cx="216" cy="28" rx="8" ry="20" />
+                  <path d="M196 28h40M199 17h34M199 39h34" />
+                </g>
+              </g>
+              <g filter="url(#gl)" transform="rotate(35 34 100)">
+                <rect
+                  x="18"
+                  y="60"
+                  width="16"
+                  height="70"
+                  rx="3"
+                  fill="url(#t1)"
+                />
+                <path d="M18 60h16l-8-16z" fill="#ffd166" />
+                <rect
+                  x="18"
+                  y="126"
+                  width="16"
+                  height="10"
+                  rx="2"
+                  fill="#0a2a7a"
+                />
+              </g>
+              <g fill="#fff" filter="url(#gl)">
+                <path d="M70 40l3 8 8 3-8 3-3 8-3-8-8-3 8-3z" opacity=".9" />
+                <path d="M180 130l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" opacity=".8" />
+                <circle cx="245" cy="110" r="2.5" />
+                <circle cx="20" cy="200" r="2" />
+                <circle cx="150" cy="24" r="2" />
+              </g>
+            </svg>
+          </div>
+          <div class="card att">
+            <h2>Today’s attendance</h2>
+            <p class="sub">Monday, 28 September · 112 students</p>
+            <div class="att-top">
+              <div class="ringA">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="ra" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" stop-color="#0075ff" />
+                      <stop offset="1" stop-color="#21d4fd" />
+                    </linearGradient>
+                  </defs>
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="49"
+                    fill="none"
+                    stroke="var(--edge)"
+                    stroke-width="15"
+                  />
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="49"
+                    pathLength="100"
+                    fill="none"
+                    stroke="url(#ra)"
+                    stroke-width="15"
+                    stroke-linecap="round"
+                    stroke-dasharray="0.01 100"
+                    transform="rotate(-90 60 60)"
+                  />
+                </svg>
+                <div class="c"><b>0%</b><span>PRESENT</span></div>
+              </div>
+              <div class="wk2">
+                <div class="wh">
+                  <span>THIS WEEK</span><em>↓ 18% vs last week</em>
+                </div>
+                <div
+                  class="wb"
+                  role="img"
+                  aria-label="Attendance this week: only Friday has records"
+                >
+                  <div><i style="height: 4px"></i><span>Tue</span></div>
+                  <div><i style="height: 4px"></i><span>Wed</span></div>
+                  <div><i style="height: 4px"></i><span>Thu</span></div>
+                  <div>
+                    <i class="hi" style="height: 38px"></i><span>Fri</span>
+                  </div>
+                  <div><i style="height: 4px"></i><span>Mon</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="at3">
+              <div>
+                <i style="background: var(--brand)"></i><b>0</b
+                ><span>present</span>
+              </div>
+              <div>
+                <i style="background: var(--bad)"></i><b>0</b
+                ><span>absent</span>
+              </div>
+              <div>
+                <i style="background: #d99a2b"></i><b>0</b><span>late</span>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Fee collection</h2>
+            <p class="sub">Today’s progress</p>
+            <div class="refer" style="margin-top: 12px">
+              <div class="tiles">
+                <div class="tile">
+                  <p>Expected</p>
+                  <b>৳60,280</b>
+                </div>
+                <div class="tile">
+                  <p>Overdue</p>
+                  <b>৳59,780</b>
+                </div>
+              </div>
+              <div class="gauge" style="margin: 0">
+                <svg viewBox="0 0 200 200">
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="78"
+                    fill="none"
+                    stroke="var(--edge)"
+                    stroke-width="10"
+                    pathLength="100"
+                    stroke-dasharray="75 25"
+                    transform="rotate(135 100 100)"
+                    stroke-linecap="round"
+                  />
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="78"
+                    fill="none"
+                    stroke="var(--good)"
+                    stroke-width="10"
+                    pathLength="100"
+                    stroke-dasharray="1 99"
+                    transform="rotate(135 100 100)"
+                    stroke-linecap="round"
+                  />
+                </svg>
+                <div
+                  class="c"
+                  style="
+                    inset: 0;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                  "
+                >
+                  <span>Collected</span><b>0%</b><span>৳0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="g r2">
+          <div class="card chart">
+            <h2>Finance overview</h2>
+            <p class="sub">
+              <span class="up">৳13,666</span> net balance this year
+            </p>
+            <div class="seg" role="group" aria-label="Chart lines">
+              <button aria-pressed="true" data-s="both">Both</button
+              ><button aria-pressed="false" data-s="inc">Income</button
+              ><button aria-pressed="false" data-s="exp">Expenses</button>
+            </div>
+            <svg
+              id="area"
+              viewBox="0 0 640 260"
+              role="img"
+              aria-label="Income and expenses, January to September"
+            ></svg>
+          </div>
+          <div class="card">
+            <div class="bars">
+              <svg
+                id="wk"
+                viewBox="0 0 300 150"
+                role="img"
+                aria-label="Attendance this week"
+              ></svg>
+            </div>
+            <h2>Attendance this week</h2>
+            <p class="sub"><span class="dn">−18%</span> vs last week</p>
+            <div class="mini">
+              <div>Students<b>112</b><i></i></div>
+              <div>Present<b>0</b><i></i></div>
+              <div>Absent<b>0</b><i></i></div>
+              <div>Late<b>0</b><i></i></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="g r3">
+          <div class="card">
+            <h2>Fee payments by class</h2>
+            <p class="sub"><span class="up">●</span> 16+ payments this month</p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Class</th>
+                  <th>Level</th>
+                  <th>Payments</th>
+                  <th>Share</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Class 7-B</td>
+                  <td>Middle</td>
+                  <td>9</td>
+                  <td>
+                    <div class="pb"><i style="width: 56%"></i></div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Class 5-A</td>
+                  <td>Primary</td>
+                  <td>7</td>
+                  <td>
+                    <div class="pb"><i style="width: 44%"></i></div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <button class="ib" style="margin-top: 8px" data-t="Fees">
+              View all fees
+            </button>
+          </div>
+          <div class="card">
+            <h2>Recent activity</h2>
+            <p class="sub"><span class="up">●</span> 5 new admissions</p>
+            <ul class="tl" id="tl"></ul>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="toast" role="status"></div>
+    <script>
+      var M = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"],
+        I = [0, 0, 0, 0, 0, 0, 0, 0, 19688],
+        E = [0, 0, 0, 0, 0, 0, 0, 0, 6022];
+      var W = 640,
+        H = 260,
+        L = 44,
+        R = 14,
+        T = 12,
+        B = 28,
+        MX = 20000;
+      function X(i) {
+        return L + (i * (W - L - R)) / 8;
+      }
+      function Y(v) {
+        return T + (1 - v / MX) * (H - T - B);
+      }
+      function sm(a) {
+        var s = "M" + X(0) + " " + Y(a[0]);
+        for (var i = 1; i < a.length; i++) {
+          var cx = (X(i - 1) + X(i)) / 2;
+          s +=
+            " C" +
+            cx +
+            " " +
+            Y(a[i - 1]) +
+            " " +
+            cx +
+            " " +
+            Y(a[i]) +
+            " " +
+            X(i) +
+            " " +
+            Y(a[i]);
+        }
+        return s;
+      }
+      function draw(m) {
+        var s =
+          '<defs><linearGradient id="fa" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0075ff" stop-opacity=".55"/><stop offset="1" stop-color="#0075ff" stop-opacity="0"/></linearGradient><linearGradient id="fb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#21d4fd" stop-opacity=".3"/><stop offset="1" stop-color="#21d4fd" stop-opacity="0"/></linearGradient></defs>';
+        [0, 5000, 10000, 15000, 20000].forEach(function (g) {
+          s +=
+            '<line x1="' +
+            L +
+            '" x2="' +
+            (W - R) +
+            '" y1="' +
+            Y(g) +
+            '" y2="' +
+            Y(g) +
+            '" stroke="var(--edge)" stroke-dasharray="4 5"/><text x="' +
+            (L - 8) +
+            '" y="' +
+            (Y(g) + 4) +
+            '" text-anchor="end">৳' +
+            (g ? g / 1000 + "k" : 0) +
+            "</text>";
+        });
+        M.forEach(function (n, i) {
+          s +=
+            '<text x="' +
+            X(i) +
+            '" y="' +
+            (H - 8) +
+            '" text-anchor="middle">' +
+            n +
+            "</text>";
+        });
+        function ln(a, c, f) {
+          return (
+            '<path d="' +
+            sm(a) +
+            " L" +
+            X(8) +
+            " " +
+            Y(0) +
+            " L" +
+            X(0) +
+            " " +
+            Y(0) +
+            'Z" fill="url(#' +
+            f +
+            ')"/><path d="' +
+            sm(a) +
+            '" fill="none" stroke="' +
+            c +
+            '" stroke-width="3" stroke-linecap="round"/>'
+          );
+        }
+        if (m != "inc") s += ln(E, "#21d4fd", "fb");
+        if (m != "exp") s += ln(I, "#0075ff", "fa");
+        document.getElementById("area").innerHTML = s;
+      }
+      draw("both");
+      document.querySelectorAll(".seg button").forEach(function (b) {
+        b.onclick = function () {
+          document.querySelectorAll(".seg button").forEach(function (o) {
+            o.setAttribute("aria-pressed", o == b);
+          });
+          draw(b.dataset.s);
+        };
+      });
+      var D = ["Tue", "Wed", "Thu", "Fri", "Mon"],
+        V = [3, 3, 3, 100, 3],
+        w = "";
+      [0, 50, 100].forEach(function (g) {
+        var y = 120 - g * 0.95;
+        w +=
+          '<text x="6" y="' +
+          (y + 4) +
+          '">' +
+          g +
+          '</text><line x1="30" x2="295" y1="' +
+          y +
+          '" y2="' +
+          y +
+          '" stroke="rgba(255,255,255,.15)" stroke-dasharray="3 4"/>';
+      });
+      V.forEach(function (v, i) {
+        var x = 48 + i * 54,
+          h = v * 0.95;
+        w +=
+          '<rect x="' +
+          x +
+          '" y="' +
+          (120 - h) +
+          '" width="8" height="' +
+          h +
+          '" rx="4" fill="#fff"/><text x="' +
+          (x + 4) +
+          '" y="140" text-anchor="middle">' +
+          D[i] +
+          "</text>";
+      });
+      document.getElementById("wk").innerHTML = w;
+      var A = [
+        ["তানিশা নৌশা", "Class KG", "Sep 18, 10:43 PM"],
+        ["নাজিবা ইসলাম", "Class 1", "Sep 18, 10:43 PM"],
+        ["জাহিদুল ইসলাম জয়", "Class 5", "Sep 18, 10:04 PM"],
+        ["মো: আরিফ", "Class 5", "Sep 2, 11:59 PM"],
+        ["নাঈম", "Class 5", "Sep 2, 11:59 PM"],
+      ];
+      document.getElementById("tl").innerHTML = A.map(function (a) {
+        return (
+          '<li><span class="dot">+</span><div><b>' +
+          a[0] +
+          " joined " +
+          a[1] +
+          "</b><small>" +
+          a[2] +
+          "</small></div></li>"
+        );
+      }).join("");
+      var t = document.getElementById("toast"),
+        tm;
+      document.querySelectorAll("[data-t]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          t.textContent = "Opening: " + b.dataset.t;
+          t.classList.add("on");
+          clearTimeout(tm);
+          tm = setTimeout(function () {
+            t.classList.remove("on");
+          }, 1500);
+        });
+      });
+      document.getElementById("theme").onclick = function () {
+        var r = document.documentElement,
+          d = r.dataset.theme
+            ? r.dataset.theme == "dark"
+            : !matchMedia("(prefers-color-scheme:light)").matches;
+        r.dataset.theme = d ? "light" : "dark";
+      };
+    </script>
+  </body>
+</html>

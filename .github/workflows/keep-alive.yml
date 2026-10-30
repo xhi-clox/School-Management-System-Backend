@@ -1,0 +1,17 @@
+name: Render Keep-Alive
+
+on:
+  schedule:
+    # Render free instances sleep after ~15 min of inactivity; ping every 10 min to keep it warm.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          curl -fsS -o /dev/null --max-time 30 \
+            https://school-management-system-backend-1-0wgs.onrender.com/health \
+            || echo "Ping failed (instance may still be cold-starting)"
