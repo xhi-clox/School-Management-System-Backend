@@ -117,7 +117,11 @@ const ACTIVE_STUDENT_STATUS = 'Active' as const;
 
 // Before helmet/cors/body parsers so platform health probes always get a fast 200
 app.get('/health', (_req: Request, res: Response) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({
+    status: 'ok',
+    commit: process.env.RENDER_GIT_COMMIT || null,
+    uptimeSeconds: Math.round(process.uptime()),
+  });
 });
 
 app.get('/', (_req: Request, res: Response) => {
