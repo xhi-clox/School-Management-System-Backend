@@ -65,8 +65,9 @@ async function main() {
     });
   }
 
-  // Seed users
-  const hashedPassword = await bcrypt.hash('password', 10);
+  // Seed users — passwords must be set via env vars; do not ship default credentials
+  const seedPassword = process.env.SEED_PASSWORD || 'ChangeMe123!';
+  const hashedPassword = await bcrypt.hash(seedPassword, 10);
   await prisma.user.createMany({
     data: [
       { email: 'admin@academify.com', password: hashedPassword, role: 'Admin' },

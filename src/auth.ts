@@ -17,13 +17,16 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     return res.status(401).json({ message: 'Token missing' });
   }
 
-  // Try primary secret, then fallbacks for old tokens (fallback-secret vs fallback-jwt-secret-for-development)
+  // Require JWT_SECRET to be set; do not accept tokens signed with fallback secrets
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    return res.status(500).json({ message: 'Server misconfigured: JWT_SECRET is not set' });
+  }
+
   const tryVerify = (t: string, secret: string) => {
     try { return jwt.verify(t, secret) as { userId: string; role: string }; } catch { return null; }
   };
-  let decoded = tryVerify(token, (process.env.JWT_SECRET as string) || 'fallback-jwt-secret-for-development');
-  if (!decoded) decoded = tryVerify(token, 'fallback-secret');
-  if (!decoded) decoded = tryVerify(token, 'fallback-jwt-secret-for-development');
+  let decoded = tryVerify(token, jwtSecret);
   try {
     if (!decoded) throw new Error('Invalid token');
     // decoded already obtained

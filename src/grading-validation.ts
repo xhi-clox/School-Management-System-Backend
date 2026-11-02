@@ -162,33 +162,31 @@ export function defaultComponentConfig(
   const total = fullMarks && fullMarks > 0 ? fullMarks : 100;
   const mcqIncluded = !!opts.mcqIncluded;
   const practicalIncluded = !!opts.practicalIncluded;
-
-  if (total === 50) {
-    return {
-      writtenFull: 50, mcqFull: 0, practicalFull: 0,
-      writtenPass: 17, mcqPass: 0, practicalPass: 0,
-      totalPass: 17,
-    };
-  }
+  const passFor = (full: number) => Math.min(full, Math.round(full * 0.33));
 
   if (practicalIncluded) {
+    const writtenFull = Math.round(total * 0.5);
+    const mcqFull = Math.round(total * 0.25);
+    const practicalFull = total - writtenFull - mcqFull;
     return {
-      writtenFull: 50, mcqFull: 25, practicalFull: 25,
-      writtenPass: 17, mcqPass: 8, practicalPass: 8,
-      totalPass: 33,
+      writtenFull, mcqFull, practicalFull,
+      writtenPass: passFor(writtenFull), mcqPass: passFor(mcqFull), practicalPass: passFor(practicalFull),
+      totalPass: passFor(total),
     };
   }
   if (mcqIncluded) {
+    const writtenFull = Math.round(total * 0.7);
+    const mcqFull = total - writtenFull;
     return {
-      writtenFull: 70, mcqFull: 30, practicalFull: 0,
-      writtenPass: 23, mcqPass: 10, practicalPass: 0,
-      totalPass: 33,
+      writtenFull, mcqFull, practicalFull: 0,
+      writtenPass: passFor(writtenFull), mcqPass: passFor(mcqFull), practicalPass: 0,
+      totalPass: passFor(total),
     };
   }
   return {
     writtenFull: total, mcqFull: 0, practicalFull: 0,
-    writtenPass: 33, mcqPass: 0, practicalPass: 0,
-    totalPass: 33,
+    writtenPass: passFor(total), mcqPass: 0, practicalPass: 0,
+    totalPass: passFor(total),
   };
 }
 

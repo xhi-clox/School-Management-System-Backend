@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -8,6 +9,9 @@ import { z } from 'zod';
 import { addMonths, differenceInCalendarDays, startOfDay } from 'date-fns';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import nodemailer from 'nodemailer';
+import speakeasy from 'speakeasy';
+import QRCode from 'qrcode';
 import { authMiddleware } from './auth';
 import { checkRole } from './checkRole';
 import errorHandler from './middleware/errorHandler';
@@ -32,6 +36,7 @@ import {
 import { buildMonthlyBlueprint, runMonthlyTuitionGeneration } from './fees/monthly-generation';
 import { refreshRecordStatus } from './fees/records';
 import feesRouter from './fees/routes';
+import leavesRouter from './leaves/routes';
 
 class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -43,6 +48,40 @@ class HttpError extends Error {
 
 const prisma = new PrismaClient();
 const app = express();
+
+// Email transporter for password reset and other notifications
+// In development, logs emails to console. In production, configure SMTP via .env
+const mailTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.ethereal.email',
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: {
+    user: process.env.SMTP_USER || 'ethereal-user',
+    pass: process.env.SMTP_PASS || 'ethereal-pass',
+  },
+});
+
+async function sendPasswordResetEmail(email: string, resetUrl: string) {
+  const info = await mailTransporter.sendMail({
+    from: process.env.SMTP_FROM || 'noreply@sms-school.local',
+    to: email,
+    subject: 'Reset Your Password - School Management System',
+    html: `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #0075ff;">Password Reset Request</h2>
+        <p>You requested a password reset for your School Management System account.</p>
+        <p>Click the button below to reset your password. This link expires in 15 minutes:</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${resetUrl}" style="background-color: #0075ff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Reset Password</a>
+        </div>
+        <p style="color: #666; font-size: 14px;">If you didn't request this reset, please ignore this email.</p>
+        <p style="color: #666; font-size: 14px;">If the button doesn't work, copy and paste this link into your browser:<br/>${resetUrl}</p>
+      </div>
+    `,
+  });
+  console.log('Password reset email sent:', info.messageId);
+  return info;
+}
 
 // Serialize Prisma.Decimal money values as plain numbers so the frontend keeps receiving numbers.
 // decimal.js's default toJSON() returns a string, so patch it before Express serializes anything.
@@ -115,9 +154,9 @@ const corsOptions: cors.CorsOptions = {
   optionsSuccessStatus: 200,
 };
 
-// Set fallback JWT_SECRET if not in environment
+// Require JWT_SECRET to be set; do not accept fallback secrets
 if (!process.env.JWT_SECRET) {
-  process.env.JWT_SECRET = 'fallback-jwt-secret-for-development';
+  throw new Error('Server misconfigured: JWT_SECRET environment variable is required');
 }
 
 // CORS before helmet so OPTIONS preflight always gets ACAO / ACAH / ACAM
@@ -259,16 +298,27 @@ app.get('/profile', authMiddleware, async (req: Request, res: Response) => {
 app.put('/profile', authMiddleware, async (req: Request, res: Response) => {
   try {
     const auth = (req as any).user as { id: string; role: string };
-    const { name, phone, address, department, designation, avatar } = req.body;
+    const { name, phone, address, department, designation, avatar, email } = req.body;
 
     if (auth.role !== 'Admin') {
       return res.status(403).json({ error: 'Only admin accounts can update this profile' });
+    }
+
+    // Validate email uniqueness if changing email
+    if (email !== undefined && email !== null && email !== '') {
+      const existing = await prisma.user.findFirst({
+        where: { email, id: { not: auth.id } },
+      });
+      if (existing) {
+        return res.status(409).json({ error: 'Email already in use by another account' });
+      }
     }
 
     const updated = await prisma.user.update({
       where: { id: auth.id },
       data: {
         name: name ?? null,
+        email: email ?? null,
         phone: phone ?? null,
         address: address ?? null,
         department: department ?? null,
@@ -343,7 +393,7 @@ app.post('/notifications/read-all', authMiddleware, async (req: Request, res: Re
 // so repeat loads within the TTL skip all of them and return instantly.
 const DASH_STATS_TTL_MS = 60_000;
 const dashStatsCache = new Map<string, { at: number; body: any }>();
-app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) => {
+app.get('/dashboard/stats', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
   const user = (req as any).user;  const now = new Date();
   const todayStart = new Date(now);
@@ -716,7 +766,7 @@ app.get('/dashboard/stats', authMiddleware, async (req: Request, res: Response) 
 });
 
 // Admin - Reset Data (Danger Zone: Clear All Data)
-app.delete('/admin/reset-data', authMiddleware, async (req: Request, res: Response) => {
+app.delete('/admin/reset-data', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     // Verify the reset token matches environment variable
     const resetToken = req.query.token ? String(req.query.token) : '';
@@ -786,7 +836,7 @@ app.delete('/admin/reset-data', authMiddleware, async (req: Request, res: Respon
 });
 
 // Dashboard: weekly attendance summary (grouped per day)
-app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Response) => {
+app.get('/dashboard/attendance/summary/weekly', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     startDate: z.string().min(1),
     endDate: z.string().min(1),
@@ -844,7 +894,7 @@ app.get('/dashboard/attendance/summary/weekly', async (req: Request, res: Respon
  * Scoped exactly like `/dashboard/stats` - a teacher only ever sees the
  * absentees from their own classes.
  */
-app.get('/dashboard/attendance/absentees', authMiddleware, async (req: Request, res: Response) => {
+app.get('/dashboard/attendance/absentees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const requested = String(req.query.date ?? '');
@@ -913,7 +963,7 @@ app.get('/dashboard/attendance/absentees', authMiddleware, async (req: Request, 
     res.status(500).json({ error: 'Failed to fetch absentees' });
   }
 });
-app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
+app.get('/dashboard/financial-details', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     type: z.enum(['income', 'expense', 'profit']),
     month: z.coerce.number().int().min(1).max(12).optional(),
@@ -976,7 +1026,7 @@ app.get('/dashboard/financial-details', async (req: Request, res: Response) => {
 });
 
 // Students
-app.get('/students', authMiddleware, async (req: Request, res: Response) => {
+app.get('/students', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const user = (req as any).user;
 
   if (user.role === 'Teacher') {
@@ -1001,7 +1051,7 @@ app.get('/students', authMiddleware, async (req: Request, res: Response) => {
   res.json(students);
 });
 
-app.get('/students/rolls/used', authMiddleware, async (req: Request, res: Response) => {
+app.get('/students/rolls/used', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const { class: cls, section } = req.query;
     if (!cls) return res.status(400).json({ error: 'class is required' });
@@ -1033,10 +1083,10 @@ app.get('/students/rolls/used', authMiddleware, async (req: Request, res: Respon
  * `dob` is a full timestamp on the Student row, but only the month/day matter
  * here, so the year is recomputed onto the current (or next) year.
  *
- * NOTE: must stay ABOVE `app.get('/students/:id')` — Express matches in
+ * NOTE: must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` — Express matches in
  * registration order, so `/students/birthdays` would be swallowed as an id.
  */
-app.get('/students/birthdays', authMiddleware, async (req: Request, res: Response) => {
+app.get('/students/birthdays', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const requestedDays = Number(req.query.days);
@@ -1132,10 +1182,10 @@ function startOfTodayISO(): string {
 }
 
 // Student Logins
-// NOTE: these must stay ABOVE `app.get('/students/:id')` below — Express matches
+// NOTE: these must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` below — Express matches
 // routes in registration order, so a later `/students/:id` would swallow
 // `/students/logins` and answer 404 "Student not found".
-app.get('/students/logins', async (_req: Request, res: Response) => {
+app.get('/students/logins', authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const logins = await prisma.studentLogin.findMany({
     include: { student: true },
     orderBy: { createdAt: 'desc' }
@@ -1154,7 +1204,7 @@ app.get('/students/logins', async (_req: Request, res: Response) => {
   );
 });
 
-app.post('/students/logins', async (req: Request, res: Response) => {
+app.post('/students/logins', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().min(1),
     username: z.string().min(3),
@@ -1184,7 +1234,7 @@ app.post('/students/logins', async (req: Request, res: Response) => {
   }
 });
 
-app.put('/students/logins/:id', async (req: Request, res: Response) => {
+app.put('/students/logins/:id', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     username: z.string().min(3).optional(),
@@ -1210,7 +1260,7 @@ app.put('/students/logins/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.delete('/students/logins/:id', async (req: Request, res: Response) => {
+app.delete('/students/logins/:id', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.studentLogin.delete({ where: { id } });
@@ -1224,7 +1274,7 @@ app.delete('/students/logins/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/students/:id', authMiddleware, async (req: Request, res: Response) => {
+app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     const student = await prisma.student.findUnique({
@@ -1804,9 +1854,19 @@ app.patch('/exam-types/:id', authMiddleware, checkRole(['Admin']), async (req: R
 app.delete('/exam-types/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
+    // Resolve exam IDs of this type up front so dependent rows can be cleared
+    // in the same transaction. Exam type is referenced by Exam.typeId,
+    // ExamSchedule.gradingTypeId, and GradingSystem.examTypeId; results and
+    // publish/validation rows reference Exam.
+    const examIds = (await prisma.exam.findMany({ where: { typeId: id }, select: { id: true } })).map((e) => e.id);
     await prisma.$transaction([
+      // Null out per-subject gradingTypeId on schedules that reference this type
+      prisma.examSchedule.updateMany({ where: { gradingTypeId: id }, data: { gradingTypeId: null } }),
       prisma.gradingSystem.deleteMany({ where: { examTypeId: id } }),
-      prisma.examSchedule.deleteMany({ where: { examId: { in: (await prisma.exam.findMany({ where: { typeId: id }, select: { id: true } })).map(e => e.id) } } }),
+      prisma.result.deleteMany({ where: { examId: { in: examIds } } }),
+      prisma.resultPublish.deleteMany({ where: { examId: { in: examIds } } }),
+      prisma.resultValidationRun.deleteMany({ where: { examId: { in: examIds } } }),
+      prisma.examSchedule.deleteMany({ where: { examId: { in: examIds } } }),
       prisma.exam.deleteMany({ where: { typeId: id } }),
       prisma.examType.delete({ where: { id } }),
     ]);
@@ -1815,8 +1875,11 @@ app.delete('/exam-types/:id', authMiddleware, checkRole(['Admin']), async (req: 
     if (error.code === 'P2025') {
       return res.status(404).json({ error: 'Exam type not found' });
     }
+    if (error.code === 'P2003') {
+      return res.status(409).json({ error: 'Cannot delete exam type: it is still referenced by schedules, exams, results, or grading rules. Remove those first.' });
+    }
     console.error('Delete exam type error:', error);
-    res.status(500).json({ error: 'Failed to delete exam type', details: error.message });
+    res.status(500).json({ error: 'Failed to delete exam type', details: error.message || String(error) });
   }
 });
 
@@ -2340,6 +2403,17 @@ app.get('/exams/:examId/attendance/report', authMiddleware, checkRole(['Admin'])
 // scheduling time. Later edits to the grading template never affect schedules
 // that already carry this snapshot (non-retroactivity safeguard). Returns null
 // when there is no usable grading template to snapshot.
+function parseGradingSnapshot(value: any): any {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    return JSON.parse(value);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function buildGradingSnapshot(
   gradingTypeId: string | null | undefined,
   fullMarks: number | null | undefined,
@@ -2396,7 +2470,7 @@ function resolveGradingTypeId(
 }
 
 // Results
-app.get('/results', async (req: Request, res: Response) => {
+app.get('/results', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { examId, subjectId, studentIds } = req.query as any;
   if (!examId) return res.status(400).json({ error: 'examId is required' });
 
@@ -2410,15 +2484,15 @@ app.get('/results', async (req: Request, res: Response) => {
   res.json(results);
 });
 
-app.post('/results/bulk', async (req: Request, res: Response) => {
+app.post('/results/bulk', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     examId: z.string().min(1),
     subjectId: z.string().min(1),
     marks: z.array(z.object({
       studentId: z.string().min(1),
-      written: z.number().default(0),
-      mcq: z.number().default(0),
-      practical: z.number().default(0),
+      written: z.number().min(0).default(0),
+      mcq: z.number().min(0).default(0),
+      practical: z.number().min(0).default(0),
     })).min(1)
   });
   const parsed = schema.safeParse(req.body);
@@ -2426,17 +2500,18 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   const { examId, subjectId, marks } = parsed.data;
 
   // Fetch Grading System, Exam Schedules, Exam details, and Students
-  const [exam, schedules, students, existingResults] = await Promise.all([
+  const [exam, schedules, existingResults] = await Promise.all([
     prisma.exam.findUnique({ where: { id: examId } }),
     prisma.examSchedule.findMany({ where: { examId, subjectId }, include: { class: true } }),
-    prisma.student.findMany({
-      where: { id: { in: marks.map(m => m.studentId) } },
-      select: { id: true, class: true, section: true }
-    }),
     prisma.result.findMany({
       where: { examId, subjectId }
     })
   ]);
+  const studentIdsInScope = [...new Set([...marks.map(m => m.studentId), ...existingResults.map(r => r.studentId)])];
+  const students = await prisma.student.findMany({
+    where: { id: { in: studentIdsInScope } },
+    select: { id: true, class: true, section: true }
+  });
 
   if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
@@ -2464,12 +2539,15 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
   // STRICT COMPONENT VALIDATION - Check each student's marks against schedule configuration
   for (const m of marks) {
-    const studentClass = studentMap.get(m.studentId)?.class;
-    const schedule = schedules.find(s => s.class?.name === studentClass && s.subjectId === subjectId);
+    const student = studentMap.get(m.studentId);
+    const studentClass = student?.class;
+    const studentSection = student?.section;
+    const schedule = schedules.find(s => s.class?.name === studentClass && s.class?.section === studentSection && s.subjectId === subjectId)
+      || schedules.find(s => !s.class && s.subjectId === subjectId);
     
     if (!schedule) {
       return res.status(400).json({
-        error: `No schedule found for student ${m.studentId} (class: ${studentClass})`
+        error: `No schedule found for student ${m.studentId} (class: ${studentClass}${studentSection ? ` - ${studentSection}` : ''})`
       });
     }
     
@@ -2482,6 +2560,9 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
     const writtenFullMarks = (sW || 0) > 0 ? sW : (tpl?.writtenFull ?? 0);
     const mcqFullMarks = (sM || 0) > 0 ? sM : (tpl?.mcqFull ?? 0);
     const practicalFullMarks = (sP || 0) > 0 ? sP : (tpl?.practicalFull ?? 0);
+    const effectiveFullMarks = (schedule.fullMarks || 0) > 0
+      ? schedule.fullMarks!
+      : ((tpl?.totalFull ?? 0) || writtenFullMarks + mcqFullMarks + practicalFullMarks || 100);
     
     // Check written marks
     if ((writtenFullMarks || 0) === 0 && m.written !== 0) {
@@ -2534,15 +2615,14 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       return res.status(400).json({
         error: `Cannot enter marks for absent student`,
         studentId: m.studentId,
-        studentName: studentMap.get(m.studentId)?.class
       });
     }
     
     // Validate total
     const totalMarks = m.written + m.mcq + m.practical;
-    if (totalMarks > (schedule.fullMarks || 100)) {
+    if (totalMarks > effectiveFullMarks) {
       return res.status(400).json({
-        error: `Total marks (${totalMarks}) exceed full marks (${schedule.fullMarks})`,
+        error: `Total marks (${totalMarks}) exceed full marks (${effectiveFullMarks})`,
         studentId: m.studentId
       });
     }
@@ -2551,22 +2631,38 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
   // Default pass config (when schedule has no override) — used as fallback for template config
   const passConfig = defaultGrading.length > 0 ? defaultGrading[0] : null;
 
-  // Map class name -> full marks + pass marks for this subject (per class). (#8)
-  // Avoid positional schedules[0] fallback which is fragile if ordering changes.
-  const fullMarksByClass = new Map<string, number>();
+  const classKey = (cls?: string | null, section?: string | null) => `${cls || ''}||${section || ''}`;
+
+  // Map class+section -> full marks for this subject.
+  const fullMarksBySection = new Map<string, number>();
+  const globalFullMarks = new Map<string, number>();
   for (const s of schedules) {
-    if (s.class?.name) fullMarksByClass.set(s.class.name, s.fullMarks ?? 100);
+    if (s.class) {
+      fullMarksBySection.set(classKey(s.class.name, s.class.section), s.fullMarks ?? 100);
+    } else if (!globalFullMarks.has(s.subjectId)) {
+      globalFullMarks.set(s.subjectId, s.fullMarks ?? 100);
+    }
   }
   const defaultFullMarks = schedules.length > 0
     ? Math.max(...schedules.map(s => s.fullMarks ?? 100), 0)
     : 100;
+  const fullMarksForStudent = (student?: { class: string; section: string }) =>
+    (student ? fullMarksBySection.get(classKey(student.class, student.section)) : undefined)
+      ?? globalFullMarks.get(subjectId)
+      ?? defaultFullMarks;
 
-  // Precompute per (class) highest marks AFTER this batch = max of existing
-  // results for that class plus this batch's new totals. (#7)
+  const passFor = (full: number, explicit?: number | null) => {
+    const max = Math.max(0, Number(full) || 0);
+    const configured = Number(explicit) || 0;
+    return configured > 0 && configured <= max ? configured : Math.min(max, Math.round(max * 0.33));
+  };
+
+  // Precompute per (class, section) highest marks AFTER this batch = max of existing
+  // results for that group plus this batch's new totals. (#7)
   const existingByClass = new Map<string, number[]>();
   const classOfStudent = (id: string) => {
     const st = studentMap.get(id);
-    return st ? st.class : undefined;
+    return st ? classKey(st.class, st.section) : undefined;
   };
   for (const r of existingResults) {
     const c = classOfStudent(r.studentId);
@@ -2575,18 +2671,44 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
     existingByClass.get(c)!.push(r.totalMarks);
   }
 
+  const involvedClassKeys = new Set<string>([
+    ...existingByClass.keys(),
+    ...students.map(s => classKey(s.class, s.section)),
+  ]);
+  const classStudentIdsByKey = new Map<string, string[]>();
+  if (involvedClassKeys.size > 0) {
+    const classStudents = await prisma.student.findMany({
+      where: {
+        OR: [...involvedClassKeys].map(key => {
+          const [cls, section] = key.split('||');
+          return { class: cls, section };
+        }),
+      },
+      select: { id: true, class: true, section: true },
+    });
+    for (const st of classStudents) {
+      const key = classKey(st.class, st.section);
+      if (!classStudentIdsByKey.has(key)) classStudentIdsByKey.set(key, []);
+      classStudentIdsByKey.get(key)!.push(st.id);
+    }
+  }
+
   // Build the highest marks per class, then update all results in ONE transaction
   // together with the upserts so both stay consistent even on failure. (#16)
   const result = await prisma.$transaction(async (tx) => {
     const classHighest = new Map<string, number>();
     // First upsert every mark and track per-class best from the batch.
     for (const m of marks) {
-      const studentClass = studentMap.get(m.studentId)?.class;
-      const fullMarks = fullMarksByClass.get(studentClass ?? '') ?? defaultFullMarks;
+      const student = studentMap.get(m.studentId);
+      const studentClass = student?.class;
+      const studentSection = student?.section;
+      const studentClassKey = classKey(studentClass, studentSection);
+      const fullMarks = fullMarksForStudent(student);
       const totalMarks = m.written + m.mcq + m.practical;
 
       // Per-subject grading: use schedule's gradingTypeId if set, otherwise exam's type
-      const scheduleForStudent = schedules.find(s => (s.class?.name === studentClass) && s.subjectId === subjectId) as any;
+      const scheduleForStudent = (schedules.find(s => s.class?.name === studentClass && s.class?.section === studentSection && s.subjectId === subjectId)
+        || schedules.find(s => !s.class && s.subjectId === subjectId)) as any;
       const gradingTypeIdForThis = resolveGradingTypeId(scheduleForStudent?.gradingTypeId, exam.typeId);
       const gradingForThis = gradingByType.get(gradingTypeIdForThis || '') || defaultGrading;
 
@@ -2600,16 +2722,12 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       // grade consistently (e.g. CT A+ [40,50] out of 50 -> 80%-100%).
       let snapTotalFull = 0;
       if (scheduleForStudent?.gradingSnapshot) {
-        try {
-          const snap = JSON.parse(scheduleForStudent.gradingSnapshot);
-          if (snap?.bands && Array.isArray(snap.bands) && snap.bands.length > 0) {
-            gradingBandsForThis = snap.bands;
-            if (typeof snap.totalFull === 'number' && snap.totalFull > 0) {
-              snapTotalFull = snap.totalFull;
-            }
+        const snap = parseGradingSnapshot(scheduleForStudent.gradingSnapshot);
+        if (snap?.bands && Array.isArray(snap.bands) && snap.bands.length > 0) {
+          gradingBandsForThis = snap.bands;
+          if (typeof snap.totalFull === 'number' && snap.totalFull > 0) {
+            snapTotalFull = snap.totalFull;
           }
-        } catch (e) {
-          console.error('Failed to parse grading snapshot, falling back to live grading:', e);
         }
       }
       const tplCfg = (gradingForThis[0] || passConfig) as any;
@@ -2618,26 +2736,19 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       const pFull = (scheduleForStudent?.practicalFullMarks ?? 0) > 0 ? scheduleForStudent.practicalFullMarks : (tplCfg?.practicalFull ?? 0);
       const effFull = (scheduleForStudent?.fullMarks ?? 0) > 0 ? scheduleForStudent.fullMarks : ((tplCfg?.totalFull ?? 0) || ((wFull || 0) + (mFull || 0) + (pFull || 0)));
 
-      // Use defaultComponentConfig as the single source of truth for pass marks.
-      // Grading band rows often carry stale pass values (e.g. totalPass=40 from a
-      // 100-mark default) that become absurdly high when the exam is 50 marks.
-      const effDefs = defaultComponentConfig(effFull, {
-        mcqIncluded: (mFull || 0) > 0,
-        practicalIncluded: (pFull || 0) > 0,
-      });
-      const wPass = effDefs.writtenPass;
-      const mPass = effDefs.mcqPass;
-      const pPass = effDefs.practicalPass;
-      const tPass = effDefs.totalPass;
+      const wPass = passFor(wFull, scheduleForStudent?.writtenPassMarks);
+      const mPass = passFor(mFull, scheduleForStudent?.mcqPassMarks);
+      const pPass = passFor(pFull, scheduleForStudent?.practicalPassMarks);
+      const tPass = passFor(effFull, scheduleForStudent?.passMarks);
 
-      const writtenMandatory = (wFull || 0) > 0 && (effDefs.writtenPass > 0);
-      const mcqMandatory = (mFull || 0) > 0 && (effDefs.mcqPass > 0);
-      const practicalMandatory = (pFull || 0) > 0 && (effDefs.practicalPass > 0);
+      const writtenMandatory = (wFull || 0) > 0 && wPass > 0;
+      const mcqMandatory = (mFull || 0) > 0 && mPass > 0;
+      const practicalMandatory = (pFull || 0) > 0 && pPass > 0;
 
       let isFail = false;
       if (writtenMandatory && m.written < wPass) isFail = true;
-      if (mcqMandatory && (m.mcq <= 0 || m.mcq < mPass)) isFail = true;
-      if (practicalMandatory && (m.practical <= 0 || m.practical < pPass)) isFail = true;
+      if (mcqMandatory && m.mcq < mPass) isFail = true;
+      if (practicalMandatory && m.practical < pPass) isFail = true;
       if (totalMarks < tPass) isFail = true;
 
       // Zero-division guard. (#14)
@@ -2645,7 +2756,7 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 
       let gradeInfo;
       if (isFail) {
-        gradeInfo = gradingBandsForThis.find((g: any) => g.status === 'FAIL') || { grade: 'F', gp: 0 };
+        gradeInfo = gradingBandsForThis.find((g: any) => String(g.status).toUpperCase() === 'FAIL') || { grade: 'F', gp: 0 };
       } else {
         // Match percentage. Band bounds are stored as marks relative to a
         // reference full (snapshot's totalFull for frozen data, the template's
@@ -2671,12 +2782,12 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
         for (const g of sorted) {
           if (asPct(g.minPercent) <= percent + 0.0001) matched = g;
         }
-        gradeInfo = matched || sorted[sorted.length - 1];
+        gradeInfo = matched || sorted.find((g: any) => String(g.status).toUpperCase() === 'FAIL') || sorted[0];
       }
 
       if (studentClass) {
-        const curBest = classHighest.get(studentClass) ?? 0;
-        if (totalMarks > curBest) classHighest.set(studentClass, totalMarks);
+        const curBest = classHighest.get(studentClassKey) ?? 0;
+        if (totalMarks > curBest) classHighest.set(studentClassKey, totalMarks);
       }
 
       await tx.result.upsert({
@@ -2758,9 +2869,9 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
       if (!classHighestFinal.has(c)) classHighestFinal.set(c, v);
     }
 
-    // Update highestMarks per class within the same transaction.
+    // Update highestMarks per class+section within the same transaction.
     for (const [c, h] of classHighestFinal) {
-      const studentIds = students.filter(s => s.class === c).map(s => s.id);
+      const studentIds = classStudentIdsByKey.get(c) ?? [];
       if (studentIds.length === 0) continue;
       await tx.result.updateMany({
         where: { examId, subjectId, studentId: { in: studentIds } },
@@ -2775,6 +2886,35 @@ app.post('/results/bulk', async (req: Request, res: Response) => {
 });
 
 // ===== Results reporting (overview / class / student) =====
+
+function classSectionKey(cls?: string | null, section?: string | null) {
+  return `${cls || ''}||${section || ''}`;
+}
+
+function resultIsAbsent(result: any) {
+  return !!result?.isAbsent || result?.grade === 'ABSENT';
+}
+
+function findResultSchedule(schedules: any[], result: any) {
+  const student = result?.student;
+  if (!student) return null;
+  return schedules.find(s => s.subjectId === result.subjectId && s.class && s.class.name === student.class && s.class.section === student.section)
+    || schedules.find(s => s.subjectId === result.subjectId && !s.class)
+    || null;
+}
+
+function resultIsFailed(schedules: any[], failGrades: Set<string>, result: any) {
+  if (resultIsAbsent(result)) return true;
+  const schedule = findResultSchedule(schedules, result);
+  if (schedule?.gradingSnapshot) {
+    const snapshot = parseGradingSnapshot(schedule.gradingSnapshot);
+    const band = Array.isArray(snapshot?.bands)
+      ? snapshot.bands.find((b: any) => b.grade === result.grade)
+      : null;
+    if (band) return String(band.status).toUpperCase() === 'FAIL';
+  }
+  return !!(result.grade && failGrades.has(result.grade));
+}
 
 async function buildExamReport(examId: string) {
   const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { type: true } });
@@ -2793,6 +2933,19 @@ async function buildExamReport(examId: string) {
   grading.forEach((g) => { if (g.status === 'FAIL') failGrades.add(g.grade); });
   if (failGrades.size === 0) failGrades.add('F');
 
+  const gradingScale = Math.max(1, ...grading.map((g) => Number(g.maxPercent) || 0));
+  const gradingAsPercent = grading.map((g) => ({
+    ...g,
+    pctMin: ((Number(g.minPercent) || 0) / gradingScale) * 100,
+    pctMax: ((Number(g.maxPercent) || 0) / gradingScale) * 100,
+  }));
+  const gradeForPercentage = (percentage: number) => {
+    if (gradingAsPercent.length === 0) return '';
+    const sorted = [...gradingAsPercent].sort((a, b) => b.pctMin - a.pctMin);
+    const band = sorted.find((g) => percentage >= g.pctMin - 0.0001 && percentage <= g.pctMax + 0.0001);
+    return band?.grade || sorted[sorted.length - 1]?.grade || '';
+  };
+
   const subjectName = new Map<string, string>();
   const subjectFullMarksByClass = new Map<string, Map<string, number>>();
   const subjectDefaultFullMarks = new Map<string, number>();
@@ -2803,7 +2956,7 @@ async function buildExamReport(examId: string) {
     if (!subjectCreditHours.has(s.subjectId)) subjectCreditHours.set(s.subjectId, Number(s.subject?.creditHours ?? 1) || 1);
     if (s.class?.name) {
       if (!subjectFullMarksByClass.has(s.subjectId)) subjectFullMarksByClass.set(s.subjectId, new Map());
-      subjectFullMarksByClass.get(s.subjectId)!.set(s.class.name, s.fullMarks ?? 100);
+      subjectFullMarksByClass.get(s.subjectId)!.set(classSectionKey(s.class.name, s.class.section), s.fullMarks ?? 100);
     }
   }
 
@@ -2818,7 +2971,7 @@ async function buildExamReport(examId: string) {
     if (!subjects.length) continue;
     
     // Check if ALL subjects are absent
-    const allAbsent = subjects.every(r => r.isAbsent);
+    const allAbsent = subjects.every(r => resultIsAbsent(r));
     if (allAbsent) {
       students.push({
         studentId: student.id,
@@ -2835,7 +2988,8 @@ async function buildExamReport(examId: string) {
         gpa: 0,
         grade: 'ABSENT',
         passed: false,
-        failed: false,
+        failed: true,
+        hasAbsence: true,
         isAbsent: true,
         subjectCount: subjects.length
       });
@@ -2845,28 +2999,24 @@ async function buildExamReport(examId: string) {
     // Calculate marks only for non-absent subjects
     let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, creditSum = 0, failed = false, hasAbsence = false;
     for (const r of subjects) {
-      if (r.isAbsent) {
+      if (resultIsAbsent(r)) {
         hasAbsence = true;
-        failed = true; // Any absence = overall fail
+        failed = true;
         continue;
       }
       totalMarks += r.totalMarks || 0;
-      const fm = subjectFullMarksByClass.get(r.subjectId)?.get(student.class) ?? subjectDefaultFullMarks.get(r.subjectId) ?? 100;
+      const fm = subjectFullMarksByClass.get(r.subjectId)?.get(classSectionKey(student.class, student.section))
+        ?? subjectDefaultFullMarks.get(r.subjectId)
+        ?? 100;
       fullMarks += fm;
       const ch = subjectCreditHours.get(r.subjectId) ?? 1;
       if (r.gp != null) { gpSum += r.gp * ch; gpCount++; creditSum += ch; }
-      if (r.grade && failGrades.has(r.grade)) failed = true;
+      if (resultIsFailed(schedules, failGrades, r)) failed = true;
     }
     // Credit-weighted GPA: Σ(GP × creditHours) / Σ(creditHours). (#11)
     const gpa = creditSum > 0 ? round2(gpSum / creditSum) : (gpCount ? round2(gpSum / gpCount) : 0);
     const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
-    let grade = '';
-    if (failed) {
-      grade = hasAbsence ? 'ABSENT' : 'F';
-    } else if (grading.length) {
-      const g = grading.find((x) => percentage >= x.minPercent && percentage <= x.maxPercent);
-      grade = g ? g.grade : (grading[grading.length - 1]?.grade || '');
-    }
+    const grade = failed ? (hasAbsence ? 'ABSENT' : 'F') : gradeForPercentage(percentage);
     students.push({
       studentId: student.id,
       name: student.name,
@@ -2887,7 +3037,7 @@ async function buildExamReport(examId: string) {
     });
   }
 
-  return { exam, grading, results, students, failGrades, subjectName, subjectDefaultFullMarks };
+  return { exam, grading, schedules, results, students, failGrades, subjectName, subjectDefaultFullMarks, subjectFullMarksByClass };
 }
 
 function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport>>, studentFilter?: Set<string>) {
@@ -2896,9 +3046,11 @@ function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport
     if (studentFilter && !studentFilter.has(r.studentId)) continue;
     if (!map.has(r.subjectId)) map.set(r.subjectId, { subject: report.subjectName.get(r.subjectId) || r.subjectId, totals: [], passCount: 0 });
     const rec = map.get(r.subjectId)!;
-    const fm = report.subjectDefaultFullMarks.get(r.subjectId) ?? 100;
+    const fm = report.subjectFullMarksByClass.get(r.subjectId)?.get(classSectionKey(r.student?.class, r.student?.section))
+      ?? report.subjectDefaultFullMarks.get(r.subjectId)
+      ?? 100;
     rec.totals.push(fm > 0 ? (r.totalMarks / fm) * 100 : 0);
-    if (!(r.grade && report.failGrades.has(r.grade))) rec.passCount++;
+    if (!resultIsFailed(report.schedules, report.failGrades, r)) rec.passCount++;
   }
   return [...map.values()]
     .map((x) => ({
@@ -2910,9 +3062,17 @@ function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport
 }
 
 function rankStudents(list: any[]) {
-  return [...list]
-    .sort((a, b) => b.gpa - a.gpa || b.percentage - a.percentage || a.name.localeCompare(b.name))
-    .map((s, i) => ({ rank: i + 1, ...s }));
+  const sorted = [...list]
+    .sort((a, b) => b.gpa - a.gpa || b.percentage - a.percentage || a.name.localeCompare(b.name));
+  let previousKey: string | null = null;
+  let previousRank = 0;
+  return sorted.map((s, i) => {
+    const key = `${s.gpa}|${s.percentage}`;
+    const rank = key === previousKey ? previousRank : i + 1;
+    previousKey = key;
+    previousRank = rank;
+    return { ...s, rank };
+  });
 }
 
 app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
@@ -3052,10 +3212,9 @@ app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Re
       }))
       .sort((a, b) => a.subject.localeCompare(b.subject));
 
-    const clsRanked = report.students
-      .filter((s) => s.class === agg.class)
-      .sort((a, b) => b.gpa - a.gpa || b.percentage - a.percentage);
-    const position = clsRanked.findIndex((s) => s.studentId === studentId) + 1;
+    const clsRanked = rankStudents(report.students
+      .filter((s) => s.class === agg.class && s.section === agg.section));
+    const position = clsRanked.find((s) => s.studentId === studentId)?.rank ?? 0;
 
     res.json({
       student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, class: student?.class, section: student?.section, roll: student?.roll },
@@ -3077,10 +3236,10 @@ app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Re
 
 const RESULT_STATUSES = ['Draft', 'Verification', 'Finalized', 'Published'] as const;
 const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
-  Draft: ['Verification', 'Published'],
+  Draft: ['Verification'],
   Verification: ['Finalized', 'Draft'],
-  Finalized: ['Verification', 'Draft', 'Published'],
-  Published: ['Finalized'],
+  Finalized: ['Verification', 'Draft'],
+  Published: [],
 };
 const RANK_MODES = ['TotalMarks', 'Percentage', 'GPA', 'WeightedAcademicScore'] as const;
 
@@ -3094,7 +3253,7 @@ function resultStatusAdvance(from: string, to: string): boolean {
 // then average across those exams. Used for the 'WeightedAcademicScore' rank mode.
 async function weightedAcademicScoreMap(academicYear: string): Promise<Map<string, number>> {
   const exams = await prisma.exam.findMany({
-    where: { academicYear, weight: { gt: 0 } },
+    where: { academicYear, weight: { gt: 0 }, status: { in: ['Finalized', 'Published'] } },
     orderBy: { startDate: 'asc' }
   });
   const acc = new Map<string, { sum: number; totalW: number }>();
@@ -3131,13 +3290,21 @@ function rankStudentsBy(list: any[], mode: string, weighted = new Map<string, nu
       default: return s.gpa || 0;
     }
   };
-  return [...list]
+  const sorted = [...list]
     .sort((a, b) => {
       const d = scoreOf(b) - scoreOf(a);
       if (d !== 0) return d;
       return (b.percentage || 0) - (a.percentage || 0) || a.name.localeCompare(b.name);
-    })
-    .map((s, i) => ({ rank: i + 1, ...s, rankScore: scoreOf(s) }));
+    });
+  let previousScore: number | null = null;
+  let previousRank = 0;
+  return sorted.map((s, i) => {
+    const score = scoreOf(s);
+    const rank = score === previousScore ? previousRank : i + 1;
+    previousScore = score;
+    previousRank = rank;
+    return { ...s, rank, rankScore: score };
+  });
 }
 
 // ---- Status transition ----
@@ -3167,8 +3334,8 @@ app.post('/results/:examId/status', authMiddleware, checkRole(['Admin']), async 
     await prisma.result.updateMany({
       where: { examId },
       data: {
-        status: status === 'Published' ? 'Published' : 'Finalized',
-        ...(status === 'Published' ? { verifiedAt: new Date() } : {}),
+        status,
+        verifiedAt: status === 'Finalized' ? new Date() : null,
       },
     });
 
@@ -3180,16 +3347,53 @@ app.post('/results/:examId/status', authMiddleware, checkRole(['Admin']), async 
 });
 
 // ---- Publish ----
+// Count results whose totalMarks exceed the scheduled full marks for their
+// class+section+subject. Used as a publish-time integrity gate so an exam with
+// impossible totals (e.g. 519/450) cannot be published.
+async function countResultOverMax(examId: string): Promise<number> {
+  const [schedules, results, students, classes] = await Promise.all([
+    prisma.examSchedule.findMany({ where: { examId }, include: { subject: true } }),
+    prisma.result.findMany({ where: { examId } }),
+    prisma.student.findMany({ select: { id: true, class: true, section: true } }),
+    prisma.schoolClass.findMany({ select: { id: true, name: true, section: true } }),
+  ]);
+  const classIdByNameSection = new Map(classes.map((c) => [c.name + '|' + c.section, c.id]));
+  const studentClassId = new Map(students.map((s) => [s.id, classIdByNameSection.get(s.class + '|' + s.section) || '']));
+  const scheduleByKey = new Map(schedules.map((s) => [(s.classId || '') + '|' + s.subjectId, s]));
+
+  let overMax = 0;
+  for (const r of results) {
+    const clsId = studentClassId.get(r.studentId) || '';
+    const sch = scheduleByKey.get(clsId + '|' + r.subjectId) || scheduleByKey.get('|' + r.subjectId);
+    const full = sch ? Number(sch.fullMarks || 0) : 100;
+    if (Number(r.totalMarks || 0) > full) overMax++;
+  }
+  return overMax;
+}
+
 app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { examId } = req.params;
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
-    if (exam.status !== 'Finalized' && exam.status !== 'Draft' && exam.status !== 'Verification') {
+    if (exam.status !== 'Finalized') {
       return res.status(409).json({ error: 'Exam must be Finalized before publishing' });
     }
 
     const report = await buildExamReport(examId);
+    if (report.results.length === 0) {
+      return res.status(409).json({ error: 'Cannot publish an exam with no results' });
+    }
+
+    // Publish-time integrity gate: refuse to publish if any result exceeds its
+    // scheduled full marks. Fix the mark scale or rescale marks first.
+    const overMax = await countResultOverMax(examId);
+    if (overMax > 0) {
+      return res.status(409).json({
+        error: `Cannot publish: ${overMax} result(s) exceed scheduled full marks. Fix the mark scale or rescale marks before publishing.`,
+      });
+    }
+
     const rankBy = (req.body?.rankBy || 'GPA') as string;
     if (!RANK_MODES.includes(rankBy as any)) {
       return res.status(400).json({ error: `Invalid rankBy. Allowed: ${RANK_MODES.join(', ')}` });
@@ -3199,15 +3403,15 @@ app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async
     if (rankBy === 'WeightedAcademicScore') weighted = await weightedAcademicScoreMap(exam.academicYear);
 
     // Freeze ranking snapshot (within same class+section).
-    const ranked = rankStudentsBy(report.students, rankBy, weighted);
     const byClass = new Map<string, any[]>();
-    for (const s of ranked) {
+    for (const s of report.students) {
       const key = `${s.class || 'N/A'}|${s.section || ''}`;
       if (!byClass.has(key)) byClass.set(key, []);
       byClass.get(key)!.push(s);
     }
-    const ranking = Array.from(byClass.entries()).map(([key, arr]) => {
+    const ranking = Array.from(byClass.entries()).map(([key, group]) => {
       const [cls, section] = key.split('|');
+      const arr = rankStudentsBy(group, rankBy, weighted);
       return {
         class: cls,
         section,
@@ -3228,33 +3432,38 @@ app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async
     });
 
     const adminUser = (req as any).user?.email || null;
+    const now = new Date();
 
-    const publish = await prisma.resultPublish.upsert({
-      where: { examId },
-      update: {
-        rankBy,
-        publishedBy: adminUser,
-        publishedAt: new Date(),
-        rankSnapshot: ranking as any
-      },
-      create: {
-        examId,
-        rankBy,
-        publishedBy: adminUser,
-        publishedAt: new Date(),
-        rankSnapshot: ranking as any
-      }
-    });
+    const publish = await prisma.$transaction(async (tx) => {
+      const saved = await tx.resultPublish.upsert({
+        where: { examId },
+        update: {
+          rankBy,
+          publishedBy: adminUser,
+          publishedAt: now,
+          rankSnapshot: ranking as any
+        },
+        create: {
+          examId,
+          rankBy,
+          publishedBy: adminUser,
+          publishedAt: now,
+          rankSnapshot: ranking as any
+        }
+      });
 
-    await prisma.exam.update({
-      where: { id: examId },
-      data: { status: 'Published', publishedAt: new Date(), publishedBy: adminUser, updatedAt: new Date() }
-    });
+      await tx.exam.update({
+        where: { id: examId },
+        data: { status: 'Published', publishedAt: now, publishedBy: adminUser, updatedAt: now }
+      });
 
-    // Cascade the Published status onto every Result row (#15).
-    await prisma.result.updateMany({
-      where: { examId },
-      data: { status: 'Published', verifiedAt: new Date() },
+      // Cascade the Published status onto every Result row (#15).
+      await tx.result.updateMany({
+        where: { examId },
+        data: { status: 'Published', verifiedAt: now },
+      });
+
+      return saved;
     });
 
     res.json({ examId, status: 'Published', rankBy, publishId: publish.id, ranking });
@@ -3273,14 +3482,18 @@ app.post('/results/:examId/unpublish', authMiddleware, checkRole(['Admin']), asy
     if (exam.status !== 'Published') {
       return res.status(409).json({ error: 'Only a published exam can be unpublished' });
     }
-    await prisma.exam.update({
-      where: { id: examId },
-      data: { status: 'Finalized', publishedAt: null, publishedBy: null, updatedAt: new Date() }
-    });
-    // Unpublishing is an edit workflow -> results become editable (Finalized). (#15)
-    await prisma.result.updateMany({
-      where: { examId },
-      data: { status: 'Finalized' },
+    await prisma.$transaction(async (tx) => {
+      await tx.exam.update({
+        where: { id: examId },
+        data: { status: 'Finalized', publishedAt: null, publishedBy: null, updatedAt: new Date() }
+      });
+      // Unpublishing is an edit workflow -> results become editable (Finalized). (#15)
+      await tx.result.updateMany({
+        where: { examId },
+        data: { status: 'Finalized' },
+      });
+      // Remove the frozen public ranking so a later publish cannot expose stale data.
+      await tx.resultPublish.deleteMany({ where: { examId } });
     });
     res.json({ examId, status: 'Finalized' });
   } catch (error: any) {
@@ -3538,6 +3751,9 @@ app.post('/results/:examId/rank-config', authMiddleware, checkRole(['Admin']), a
     }
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (exam.status === 'Published') {
+      return res.status(409).json({ error: 'Unpublish results before changing the ranking mode' });
+    }
     const publish = await prisma.resultPublish.upsert({
       where: { examId },
       update: { rankBy },
@@ -3554,7 +3770,7 @@ app.get('/results/:examId/rank', authMiddleware, checkRole(['Admin']), async (re
   try {
     const { examId } = req.params;
     const publish = await prisma.resultPublish.findUnique({ where: { examId } });
-    if (!publish) {
+    if (!publish?.rankSnapshot) {
       return res.status(404).json({ error: 'No published ranking snapshot yet. Publish results first.' });
     }
     res.json({ examId, rankBy: publish.rankBy, rankSnapshot: publish.rankSnapshot, publishedAt: publish.publishedAt });
@@ -3568,7 +3784,7 @@ app.get('/results/:examId/rank-config', authMiddleware, checkRole(['Admin']), as
   try {
     const { examId } = req.params;
     const publish = await prisma.resultPublish.findUnique({ where: { examId } });
-    res.json({ examId, rankBy: publish?.rankBy || 'GPA', published: !!publish });
+    res.json({ examId, rankBy: publish?.rankBy || 'GPA', published: !!publish?.rankSnapshot });
   } catch (error: any) {
     console.error('Error fetching rank config:', error);
     res.status(500).json({ error: 'Failed to fetch rank config', details: error.message });
@@ -3682,19 +3898,20 @@ async function buildStudentReportCard(examId: string, studentId: string, userEma
       mcq: r.mcq,
       practical: r.practical,
       total: r.totalMarks,
-      fullMarks: report.subjectDefaultFullMarks.get(r.subjectId) ?? 100,
+      fullMarks: report.subjectFullMarksByClass.get(r.subjectId)?.get(classSectionKey(student?.class, student?.section))
+        ?? report.subjectDefaultFullMarks.get(r.subjectId)
+        ?? 100,
       grade: r.grade || '',
       gp: r.gp ?? 0,
       highestMarks: r.highestMarks,
-      isAbsent: !!r.isAbsent
+      isAbsent: resultIsAbsent(r)
     }))
     .sort((a: any, b: any) => a.subject.localeCompare(b.subject));
 
-  // Rank within class.
-  const clsRanked = report.students
-    .filter((s: any) => s.class === agg.class)
-    .sort((a: any, b: any) => b.gpa - a.gpa || b.percentage - a.percentage);
-  const position = clsRanked.findIndex((s: any) => s.studentId === studentId) + 1;
+  // Rank within class+section.
+  const clsRanked = rankStudents(report.students
+    .filter((s: any) => s.class === agg.class && s.section === agg.section));
+  const position = clsRanked.find((s: any) => s.studentId === studentId)?.rank ?? 0;
 
   // Attendance percentage.
   const attendance = await prisma.attendance.findMany({ where: { studentId } });
@@ -4073,7 +4290,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
 
     // Fail fast with precise 4xx responses instead of rolling the whole
     // transaction back and surfacing a generic 500.
-    const exam = await prisma.exam.findUnique({ where: { id: examId }, select: { id: true } });
+    const exam = await prisma.exam.findUnique({ where: { id: examId }, select: { id: true, typeId: true } });
     if (!exam) return res.status(404).json({ error: 'Exam not found. Create or select an exam before saving schedules.' });
 
     const subjectIds = Array.from(new Set(items.map((i) => i.subjectId)));
@@ -4099,6 +4316,29 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
       .filter((v): v is string => !!v);
     if (mismatched.length) {
       return res.status(400).json({ error: `Component marks must sum to the total full marks: ${mismatched.join(', ')}.` });
+    }
+
+    const resultCount = await prisma.result.count({ where: { examId } });
+    const existingSchedules = resultCount > 0
+      ? await prisma.examSchedule.findMany({ where: { examId } })
+      : [];
+
+    if (replace && resultCount > 0) {
+      return res.status(409).json({
+        error: 'Cannot replace schedules after marks/results exist. Update the existing schedule rows instead.',
+      });
+    }
+
+    // Resolve templates/snapshots once per grading type. Doing this inside the
+    // per-row transaction loop caused 4 extra Neon round-trips per row and made
+    // large schedule saves exceed Prisma's 5s interactive-transaction timeout.
+    const gradingInfo = new Map<string, { totalFull: number | null; snapshot: any }>();
+    for (const rawGradingTypeId of new Set(items.map((i) => i.gradingTypeId).filter((v): v is string => !!v))) {
+      const resolvedId = resolveGradingTypeId(rawGradingTypeId, exam.typeId);
+      if (!resolvedId) continue;
+      const totalFull = await fetchTemplateTotalFull(resolvedId);
+      const snapshot = totalFull ? await buildGradingSnapshot(resolvedId, totalFull) : null;
+      gradingInfo.set(resolvedId, { totalFull, snapshot });
     }
 
     const saved: any[] = [];
@@ -4133,14 +4373,11 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         // "50 Marks" template) overrides any client-supplied fullMarks/component
         // fulls that assumed the wrong scale, so marks entry, grading and display
         // all use the template's scale.
-        let resolvedGradingTypeId: string | null = null;
-        if (item.gradingTypeId) {
-          resolvedGradingTypeId = resolveGradingTypeId(
-            item.gradingTypeId,
-            (await tx.exam.findUnique({ where: { id: examId }, select: { typeId: true } }))?.typeId
-          );
-        }
-        const tplTotalFull = await fetchTemplateTotalFull(resolvedGradingTypeId);
+        const resolvedGradingTypeId = item.gradingTypeId
+          ? resolveGradingTypeId(item.gradingTypeId, exam.typeId)
+          : null;
+        const templateInfo = resolvedGradingTypeId ? gradingInfo.get(resolvedGradingTypeId) : null;
+        const tplTotalFull = templateInfo?.totalFull ?? null;
         if (tplTotalFull) {
           const cfg = defaultComponentConfig(tplTotalFull, {
             mcqIncluded: (data.mcqFullMarks ?? 0) > 0 || (item.mcqFullMarks ?? 0) > 0,
@@ -4169,10 +4406,31 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
         // explicitly provided on the item (covers preset apply / manual fill that
         // re-schedules with a grading template). When none is provided here, keep
         // any existing snapshot below.
-        let gradingSnapshot: any = undefined;
-        if (resolvedGradingTypeId) {
-          gradingSnapshot = await buildGradingSnapshot(resolvedGradingTypeId, data.fullMarks, tx);
-          if (gradingSnapshot) data.gradingSnapshot = gradingSnapshot;
+        const gradingSnapshot = templateInfo?.snapshot ?? null;
+        if (gradingSnapshot) data.gradingSnapshot = gradingSnapshot;
+
+        // Lock the mark scale once any result exists for this exam. Changing
+        // fullMarks/components/pass/gradingType on an existing schedule after
+        // marks have been entered would silently invalidate stored grades and
+        // produce impossible totals (e.g. 519/450). Only timing/room/sort may
+        // be edited after results exist.
+        if (resultCount > 0) {
+          const existing = existingSchedules.find((s) => {
+            if (item.id && s.id === item.id) return true;
+            return s.subjectId === item.subjectId && s.classId === (item.classId || null);
+          });
+          if (existing) {
+            const scaleFields = ['fullMarks', 'writtenFullMarks', 'mcqFullMarks', 'practicalFullMarks', 'passMarks', 'gradingTypeId'] as const;
+            const changed = scaleFields.some((f) => {
+              const cur = existing[f];
+              const neu = data[f];
+              if (f === 'gradingTypeId') return (cur || null) !== (neu || null);
+              return Number(cur || 0) !== Number(neu || 0);
+            });
+            if (changed) {
+              throw new HttpError(409, `Cannot change mark scale for subject ${item.subjectId} after results exist. Unpublish and clear results first.`);
+            }
+          }
         }
 
         if (item.id) {
@@ -4199,14 +4457,21 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
       }
       if (replace) {
         const keepIds = items.map((i) => i.id).filter(Boolean) as string[];
+        const scopedClassIds = Array.from(new Set(items.map((i) => i.classId).filter((v): v is string => !!v)));
+        const includesGlobal = items.some((i) => !i.classId);
+        const scope = [
+          ...(scopedClassIds.length ? [{ classId: { in: scopedClassIds } }] : []),
+          ...(includesGlobal ? [{ classId: null }] : []),
+        ];
         await tx.examSchedule.deleteMany({
           where: {
             examId,
+            ...(scope.length ? { OR: scope } : {}),
             ...(keepIds.length ? { id: { notIn: keepIds } } : {}),
           }
         });
       }
-    });
+    }, { timeout: 30000, maxWait: 10000 });
 
     res.json(saved);
   } catch (error: any) {
@@ -4560,11 +4825,25 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
     }
 
     if (d.mode === 'auto') {
+      if (d.replace) {
+        const resultCount = await prisma.result.count({ where: { examId: d.examId } });
+        if (resultCount > 0) {
+          return res.status(409).json({ error: 'Cannot replace schedules after marks/results exist. Update the existing schedule instead.' });
+        }
+      }
       // persist computed rows (idempotent per exam/subject/class)
       const saved: any[] = [];
       await prisma.$transaction(async (tx) => {
         if (d.replace) {
-          await tx.examSchedule.deleteMany({ where: { examId: d.examId } });
+          const targetClassIds = Array.from(new Set(resolved.map((r) => r.classId).filter((v): v is string => !!v)));
+          const includesGlobal = resolved.some((r) => !r.classId);
+          const scope = [
+            ...(targetClassIds.length ? [{ classId: { in: targetClassIds } }] : []),
+            ...(includesGlobal ? [{ classId: null }] : []),
+          ];
+          if (scope.length) {
+            await tx.examSchedule.deleteMany({ where: { examId: d.examId, OR: scope } });
+          }
         }
         for (const b of built) {
           const where = { examId: d.examId, subjectId: b.subjectId, classId: b.classId || null };
@@ -4685,7 +4964,7 @@ function addMinutesLocal(time: string, mins: number): string {
 }
 
 // Institute Profile
-app.get('/institute', async (req: Request, res: Response) => {
+app.get('/institute', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { email } = req.query as any;
   if (!email) return res.status(400).json({ error: 'Email is required' });
 
@@ -4709,7 +4988,7 @@ app.get('/institute', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/institute', async (req: Request, res: Response) => {
+app.post('/institute', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { email } = req.query as any;
   if (!email) return res.status(400).json({ error: 'Email is required' });
 
@@ -4822,12 +5101,12 @@ app.delete('/teachers/:id', authMiddleware, checkRole(['Admin']), async (req: Re
 });
 
 // Fees
-app.get('/fees', async (_req: Request, res: Response) => {
+app.get('/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const fees = await prisma.studentFee.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(fees);
 });
 
-app.post('/fees', authMiddleware, async (req: Request, res: Response) => {
+app.post('/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().min(1),
     feeType: z.string(),
@@ -4841,7 +5120,7 @@ app.post('/fees', authMiddleware, async (req: Request, res: Response) => {
   res.status(201).json(fee);
 });
 
-app.put('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
+app.put('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     studentId: z.string().optional(),
@@ -4856,7 +5135,7 @@ app.put('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
   res.json(fee);
 });
 
-app.post('/fees/:id/pay', authMiddleware, async (req: Request, res: Response) => {
+app.post('/fees/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
     // Check if payment ledger entry already exists to prevent double-counting
@@ -4885,7 +5164,7 @@ app.post('/fees/:id/pay', authMiddleware, async (req: Request, res: Response) =>
   res.json(result);
 });
 
-app.delete('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
+app.delete('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.studentFee.delete({ where: { id } });
@@ -4900,12 +5179,12 @@ app.delete('/fees/:id', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Salaries
-app.get('/salaries', async (_req: Request, res: Response) => {
+app.get('/salaries', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const salaries = await prisma.teacherSalary.findMany({ orderBy: { paymentDate: 'desc' } });
   res.json(salaries);
 });
 
-app.post('/salaries/process', async (req: Request, res: Response) => {
+app.post('/salaries/process', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     year: z.number().int(),
     month: z.number().int().min(0).max(11),
@@ -4937,7 +5216,7 @@ app.post('/salaries/process', async (req: Request, res: Response) => {
   res.status(201).json(newRecords);
 });
 
-app.post('/salaries/:id/pay', authMiddleware, async (req: Request, res: Response) => {
+app.post('/salaries/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
     // Check if payment ledger entry already exists to prevent double-counting
@@ -4966,7 +5245,7 @@ app.post('/salaries/:id/pay', authMiddleware, async (req: Request, res: Response
   res.json(result);
 });
 
-app.delete('/salaries/:id', async (req: Request, res: Response) => {
+app.delete('/salaries/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.teacherSalary.delete({ where: { id } });
@@ -4981,12 +5260,12 @@ app.delete('/salaries/:id', async (req: Request, res: Response) => {
 });
 
 // Expenses
-app.get('/expenses', async (_req: Request, res: Response) => {
+app.get('/expenses', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const expenses = await prisma.schoolExpense.findMany({ orderBy: { date: 'desc' } });
   res.json(expenses);
 });
 
-app.post('/expenses', authMiddleware, async (req: Request, res: Response) => {
+app.post('/expenses', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     category: z.string(),
     amount: z.number().positive(),
@@ -5014,7 +5293,7 @@ app.post('/expenses', authMiddleware, async (req: Request, res: Response) => {
   res.status(201).json(result);
 });
 
-app.put('/expenses/:id', authMiddleware, async (req: Request, res: Response) => {
+app.put('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     category: z.string().optional(),
@@ -5042,7 +5321,7 @@ app.put('/expenses/:id', authMiddleware, async (req: Request, res: Response) => 
   res.json(result);
 });
 
-app.delete('/expenses/:id', authMiddleware, async (req: Request, res: Response) => {
+app.delete('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   await prisma.$transaction(async (tx) => {
     // Find and delete the associated ledger entry
@@ -5357,7 +5636,7 @@ app.delete('/classes/:id', authMiddleware, checkRole(['Admin']), async (req: Req
 const announcementTarget = z.enum(['All', 'Teachers', 'Students', 'Parents']);
 const toAnnouncement = (a: any) => ({ ...a, date: a.createdAt });
 
-app.get('/announcements', async (_req: Request, res: Response) => {
+app.get('/announcements', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const items = await prisma.announcement.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(items.map(toAnnouncement));
@@ -5367,7 +5646,7 @@ app.get('/announcements', async (_req: Request, res: Response) => {
   }
 });
 
-app.post('/announcements', async (req: Request, res: Response) => {
+app.post('/announcements', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     title: z.string().min(1),
     content: z.string().min(1),
@@ -5394,7 +5673,7 @@ app.post('/announcements', async (req: Request, res: Response) => {
   }
 });
 
-app.put('/announcements/:id', async (req: Request, res: Response) => {
+app.put('/announcements/:id', authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     title: z.string().min(1).optional(),
@@ -5417,7 +5696,7 @@ app.put('/announcements/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.delete('/announcements/:id', async (req: Request, res: Response) => {
+app.delete('/announcements/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.announcement.delete({ where: { id } });
@@ -5493,7 +5772,7 @@ app.delete('/subjects/:id', authMiddleware, checkRole(['Admin']), async (req: Re
 });
 
 // Attendance
-app.get('/attendance', async (req: Request, res: Response) => {
+app.get('/attendance', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     class: z.string().optional(),
     section: z.string().optional(),
@@ -5538,13 +5817,13 @@ app.get('/attendance', async (req: Request, res: Response) => {
 });
 
 // Tuition Fee Structures
-app.get('/tuition/structures', async (_req: Request, res: Response) => {
+app.get('/tuition/structures', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const items = await prisma.feeStructure.findMany({ where: { isActive: true }, include: { class: true } });
   res.json(items);
 });
 
 // Class -> assigned monthly tuition view (used by the fee assignment menu)
-app.get('/tuition/class-fees', async (_req: Request, res: Response) => {
+app.get('/tuition/class-fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const classes = await prisma.schoolClass.findMany({ orderBy: [{ name: 'asc' }, { section: 'asc' }] });
   const structures = await prisma.feeStructure.findMany({
     where: { isActive: true },
@@ -5563,7 +5842,7 @@ app.get('/tuition/class-fees', async (_req: Request, res: Response) => {
   res.json({ rows, global: global ?? null });
 });
 
-app.post('/tuition/structures', async (req: Request, res: Response) => {
+app.post('/tuition/structures', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     classId: z.string().optional(),
@@ -5577,7 +5856,7 @@ app.post('/tuition/structures', async (req: Request, res: Response) => {
   res.status(201).json(item);
 });
 
-app.put('/tuition/structures/:id', async (req: Request, res: Response) => {
+app.put('/tuition/structures/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -5592,7 +5871,7 @@ app.put('/tuition/structures/:id', async (req: Request, res: Response) => {
   res.json(item);
 });
 
-app.delete('/tuition/structures/:id', async (req: Request, res: Response) => {
+app.delete('/tuition/structures/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.$transaction([
@@ -5610,7 +5889,7 @@ app.delete('/tuition/structures/:id', async (req: Request, res: Response) => {
 });
 
 // Student Fee Assignments
-app.get('/tuition/assignments', async (req: Request, res: Response) => {
+app.get('/tuition/assignments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { studentId } = req.query as any;
   const where: any = {};
   if (studentId) where.studentId = String(studentId);
@@ -5618,7 +5897,7 @@ app.get('/tuition/assignments', async (req: Request, res: Response) => {
   res.json(assignments);
 });
 
-app.post('/tuition/assignments', async (req: Request, res: Response) => {
+app.post('/tuition/assignments', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().min(1),
     feeStructureId: z.string().min(1),
@@ -5636,7 +5915,7 @@ app.post('/tuition/assignments', async (req: Request, res: Response) => {
   res.status(201).json(assignment);
 });
 
-app.put('/tuition/assignments/:id', async (req: Request, res: Response) => {
+app.put('/tuition/assignments/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     discountPercent: z.number().min(0).max(100).optional(),
@@ -5653,14 +5932,14 @@ app.put('/tuition/assignments/:id', async (req: Request, res: Response) => {
   res.json(updated);
 });
 
-app.delete('/tuition/assignments/:id', async (req: Request, res: Response) => {
+app.delete('/tuition/assignments/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   await prisma.studentFeeAssignment.delete({ where: { id } });
   res.status(204).send();
 });
 
 // Tuition Invoice Generation (preview first, then idempotent generate)
-app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
+app.post('/tuition/generate-monthly', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     month: z.number().int().min(1).max(12),
     year: z.number().int(),
@@ -5698,7 +5977,7 @@ app.post('/tuition/generate-monthly', async (req: Request, res: Response) => {
   }
 });
 // Monthly Attendance Matrix
-app.get('/attendance/matrix', async (req: Request, res: Response) => {
+app.get('/attendance/matrix', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     classId: z.string().optional(),
     class: z.string().optional(),
@@ -5830,7 +6109,7 @@ app.get('/attendance/matrix', async (req: Request, res: Response) => {
 // school. Every figure is scoped to on-roll students, and `rate` divides by the
 // number of students actually MARKED in the window - never by the roster - so
 // unmarked days and off-roll students can't depress the percentage.
-app.get('/attendance/overview', async (req: Request, res: Response) => {
+app.get('/attendance/overview', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     date: z.string().optional(),
     startDate: z.string().optional(),
@@ -5971,7 +6250,7 @@ app.get('/attendance/overview', async (req: Request, res: Response) => {
 });
 
 // Teacher Attendance
-app.get('/attendance/teachers', async (req: Request, res: Response) => {
+app.get('/attendance/teachers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     date: z.string().min(1),
   });
@@ -5994,12 +6273,12 @@ app.get('/attendance/teachers', async (req: Request, res: Response) => {
   res.json(result);
 });
 
-app.get('/store/products', async (_req: Request, res: Response) => {
+app.get('/store/products', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const items = await prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(items);
 });
 
-app.post('/store/products', async (req: Request, res: Response) => {
+app.post('/store/products', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     category: z.string().optional(),
@@ -6018,7 +6297,7 @@ app.post('/store/products', async (req: Request, res: Response) => {
   res.status(201).json(item);
 });
 
-app.put('/store/suppliers/:id', async (req: Request, res: Response) => {
+app.put('/store/suppliers/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().min(1).optional(),
@@ -6031,7 +6310,7 @@ app.put('/store/suppliers/:id', async (req: Request, res: Response) => {
   res.json(item);
 });
 
-app.put('/store/products/:id', async (req: Request, res: Response) => {
+app.put('/store/products/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -6045,12 +6324,12 @@ app.put('/store/products/:id', async (req: Request, res: Response) => {
   res.json(item);
 });
 
-app.get('/store/suppliers', async (_req: Request, res: Response) => {
+app.get('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const items = await prisma.supplier.findMany({ orderBy: { name: 'asc' } });
   res.json(items);
 });
 
-app.post('/store/suppliers', async (req: Request, res: Response) => {
+app.post('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     phone: z.string().optional(),
@@ -6062,7 +6341,7 @@ app.post('/store/suppliers', async (req: Request, res: Response) => {
   res.status(201).json(item);
 });
 
-app.get('/store/purchases', async (_req: Request, res: Response) => {
+app.get('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const items = await prisma.purchase.findMany({
     include: { items: true, supplier: true },
     orderBy: { purchaseDate: 'desc' }
@@ -6070,7 +6349,7 @@ app.get('/store/purchases', async (_req: Request, res: Response) => {
   res.json(items);
 });
 
-app.post('/store/purchases', async (req: Request, res: Response) => {
+app.post('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     supplierId: z.string().optional(),
     items: z.array(z.object({
@@ -6114,7 +6393,7 @@ app.post('/store/purchases', async (req: Request, res: Response) => {
   res.status(201).json(result);
 });
 
-app.get('/store/sales', async (_req: Request, res: Response) => {
+app.get('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const items = await prisma.sale.findMany({
     include: { items: true, student: true },
     orderBy: { saleDate: 'desc' }
@@ -6122,7 +6401,7 @@ app.get('/store/sales', async (_req: Request, res: Response) => {
   res.json(items);
 });
 
-app.post('/store/sales', async (req: Request, res: Response) => {
+app.post('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().optional(),
     items: z.array(z.object({
@@ -6169,7 +6448,7 @@ app.post('/store/sales', async (req: Request, res: Response) => {
   res.status(201).json(result);
 });
 
-app.get('/store/inventory', async (_req: Request, res: Response) => {
+app.get('/store/inventory', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
     res.json(products.map((p: any) => ({ id: p.id, name: p.name, stock: p.currentStock })));
@@ -6179,7 +6458,7 @@ app.get('/store/inventory', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/store/reports/profit', async (req: Request, res: Response) => {
+app.get('/store/reports/profit', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const from = req.query.from ? new Date(String(req.query.from)) : null;
   const to = req.query.to ? new Date(String(req.query.to)) : null;
 
@@ -6208,7 +6487,7 @@ app.get('/store/reports/profit', async (req: Request, res: Response) => {
   res.json(grouped);
 });
 
-app.post('/attendance/teachers/save', async (req: Request, res: Response) => {
+app.post('/attendance/teachers/save', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     date: z.string().min(1),
     records: z.array(z.object({ teacherId: z.string().min(1), status: z.string().min(1) })).min(1),
@@ -6234,17 +6513,64 @@ app.post('/attendance/teachers/save', async (req: Request, res: Response) => {
   res.status(201).json({ ok: true });
 });
 
-app.post('/attendance/save', async (req: Request, res: Response) => {
+/**
+ * Attendance leave guard. Protects attendance records an APPROVED full-day
+ * leave has synchronized: teachers marking a student Present/Absent/Late on a
+ * day that leave covers must pass `override: true` (deliberate override) —
+ * accidentally marking an on-leave student Absent is the error this prevents.
+ * Explicitly marking 'Leave' never needs the override.
+ */
+async function assertAttendanceLeaveGuard(records: Array<{ studentId: string; status: string }>, day: Date, override: boolean): Promise<void> {
+  const studentIds = Array.from(new Set(records.map((r) => r.studentId)));
+  if (studentIds.length === 0) return;
+  const leaves = await prisma.leave.findMany({
+    where: {
+      studentId: { in: studentIds },
+      status: 'APPROVED',
+      leaveType: 'FULL_DAY',
+      startDate: { lte: day },
+      endDate: { gte: day },
+    },
+  });
+  if (leaves.length === 0) return;
+  if (override) return;
+  const students = await prisma.student.findMany({
+    where: { id: { in: Array.from(new Set(leaves.map((l) => l.studentId))) } },
+    select: { id: true, name: true },
+  });
+  const names = new Map(students.map((s) => [s.id, s.name]));
+  const flagged: string[] = [];
+  for (const r of records) {
+    const leave = leaves.find((l) => l.studentId === r.studentId);
+    if (!leave) continue;
+    if ((r.status || '').toLowerCase() === 'leave') continue; // explicitly recording Leave is fine
+    flagged.push(names.get(leave.studentId) || leave.studentId);
+  }
+  if (flagged.length === 0) return;
+  throw new HttpError(
+    409,
+    `The following student(s) are on approved full-day leave for this date and must be marked "Leave": ${flagged.join(', ')}. This change was blocked to prevent accidental conflicts; authorized users can override it.`
+  );
+}
+
+app.post('/attendance/save', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     class: z.string().min(1),
     section: z.string().min(1),
     date: z.string().min(1),
     records: z.array(z.object({ studentId: z.string().min(1), status: z.string().min(1) })).min(1),
+    // Deliberate override for marking over an approved leave (reviewer duty).
+    override: z.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { class: className, section, date, records } = parsed.data as any;
   const day = utcMidnight(attendanceDayKey(String(date)));
+  try {
+    await assertAttendanceLeaveGuard(records, day, Boolean(parsed.data.override));
+  } catch (error: any) {
+    return res.status(error.status || error.statusCode || 500).json({ error: error.message });
+  }
     // Only on-roll students may be marked; silently drop records for anyone
     // who was made inactive between loading the register and saving.
     const students = await prisma.student.findMany({ where: { class: className, section, status: ACTIVE_STUDENT_STATUS } });
@@ -6316,7 +6642,7 @@ app.delete('/attendance/date', authMiddleware, checkRole(['Admin']), async (req:
   }
 });
 // Admission Packages
-app.get('/admission-packages', async (req: Request, res: Response) => {
+app.get('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { classId, session } = req.query;
   const where: any = { isActive: true };
   if (classId) where.classId = String(classId);
@@ -6330,7 +6656,7 @@ app.get('/admission-packages', async (req: Request, res: Response) => {
   res.json(packages);
 });
 
-app.post('/admission-packages', async (req: Request, res: Response) => {
+app.post('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string(),
     session: z.string(),
@@ -6363,7 +6689,7 @@ app.post('/admission-packages', async (req: Request, res: Response) => {
   res.json(pkg);
 });
 
-app.put('/admission-packages/:id', async (req: Request, res: Response) => {
+app.put('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -6415,7 +6741,7 @@ app.put('/admission-packages/:id', async (req: Request, res: Response) => {
   }
 });
 
-app.delete('/admission-packages/:id', async (req: Request, res: Response) => {
+app.delete('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.admissionPackage.delete({ where: { id } });
@@ -6425,8 +6751,8 @@ app.delete('/admission-packages/:id', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to delete package' });
   }
 });
-// Replace your existing app.post('/students/admission', ...) with this:
-app.post('/students/admission', async (req: Request, res: Response) => {
+// Replace your existing app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), ...) with this:
+app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     student: z.object({
       name: z.string(),
@@ -6686,7 +7012,7 @@ app.post('/students/admission', async (req: Request, res: Response) => {
 });
 
 // Payments
-app.post('/payments', authMiddleware, async (req: Request, res: Response) => {
+app.post('/payments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     invoiceId: z.string(),
     amount: z.number().positive(),
@@ -6881,7 +7207,7 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
   }, MONEY_TX_OPTIONS);
 };
 
-app.post('/payments/:id/void', authMiddleware, async (req: Request, res: Response) => {
+app.post('/payments/:id/void', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
   const parsed = schema.safeParse(req.body ?? {});
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Voided';
@@ -6896,7 +7222,7 @@ app.post('/payments/:id/void', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-app.post('/payments/:id/refund', authMiddleware, async (req: Request, res: Response) => {
+app.post('/payments/:id/refund', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({ reason: z.string().optional(), actor: z.string().optional() });
   const parsed = schema.safeParse(req.body ?? {});
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Refund';
@@ -6911,7 +7237,7 @@ app.post('/payments/:id/refund', authMiddleware, async (req: Request, res: Respo
   }
 });
 
-app.get('/invoices', async (req: Request, res: Response) => {
+app.get('/invoices', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { studentId, page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -6945,7 +7271,7 @@ app.get('/invoices', async (req: Request, res: Response) => {
   });
 });
 
-app.post('/invoices/from-package', async (req: Request, res: Response) => {
+app.post('/invoices/from-package', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string(),
     packageId: z.string()
@@ -6985,7 +7311,7 @@ app.post('/invoices/from-package', async (req: Request, res: Response) => {
 });
 
 // Create simple invoice (generic fee record) with optional immediate payment
-app.post('/invoices/simple', async (req: Request, res: Response) => {
+app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string(),
     type: z.string().default('fee'),
@@ -7080,7 +7406,7 @@ app.post('/invoices/simple', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/invoices/:id', async (req: Request, res: Response) => {
+app.get('/invoices/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   console.log(`[GET /invoices/:id] Fetching invoice with id: ${id}`);
   const invoice = await prisma.invoice.findUnique({
@@ -7094,12 +7420,12 @@ app.get('/invoices/:id', async (req: Request, res: Response) => {
 });
 
 // Staff
-app.get('/staff', async (_req: Request, res: Response) => {
+app.get('/staff', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const staff = await prisma.staff.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(staff);
 });
 
-app.post('/staff', async (req: Request, res: Response) => {
+app.post('/staff', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     employeeId: z.string().min(1),
@@ -7116,20 +7442,20 @@ app.post('/staff', async (req: Request, res: Response) => {
   res.status(201).json(staff);
 });
 
-app.put('/staff/:id', async (req: Request, res: Response) => {
+app.put('/staff/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const staff = await prisma.staff.update({ where: { id }, data: req.body });
   res.json(staff);
 });
 
-app.delete('/staff/:id', async (req: Request, res: Response) => {
+app.delete('/staff/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   await prisma.staff.delete({ where: { id } });
   res.status(204).send();
 });
 
 // Staff Salaries
-app.get('/salaries/staff', async (_req: Request, res: Response) => {
+app.get('/salaries/staff', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   const salaries = await prisma.staffSalary.findMany({
     include: { staff: true },
     orderBy: { paymentDate: 'desc' }
@@ -7141,7 +7467,7 @@ app.get('/salaries/staff', async (_req: Request, res: Response) => {
   })));
 });
 
-app.post('/salaries/staff/process', async (req: Request, res: Response) => {
+app.post('/salaries/staff/process', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     staffIds: z.array(z.string()).min(1),
     month: z.number().min(1).max(12),
@@ -7174,7 +7500,7 @@ app.post('/salaries/staff/process', async (req: Request, res: Response) => {
   res.json(results);
 });
 
-app.post('/salaries/staff/:id/pay', authMiddleware, async (req: Request, res: Response) => {
+app.post('/salaries/staff/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
     // Check if payment ledger entry already exists to prevent double-counting
@@ -7204,7 +7530,7 @@ app.post('/salaries/staff/:id/pay', authMiddleware, async (req: Request, res: Re
 });
 
 // Ledger & Transactions
-app.get('/finance/transactions', async (req: Request, res: Response) => {
+app.get('/finance/transactions', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { type, category, page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7231,7 +7557,7 @@ app.get('/finance/transactions', async (req: Request, res: Response) => {
   });
 });
 
-app.get('/finance/income', async (req: Request, res: Response) => {
+app.get('/finance/income', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7269,7 +7595,7 @@ const legacyCategoryKeys = (name: string): string[] =>
     name.toLowerCase().replace(/\s+/g, '_'),
   ]));
 
-app.get('/finance/categories', authMiddleware, async (req: Request, res: Response) => {
+app.get('/finance/categories', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { type, includeInactive } = req.query;
     const where: any = {};
@@ -7388,7 +7714,7 @@ app.delete('/finance/categories/:id', authMiddleware, checkRole(['Admin']), asyn
  * Writes an active ledger row (reversedAt stays null) so it is picked up by every
  * total, including the dashboard, without any special-casing.
  */
-app.post('/finance/income', authMiddleware, async (req: Request, res: Response) => {
+app.post('/finance/income', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { category, amount, date, notes, reference } = (req.body ?? {}) as {
     category?: string;
     amount?: unknown;
@@ -7442,7 +7768,7 @@ app.post('/finance/income', authMiddleware, async (req: Request, res: Response) 
  * so the page total and the dashboard total could never agree. Reading the same
  * ledger the totals use makes the two reconcile by construction.
  */
-app.get('/finance/expenses', authMiddleware, async (req: Request, res: Response) => {
+app.get('/finance/expenses', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { page = '1', limit = '20', category } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7471,7 +7797,7 @@ app.get('/finance/expenses', authMiddleware, async (req: Request, res: Response)
 });
 
 // Financial Reports
-app.get('/finance/reports/summary', async (req: Request, res: Response) => {
+app.get('/finance/reports/summary', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { from, to } = req.query;
   const where: any = {};
   if (from && to) {
@@ -7505,7 +7831,7 @@ app.get('/finance/reports/summary', async (req: Request, res: Response) => {
 });
 
 // Fee Reports
-app.get('/finance/reports/fees', async (req: Request, res: Response) => {
+app.get('/finance/reports/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { page = '1', limit = '50' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 50));
@@ -7550,7 +7876,7 @@ app.get('/finance/reports/fees', async (req: Request, res: Response) => {
 });
 
 // Fee summary (derived from invoices — never a parallel source of truth)
-app.get('/finance/fees/summary', async (_req: Request, res: Response) => {
+app.get('/finance/fees/summary', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const today = new Date();
     const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -7799,7 +8125,7 @@ app.post('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), asy
 });
 
 // Fee Particulars
-app.get('/fee-particulars', async (req: Request, res: Response) => {
+app.get('/fee-particulars', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { target } = req.query;
   const where: any = {};
   if (target) where.target = String(target);
@@ -7811,7 +8137,7 @@ app.get('/fee-particulars', async (req: Request, res: Response) => {
   res.json(particulars);
 });
 
-app.post('/fee-particulars/bulk', async (req: Request, res: Response) => {
+app.post('/fee-particulars/bulk', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const schema = z.object({
     target: z.string(),
     particulars: z.array(z.object({
@@ -8097,8 +8423,8 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         }
       });
 
-      // For admin, check password (simplified - in production use proper hashing)
-      if (user && user.email === email && (password === 'fresh_password_2026' || await bcrypt.compare(password, user.password))) {
+      // For admin, verify password against stored hash
+      if (user && user.email === email && await bcrypt.compare(password, user.password)) {
         // Admin found
       } else {
         user = null;
@@ -8138,16 +8464,6 @@ app.post('/auth/login', async (req: Request, res: Response) => {
               data: { lastLogin: new Date() }
             }).catch(() => {});
           }
-        } else if (
-          // No credential on file yet — legacy fallbacks for un-provisioned
-          // teachers only, so they can never bypass a password an admin set.
-          password === teacher.employeeId ||
-          password === teacher.email.split('@')[0] ||
-          password === 'password' ||
-          password === 'test' ||
-          password === '123456'
-        ) {
-          user = session;
         }
       }
     } else if (role && role.toLowerCase() === 'student') {
@@ -8189,24 +8505,21 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         });
 
         if (student) {
-          // For students without login records, accept any password (simplified)
-          user = {
-            id: student.id,
-            studentId: student.id,
-            email: student.email,
-            role: 'Student',
-            name: student.name,
-            admissionNo: student.admissionNo
-          };
+          // Students without an Active StudentLogin row cannot sign in
+          // Reject unless a login record exists with matching credentials
         }
       }
     }
 
     if (user) {
       // Generate JWT token - use same fallback as authMiddleware for consistency
+      const jwtSecret = process.env.JWT_SECRET;
+      if (!jwtSecret) {
+        return res.status(500).json({ error: 'Server misconfigured: JWT_SECRET is not set' });
+      }
       const token = jwt.sign(
         { userId: user.id, email: user.email, role: user.role },
-        process.env.JWT_SECRET || 'fallback-jwt-secret-for-development',
+        jwtSecret,
         { expiresIn: '7d' }
       );
 
@@ -8223,6 +8536,406 @@ app.post('/auth/login', async (req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------
+// Auth: Forgot Password
+// ---------------------------------------------------------------
+app.post('/auth/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      email: z.string().email('Invalid email address'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { email } = parsed.data;
+
+    // Find user by email across User (Admin), TeacherLogin, StudentLogin
+    let userRecord: { id: string; email: string; role: string } | null = null;
+
+    const adminUser = await prisma.user.findFirst({ where: { email } });
+    if (adminUser && adminUser.email) {
+      userRecord = { id: adminUser.id, email: adminUser.email, role: 'Admin' };
+    }
+
+    if (!userRecord) {
+      const teacher = await prisma.teacher.findFirst({ where: { email } });
+      if (teacher && teacher.email) {
+        userRecord = { id: teacher.id, email: teacher.email, role: 'Teacher' };
+      }
+    }
+
+    if (!userRecord) {
+      const student = await prisma.student.findFirst({ where: { email } });
+      if (student && student.email) {
+        userRecord = { id: student.id, email: student.email, role: 'Student' };
+      }
+    }
+
+    if (!userRecord) {
+      // Don't reveal whether email exists - always return success
+      return res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    await prisma.passwordResetToken.create({
+      data: {
+        token: resetToken,
+        userId: userRecord.id,
+        expiresAt,
+      },
+    });
+
+    // Build reset URL - frontend handles the actual reset page
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:9002'}/auth/reset-password?token=${resetToken}`;
+
+    await sendPasswordResetEmail(email, resetUrl);
+
+    return res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
+  } catch (error: any) {
+    console.error('Forgot password error:', error);
+    return res.status(500).json({ error: 'Failed to process reset request' });
+  }
+});
+
+// ---------------------------------------------------------------
+// Auth: Reset Password
+// ---------------------------------------------------------------
+app.post('/auth/reset-password', async (req: Request, res: Response) => {
+  try {
+    const schema = z.object({
+      token: z.string().min(1, 'Reset token is required'),
+      newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { token, newPassword } = parsed.data;
+
+    // Find valid reset token
+    const resetToken = await prisma.passwordResetToken.findFirst({
+      where: {
+        token,
+        used: false,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (!resetToken) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    // Determine user type and update password
+    let updatedUser: any;
+    if (resetToken.userId.startsWith('cmu')) {
+      // Try User (Admin) first
+      const adminUser = await prisma.user.findUnique({ where: { id: resetToken.userId } });
+      if (adminUser) {
+        updatedUser = await prisma.user.update({
+          where: { id: resetToken.userId },
+          data: { password: newHash },
+        });
+      } else {
+        const teacher = await prisma.teacher.findUnique({ where: { id: resetToken.userId } });
+        if (teacher) {
+          const teacherLogin = await prisma.teacherLogin.findUnique({ where: { teacherId: teacher.id } });
+          if (teacherLogin) {
+            updatedUser = await prisma.teacherLogin.update({
+              where: { id: teacherLogin.id },
+              data: { password: newHash },
+            });
+          }
+        }
+      }
+    }
+
+    if (!updatedUser) {
+      const student = await prisma.student.findUnique({ where: { id: resetToken.userId } });
+      if (student) {
+        const studentLogin = await prisma.studentLogin.findUnique({ where: { studentId: student.id } });
+        if (studentLogin) {
+          updatedUser = await prisma.studentLogin.update({
+            where: { id: studentLogin.id },
+            data: { password: newHash },
+          });
+        }
+      }
+    }
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: 'User account not found' });
+    }
+
+    // Mark token as used
+    await prisma.passwordResetToken.update({
+      where: { id: resetToken.id },
+      data: { used: true },
+    });
+
+    // Invalidate all other reset tokens for this user
+    await prisma.passwordResetToken.updateMany({
+      where: { userId: resetToken.userId, used: false },
+      data: { used: true },
+    });
+
+    return res.json({ message: 'Password reset successful. You can now log in with your new password.' });
+  } catch (error: any) {
+    console.error('Reset password error:', error);
+    return res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ---------------------------------------------------------------
+// Auth: Change Password
+// ---------------------------------------------------------------
+app.post('/auth/change-password', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const userRole = (req as any).user?.role;
+
+    const schema = z.object({
+      currentPassword: z.string().min(1, 'Current password is required'),
+      newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { currentPassword, newPassword } = parsed.data;
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    if (userRole === 'Admin') {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user || !user.password) {
+        return res.status(404).json({ error: 'User account not found or has no password set' });
+      }
+      const currentValid = await bcrypt.compare(currentPassword, user.password);
+      if (!currentValid) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+      await prisma.user.update({ where: { id: userId }, data: { password: newHash } });
+    } else if (userRole === 'Teacher') {
+      const login = await prisma.teacherLogin.findUnique({ where: { teacherId: userId } });
+      if (!login || !login.password) {
+        return res.status(404).json({ error: 'Teacher login not found or has no password set' });
+      }
+      const currentValid = await bcrypt.compare(currentPassword, login.password);
+      if (!currentValid) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+      await prisma.teacherLogin.update({ where: { id: login.id }, data: { password: newHash } });
+    } else if (userRole === 'Student') {
+      const login = await prisma.studentLogin.findUnique({ where: { studentId: userId } });
+      if (!login || !login.password) {
+        return res.status(404).json({ error: 'Student login not found or has no password set' });
+      }
+      const currentValid = await bcrypt.compare(currentPassword, login.password);
+      if (!currentValid) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+      await prisma.studentLogin.update({ where: { id: login.id }, data: { password: newHash } });
+    } else {
+      return res.status(400).json({ error: 'Unknown user role' });
+    }
+
+    return res.json({ success: true, message: 'Password changed successfully. Please log in again.' });
+  } catch (error: any) {
+    console.error('Change password error:', error);
+    return res.status(500).json({ error: 'Failed to change password', details: error.message });
+  }
+});
+
+// ---------------------------------------------------------------
+// Auth: Two-Factor Authentication
+// ---------------------------------------------------------------
+
+// Generate a TOTP secret and return QR code + manual entry code
+app.post('/auth/2fa/setup', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const userEmail = (req as any).user?.email;
+    const userRole = (req as any).user?.role;
+
+    if (!userEmail) {
+      return res.status(400).json({ error: 'User email not found' });
+    }
+
+    const secret = speakeasy.generateSecret({
+      length: 32,
+      name: `SMS (${userEmail})`,
+    });
+
+    // Store the secret unconfirmed; it will be saved only after verification
+    await prisma.user.update({
+      where: { id: userId },
+      data: { twoFactorSecret: secret.base32 },
+    });
+
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url!);
+
+    return res.json({
+      secret: secret.base32,
+      qrCode: qrCodeUrl,
+      otpauthUrl: secret.otpauth_url,
+    });
+  } catch (error: any) {
+    console.error('2FA setup error:', error);
+    return res.status(500).json({ error: 'Failed to setup 2FA', details: error.message });
+  }
+});
+
+// Verify the TOTP code and permanently enable 2FA
+app.post('/auth/2fa/verify', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const schema = z.object({
+      code: z.string().min(6, 'Code must be 6 digits').max(6, 'Code must be 6 digits'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { code } = parsed.data;
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.twoFactorSecret) {
+      return res.status(400).json({ error: 'No 2FA setup found. Run setup first.' });
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: code,
+    });
+
+    if (!verified) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+
+    // Generate backup codes
+    const backupCodes = Array.from({ length: 8 }, () =>
+      Math.floor(Math.random() * 1000000).toString().padStart(6, '0')
+    );
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        twoFactorEnabled: true,
+        twoFactorBackupCodes: JSON.stringify(backupCodes),
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Two-factor authentication enabled',
+      backupCodes,
+    });
+  } catch (error: any) {
+    console.error('2FA verify error:', error);
+    return res.status(500).json({ error: 'Failed to verify 2FA', details: error.message });
+  }
+});
+
+// Disable 2FA
+app.post('/auth/2fa/disable', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const schema = z.object({
+      code: z.string().min(6, 'Code must be 6 digits').max(6, 'Code must be 6 digits'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
+
+    const { code } = parsed.data;
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+
+    // Accept TOTP code or a backup code
+    let valid = false;
+
+    if (user.twoFactorSecret) {
+      valid = speakeasy.totp.verify({
+        secret: user.twoFactorSecret,
+        encoding: 'base32',
+        token: code,
+      });
+    }
+
+    if (!valid && user.twoFactorBackupCodes) {
+      const codes: string[] = JSON.parse(user.twoFactorBackupCodes);
+      if (codes.includes(code)) {
+        valid = true;
+        // Remove the used backup code
+        const remaining = codes.filter(c => c !== code);
+        await prisma.user.update({
+          where: { id: userId },
+          data: { twoFactorBackupCodes: JSON.stringify(remaining) },
+        });
+      }
+    }
+
+    if (!valid) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        twoFactorEnabled: false,
+        twoFactorSecret: null,
+        twoFactorBackupCodes: null,
+      },
+    });
+
+    return res.json({ success: true, message: 'Two-factor authentication disabled' });
+  } catch (error: any) {
+    console.error('2FA disable error:', error);
+    return res.status(500).json({ error: 'Failed to disable 2FA', details: error.message });
+  }
+});
+
+// Get 2FA status
+app.get('/auth/2fa/status', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { twoFactorEnabled: true, twoFactorSecret: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    return res.json({
+      twoFactorEnabled: user.twoFactorEnabled,
+      hasSecret: !!user.twoFactorSecret,
+    });
+  } catch (error: any) {
+    console.error('2FA status error:', error);
+    return res.status(500).json({ error: 'Failed to get 2FA status', details: error.message });
+  }
+});
+
+// ---------------------------------------------------------------
 // Teacher Portal Endpoints
 app.get('/teacher/dashboard', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
@@ -8620,16 +9333,27 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
         date: { gte: dayStart, lt: dayEnd },
         studentId: { in: students.map((s) => s.id) }
       },
-      select: { studentId: true, status: true }
+      select: { studentId: true, status: true, leave: { select: { category: true, leaveType: true, halfDaySession: true } } }
     });
     const statusMap = new Map(savedRecords.map((r) => [r.studentId, r.status]));
+    const leaveInfoMap = new Map(savedRecords.filter((r) => r.leave).map((r) => [r.studentId, r.leave]));
 
-    const studentData = students.map(student => ({
-      studentId: student.id,
-      studentName: student.name,
-      roll: student.roll,
-      status: statusMap.has(student.id) ? lowerAttendanceStatus(statusMap.get(student.id)) : 'present'
-    }));
+    const studentData = students.map(student => {
+      const status = statusMap.has(student.id) ? lowerAttendanceStatus(statusMap.get(student.id)) : 'present';
+      const leaveInfo = leaveInfoMap.get(student.id) as any;
+      return {
+        studentId: student.id,
+        studentName: student.name,
+        roll: student.roll,
+        status,
+        // Approved-left students surface an explicit indicator so teachers do
+        // not mark them absent by mistake; the save endpoint also enforces it.
+        onLeave: status === 'leave',
+        leaveCategory: leaveInfo?.category || null,
+        leaveType: leaveInfo?.leaveType || null,
+        halfDaySession: leaveInfo?.halfDaySession || null,
+      };
+    });
 
     res.json(studentData);
   } catch (error) {
@@ -8641,7 +9365,7 @@ app.get('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (re
 app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { classId, date, records } = req.body;
+    const { classId, date, records, override } = req.body;
 
     if (!classId || !date || !records) {
       return res.status(400).json({ error: 'Class ID, date, and records are required' });
@@ -8680,6 +9404,18 @@ app.post('/teacher/attendance', authMiddleware, checkRole(['Teacher']), async (r
 
     if (toSave.length === 0) {
       return res.status(400).json({ error: 'No valid student records provided' });
+    }
+
+    // Approved full-day leaves protect their synchronized rows from accidental
+    // overrides (e.g. an absent mark for an on-leave student).
+    try {
+      await assertAttendanceLeaveGuard(
+        toSave.map((r: any) => ({ studentId: r.studentId, status: normalizeAttendanceStatus(r.status) })),
+        day,
+        Boolean(override)
+      );
+    } catch (guardError: any) {
+      return res.status(guardError.status || guardError.statusCode || 500).json({ error: guardError.message });
     }
 
     await prisma.$transaction(
@@ -8753,7 +9489,7 @@ function routineColorFor(name: string): string {
   return ROUTINE_COLORS[hash % ROUTINE_COLORS.length];
 }
 
-app.get('/class-routine/classes', async (_req: Request, res: Response) => {
+app.get('/class-routine/classes', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const classes = await prisma.schoolClass.findMany({
       orderBy: { name: 'asc' },
@@ -8786,7 +9522,7 @@ app.get('/class-routine/classes', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/class-routine/teachers', async (_req: Request, res: Response) => {
+app.get('/class-routine/teachers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const teachers = await prisma.teacher.findMany({
       where: { status: 'Active' },
@@ -8806,7 +9542,7 @@ app.get('/class-routine/teachers', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/class-routine/subjects', async (_req: Request, res: Response) => {
+app.get('/class-routine/subjects', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const subjects = await prisma.subject.findMany({
       select: {
@@ -8825,7 +9561,7 @@ app.get('/class-routine/subjects', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/class-routine/rooms', async (_req: Request, res: Response) => {
+app.get('/class-routine/rooms', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     // Return mock room data since there's no Room model in the schema
     const rooms = [
@@ -8849,7 +9585,7 @@ app.get('/class-routine/rooms', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
+app.get('/class-routine/time-slots', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
   try {
     const defaultSlots = [
       { id: '1', period: 'Period 1', timeRange: '08:00 - 08:40', isBreak: false },
@@ -8867,7 +9603,25 @@ app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
     });
 
     if (persisted.length === 0) {
-      return res.json(defaultSlots);
+      const seeded = await prisma.$transaction(
+        defaultSlots.map((slot, index) =>
+          prisma.routinePeriod.create({
+            data: {
+              period: slot.period,
+              timeRange: slot.timeRange,
+              isBreak: slot.isBreak,
+              sortOrder: index
+            }
+          })
+        )
+      );
+
+      return res.json(seeded.map(p => ({
+        id: p.id,
+        period: p.period,
+        timeRange: p.timeRange,
+        isBreak: p.isBreak
+      })));
     }
 
     res.json(persisted.map(p => ({
@@ -8882,7 +9636,7 @@ app.get('/class-routine/time-slots', async (_req: Request, res: Response) => {
   }
 });
 
-app.post('/class-routine/periods/save', async (req: Request, res: Response) => {
+app.post('/class-routine/periods/save', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const schema = z.object({
       id: z.string().optional(),
@@ -8917,7 +9671,7 @@ app.post('/class-routine/periods/save', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/class-routine/periods/reorder', async (req: Request, res: Response) => {
+app.post('/class-routine/periods/reorder', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const schema = z.object({ ids: z.array(z.string()).min(1) });
     const parsed = schema.safeParse(req.body);
@@ -8926,12 +9680,28 @@ app.post('/class-routine/periods/reorder', async (req: Request, res: Response) =
     }
 
     const { ids } = parsed.data;
-    const tx = await prisma.$transaction(
+    await prisma.$transaction(
       ids.map((id, index) => prisma.routinePeriod.update({
         where: { id },
         data: { sortOrder: index }
       }))
     );
+
+    // Renumber non-break periods so their names follow the new position.
+    const ordered = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+    let periodNumber = 0;
+    const renameOps: any[] = [];
+    for (const p of ordered) {
+      if (p.isBreak) continue;
+      periodNumber += 1;
+      const name = `Period ${periodNumber}`;
+      if (p.period !== name) {
+        renameOps.push(prisma.routinePeriod.update({ where: { id: p.id }, data: { period: name } }));
+      }
+    }
+    if (renameOps.length > 0) {
+      await prisma.$transaction(renameOps);
+    }
 
     const all = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
     res.json(all.map(p => ({ id: p.id, period: p.period, timeRange: p.timeRange, isBreak: p.isBreak })));
@@ -8941,7 +9711,7 @@ app.post('/class-routine/periods/reorder', async (req: Request, res: Response) =
   }
 });
 
-app.delete('/class-routine/periods/:id', async (req: Request, res: Response) => {
+app.delete('/class-routine/periods/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     await prisma.routinePeriod.delete({ where: { id: req.params.id } });
     const all = await prisma.routinePeriod.findMany({ orderBy: { sortOrder: 'asc' } });
@@ -8952,7 +9722,7 @@ app.delete('/class-routine/periods/:id', async (req: Request, res: Response) => 
   }
 });
 
-app.get('/class-routine/timetable', async (req: Request, res: Response) => {
+app.get('/class-routine/timetable', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const { classId, section } = req.query;
 
@@ -8992,7 +9762,7 @@ app.get('/class-routine/timetable', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/class-routine/update-entry', async (req: Request, res: Response) => {
+app.post('/class-routine/update-entry', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   try {
     const schema = z.object({
       classId: z.string(),
@@ -9202,51 +9972,186 @@ app.post('/teacher/marks', authMiddleware, checkRole(['Teacher']), async (req: R
       return res.status(403).json({ error: 'One or more students are not in this class' });
     }
 
-    // Save marks for each student
-    const savedMarks = await prisma.$transaction(
-      marks.map((mark: any) => {
-        const resolvedSubjectId = mark.subjectId || fallbackSubjectId;
-        if (!resolvedSubjectId) {
-          throw new Error('subjectId is required to save marks');
-        }
+    const exam = await prisma.exam.findUnique({ where: { id: String(examId) }, select: { id: true, typeId: true, status: true } });
+    if (!exam) return res.status(404).json({ error: 'Exam not found' });
+    if (exam.status === 'Published') {
+      return res.status(403).json({ error: 'Cannot edit marks for published results. Unpublish the exam first.' });
+    }
 
-        return prisma.result.upsert({
+    const resolvedSubjectIds = Array.from(new Set((marks as any[])
+      .map((m: any) => m.subjectId || fallbackSubjectId)
+      .filter((id: any): id is string => !!id)));
+    const [schedules, allGrading, attendanceRows] = await Promise.all([
+      prisma.examSchedule.findMany({ where: { examId: String(examId), subjectId: { in: resolvedSubjectIds } } }),
+      prisma.gradingSystem.findMany({ orderBy: { minPercent: 'desc' } }),
+      prisma.examAttendance.findMany({
+        where: {
+          examId: String(examId),
+          subjectId: { in: resolvedSubjectIds },
+          studentId: { in: [...classStudentIds] },
+        },
+        select: { studentId: true, subjectId: true, status: true },
+      }),
+    ]);
+    const gradingByType = new Map<string, typeof allGrading>();
+    for (const g of allGrading) {
+      const key = g.examTypeId ?? '__template__';
+      if (!gradingByType.has(key)) gradingByType.set(key, []);
+      gradingByType.get(key)!.push(g);
+    }
+    const defaultGrading = gradingByType.get(exam.typeId ?? '') || [];
+    const absentKeys = new Set(attendanceRows.filter((a) => a.status === 'ABSENT').map((a) => `${a.studentId}|${a.subjectId}`));
+    const passFor = (full: number, explicit?: number | null) => {
+      const max = Math.max(0, Number(full) || 0);
+      const configured = Number(explicit) || 0;
+      return configured > 0 && configured <= max ? configured : Math.min(max, Math.round(max * 0.33));
+    };
+
+    const normalized = (marks as any[]).map((mark: any) => {
+      const resolvedSubjectId = mark.subjectId || fallbackSubjectId;
+      if (!resolvedSubjectId) throw new HttpError(400, 'subjectId is required to save marks');
+
+      const schedule = schedules.find((s) => s.subjectId === resolvedSubjectId && s.classId === String(classId))
+        || schedules.find((s) => s.subjectId === resolvedSubjectId && !s.classId);
+      if (!schedule) throw new HttpError(400, `No schedule found for ${resolvedSubjectId} in this class`);
+
+      const gradingForSchedule = gradingByType.get(schedule.gradingTypeId || exam.typeId || '') || defaultGrading;
+      const template = gradingForSchedule[0] as any;
+      const writtenFull = (schedule.writtenFullMarks || 0) > 0 ? schedule.writtenFullMarks! : (template?.writtenFull ?? 0);
+      const mcqFull = (schedule.mcqFullMarks || 0) > 0 ? schedule.mcqFullMarks! : (template?.mcqFull ?? 0);
+      const practicalFull = (schedule.practicalFullMarks || 0) > 0 ? schedule.practicalFullMarks! : (template?.practicalFull ?? 0);
+      const totalFull = (schedule.fullMarks || 0) > 0
+        ? schedule.fullMarks!
+        : ((template?.totalFull ?? 0) || writtenFull + mcqFull + practicalFull || 100);
+
+      const written = Number(mark.written) || 0;
+      const mcq = Number(mark.mcq) || 0;
+      const practical = Number(mark.practical) || 0;
+      if (![written, mcq, practical].every((v) => Number.isFinite(v) && v >= 0)) {
+        throw new HttpError(400, `Marks cannot be negative for student ${mark.studentId}`);
+      }
+      if (written > writtenFull) throw new HttpError(400, `Written marks (${written}) exceed maximum (${writtenFull})`);
+      if (mcq > mcqFull) throw new HttpError(400, `MCQ marks (${mcq}) exceed maximum (${mcqFull})`);
+      if (practical > practicalFull) throw new HttpError(400, `Practical marks (${practical}) exceed maximum (${practicalFull})`);
+      if (absentKeys.has(`${mark.studentId}|${resolvedSubjectId}`)) {
+        throw new HttpError(400, `Cannot enter marks for absent student ${mark.studentId}`);
+      }
+
+      const totalMarks = written + mcq + practical;
+      if (totalMarks > totalFull) {
+        throw new HttpError(400, `Total marks (${totalMarks}) exceed full marks (${totalFull})`);
+      }
+
+      const writtenPass = passFor(writtenFull, schedule.writtenPassMarks);
+      const mcqPass = passFor(mcqFull, schedule.mcqPassMarks);
+      const practicalPass = passFor(practicalFull, schedule.practicalPassMarks);
+      const totalPass = passFor(totalFull, schedule.passMarks);
+      const isFail = (writtenFull > 0 && written < writtenPass)
+        || (mcqFull > 0 && mcq < mcqPass)
+        || (practicalFull > 0 && practical < practicalPass)
+        || totalMarks < totalPass;
+
+      let bands: any[] = gradingForSchedule;
+      let snapshotFull = 0;
+      if (schedule.gradingSnapshot) {
+        const snapshot = parseGradingSnapshot(schedule.gradingSnapshot);
+        if (Array.isArray(snapshot?.bands) && snapshot.bands.length > 0) {
+          bands = snapshot.bands;
+          if (typeof snapshot.totalFull === 'number' && snapshot.totalFull > 0) snapshotFull = snapshot.totalFull;
+        }
+      }
+
+      let gradeInfo: any;
+      if (isFail) {
+        gradeInfo = bands.find((b: any) => String(b.status).toUpperCase() === 'FAIL') || { grade: 'F', gp: 0 };
+      } else {
+        const percent = totalFull > 0 ? (totalMarks / totalFull) * 100 : 0;
+        const bandRef = snapshotFull || template?.totalFull || 100;
+        const bandMax = Math.max(...bands.map((b: any) => Number(b.maxPercent) || 0));
+        const asPctRef = bandMax > 0 && bandRef > 0 ? Math.min(bandMax, bandRef) : (bandMax || bandRef || 100);
+        const asPct = (v: any) => ((Number(v) || 0) / asPctRef) * 100;
+        const sorted = [...bands].sort((a: any, b: any) => asPct(a.minPercent) - asPct(b.minPercent));
+        let matched: any = null;
+        for (const band of sorted) {
+          if (asPct(band.minPercent) <= percent + 0.0001) matched = band;
+        }
+        gradeInfo = matched || sorted.find((b: any) => String(b.status).toUpperCase() === 'FAIL') || sorted[0];
+      }
+
+      return {
+        studentId: mark.studentId,
+        subjectId: resolvedSubjectId,
+        written,
+        mcq,
+        practical,
+        totalMarks,
+        grade: gradeInfo?.grade || 'F',
+        gp: gradeInfo?.gp || 0,
+      };
+    });
+
+    // Save marks for each student. Total/grade/gp are always computed on the
+    // server; client-supplied derived values are ignored.
+    const savedMarks = await prisma.$transaction(async (tx) => {
+      const saved: any[] = [];
+      for (const row of normalized) {
+        saved.push(await tx.result.upsert({
           where: {
             studentId_examId_subjectId: {
-              studentId: mark.studentId,
-              examId: examId,
-              subjectId: resolvedSubjectId
+              studentId: row.studentId,
+              examId: String(examId),
+              subjectId: row.subjectId,
             }
           },
           update: {
-            written: parseFloat(mark.written) || 0,
-            mcq: parseFloat(mark.mcq) || 0,
-            practical: parseFloat(mark.practical) || 0,
-            totalMarks: mark.total,
-            grade: mark.grade,
-            gp: mark.gp
+            written: row.written,
+            mcq: row.mcq,
+            practical: row.practical,
+            totalMarks: row.totalMarks,
+            grade: row.grade,
+            gp: row.gp,
+            isAbsent: false,
           },
           create: {
-            studentId: mark.studentId,
-            examId: examId,
-            subjectId: resolvedSubjectId,
-            written: parseFloat(mark.written) || 0,
-            mcq: parseFloat(mark.mcq) || 0,
-            practical: parseFloat(mark.practical) || 0,
-            totalMarks: mark.total,
-            grade: mark.grade,
-            gp: mark.gp
+            studentId: row.studentId,
+            examId: String(examId),
+            subjectId: row.subjectId,
+            written: row.written,
+            mcq: row.mcq,
+            practical: row.practical,
+            totalMarks: row.totalMarks,
+            grade: row.grade,
+            gp: row.gp,
+            isAbsent: false,
           }
-        })
-      })
-    );
+        }));
+      }
+
+      for (const subjectId of new Set(normalized.map((r) => r.subjectId))) {
+        const aggregate = await tx.result.aggregate({
+          where: { examId: String(examId), subjectId, studentId: { in: [...classStudentIds] } },
+          _max: { totalMarks: true },
+        });
+        const highest = aggregate._max.totalMarks ?? 0;
+        await tx.result.updateMany({
+          where: { examId: String(examId), subjectId, studentId: { in: [...classStudentIds] } },
+          data: { highestMarks: highest },
+        });
+      }
+
+      return saved;
+    });
 
     res.json({ 
       success: true, 
       message: 'Marks saved successfully',
       count: savedMarks.length 
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
+    if (error?.code === 'P2002') {
+      return res.status(409).json({ error: 'Marks already exist for one of these students/subjects' });
+    }
     console.error('Error saving marks:', error);
     res.status(500).json({ error: 'Failed to save marks' });
   }
@@ -9368,7 +10273,7 @@ function findStudent(email: unknown, studentId: unknown) {
   });
 }
 
-app.get('/student/dashboard', async (req: Request, res: Response) => {
+app.get('/student/dashboard', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9501,7 +10406,7 @@ app.get('/student/dashboard', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/profile', async (req: Request, res: Response) => {
+app.get('/student/profile', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9539,7 +10444,7 @@ app.get('/student/profile', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/results', async (req: Request, res: Response) => {
+app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9659,7 +10564,7 @@ app.get('/student/results', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/fees', async (req: Request, res: Response) => {
+app.get('/student/fees', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9731,7 +10636,7 @@ app.get('/student/fees', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/attendance', async (req: Request, res: Response) => {
+app.get('/student/attendance', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9769,7 +10674,7 @@ app.get('/student/attendance', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/exam-schedule', async (req: Request, res: Response) => {
+app.get('/student/exam-schedule', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId } = req.query;
 
@@ -9808,7 +10713,7 @@ app.get('/student/exam-schedule', async (req: Request, res: Response) => {
 });
 
 // Student's own printable report card (same data as the admin report card).
-app.get('/student/report-card', async (req: Request, res: Response) => {
+app.get('/student/report-card', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
     const { email, studentId, examId } = req.query as any;
     if (!examId) return res.status(400).json({ error: 'examId is required' });
@@ -9825,7 +10730,7 @@ app.get('/student/report-card', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/student/notices', async (_req: Request, res: Response) => {
+app.get('/student/notices', authMiddleware, authMiddleware, checkRole(['Student']), async (_req: Request, res: Response) => {
   try {
     const items = await prisma.announcement.findMany({
       where: { target: { in: ['All', 'Students'] } },
@@ -9846,7 +10751,7 @@ app.get('/student/notices', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/student/messages', async (_req: Request, res: Response) => {
+app.get('/student/messages', authMiddleware, authMiddleware, checkRole(['Student']), async (_req: Request, res: Response) => {
   try {
     res.json({ contacts: [], messages: [] });
   } catch (error) {
@@ -9855,7 +10760,7 @@ app.get('/student/messages', async (_req: Request, res: Response) => {
   }
 });
 
-app.get('/student/assignments', async (_req: Request, res: Response) => {
+app.get('/student/assignments', authMiddleware, authMiddleware, checkRole(['Student']), async (_req: Request, res: Response) => {
   try {
     res.json([]);
   } catch (error) {
@@ -9868,6 +10773,7 @@ const port = Number(process.env.PORT) || 4000;
 
 // Mount fees router
 app.use('/fees', feesRouter);
+app.use('/leaves', leavesRouter);
 
 // Mount error handler as the last middleware (catches all errors from routes)
 app.use(errorHandler);

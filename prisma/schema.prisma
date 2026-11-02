@@ -22,8 +22,14 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Two-factor authentication
+  twoFactorEnabled     Boolean   @default(false)
+  twoFactorSecret      String?   // TOTP base32 secret
+  twoFactorBackupCodes String?   // JSON array of backup codes
+
   parent        Parent?
   notifications Notification[]
+  passwordResetTokens PasswordResetToken[]
 }
 
 model Notification {
@@ -110,6 +116,7 @@ model Student {
   parentId        String?
   parent          Parent?                 @relation(fields: [parentId], references: [id])
   academicHistory StudentAcademicRecord[]
+  leaves          Leave[]
   
   // New Fee System Relations
   feeRecords      FeeRecord[]
@@ -146,6 +153,11 @@ model StudentLogin {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  // Two-factor authentication
+  twoFactorEnabled     Boolean   @default(false)
+  twoFactorSecret      String?   // TOTP base32 secret
+  twoFactorBackupCodes String?   // JSON array of backup codes
+
   student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
 }
 
@@ -159,6 +171,11 @@ model TeacherLogin {
   lastLogin DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  // Two-factor authentication
+  twoFactorEnabled     Boolean   @default(false)
+  twoFactorSecret      String?   // TOTP base32 secret
+  twoFactorBackupCodes String?   // JSON array of backup codes
 
   teacher Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
 }
@@ -610,12 +627,17 @@ model Attendance {
   studentId String
   date      DateTime
   status    String
+  // Set when this row was written by leave synchronization (approved leave).
+  // Lets sync run idempotently and lets cancellation restore/keep foreign rows intact.
+  leaveId   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  leave     Leave?   @relation(fields: [leaveId], references: [id], onDelete: SetNull)
 
   @@unique([studentId, date])
   @@index([date, status])
+  @@index([leaveId])
 }
 
 model TeacherAttendance {
@@ -867,6 +889,81 @@ model GradingSystem {
   updatedAt DateTime @updatedAt
 }
 
+model Leave {
+  id            String   @id @default(cuid())
+  studentId     String
+  // Who submitted: Student (own), Parent User (linked child), Admin/Teacher (on behalf).
+  applicantId   String
+  applicantName String?
+  applicantRole String   @default("Admin") // Student | Parent | Admin | Teacher
+  leaveType     String   @default("FULL_DAY") // FULL_DAY | HALF_DAY
+  halfDaySession String? // FIRST | SECOND (half-day only)
+  startDate     DateTime
+  endDate       DateTime
+  category      String   @default("Other") // Illness | Medical appointment | Family emergency | Personal reasons | Travel | Other
+  reason        String
+  contactInfo   String? // parent/guardian contact for this application
+  remarks       String? // applicant's extra remarks
+  attachments   String[] @default([]) // Cloudinary URLs
+  status        String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+  calendarDays  Int      @default(0) // inclusive requested calendar days
+  workingDays   Int      @default(0) // school working days affected (holidays/weekly offs excluded)
+  approvedById    String?
+  approvedByName  String?
+  approvedAt      DateTime?
+  reviewRemarks   String? // approval remarks
+  rejectedById    String?
+  rejectedByName  String?
+  rejectedAt      DateTime?
+  rejectionReason String?
+  cancelledAt       DateTime?
+  cancelledByName   String?
+  cancelRequested   Boolean @default(false) // applicant asked to cancel an APPROVED leave
+  cancelRequestNote String?
+  attendanceSyncedAt DateTime? // set once sync first succeeds
+  syncSummary        Json? // last sync result { created, overridden, skippedPresent, halfDaySkipped, dates }
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  student    Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  activities LeaveActivity[]
+  attendance Attendance[]
+
+  @@index([status])
+  @@index([studentId, status])
+  @@index([startDate])
+  @@index([endDate])
+  @@index([createdAt])
+}
+
+// Per-leave audit trail (submission, approval, rejection, cancellation, sync).
+model LeaveActivity {
+  id        String   @id @default(cuid())
+  leaveId   String
+  action    String // SUBMITTED | APPROVED | REJECTED | CANCELLED | CANCEL_REQUESTED | MODIFIED | ATTENDANCE_SYNCED | REQUEST_INFO | CANCELLED_PENDING
+  actorId   String?
+  actorName String?
+  actorRole String?
+  details   Json?
+  createdAt DateTime @default(now())
+  leave     Leave    @relation(fields: [leaveId], references: [id], onDelete: Cascade)
+
+  @@index([leaveId, createdAt])
+}
+
+// Institution-wide official holidays. Weekly closures are configured on Institute.weeklyOffDays.
+model Holiday {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  startDate   DateTime
+  endDate     DateTime? // multi-day holiday when set (else single day)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([startDate])
+}
+
 model Institute {
   id         String   @id @default(cuid())
   name       String   @default("NexGrad Institute")
@@ -881,8 +978,11 @@ model Institute {
   country    String?
   email      String   @unique
   currency   String   @default("USD")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  // Weekly closure days used when computing school working days (leave system).
+  // Configurable from Settings; empty array means every day is a working day.
+  weeklyOffDays String[] @default(["Friday", "Saturday"])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model FeeParticular {
@@ -1068,10 +1168,17 @@ model StudentFeeOverride {
   @@index([validFrom, validTo]) // Check if active
 }
 
-// Partial unique index for period-scoped overrides lives in the SQL migration.
-// Prisma cannot express "unique only when billingPeriod IS NOT NULL", so
-// standing overrides (NULL period) are de-duplicated in the service layer.
+// Password reset tokens for forgot password flow
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
 
-// ============================================================================
-// NEW FEE SYSTEM MODELS (Category-Driven Architecture)
-// ============================================================================
+  @@index([token])
+  @@index([userId])
+  @@index([expiresAt])
+}
