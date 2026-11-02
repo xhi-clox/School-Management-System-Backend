@@ -64,7 +64,7 @@ export function attendanceDayKey(value: string): string {
 export function toDateStr(d: Date | string | number | null | undefined): string {
   if (!d) return '';
   const date = new Date(d);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,20 +88,19 @@ export async function listHolidayDayKeys(rangeStart: string, rangeEnd: string): 
       OR: [{ endDate: { gte: startUtc } }, { startDate: { gte: startUtc } }],
     },
   });
-  console.error('DEBUG holidays rows:', rows.length, rows.map((r) => ({ id: r.id, start: r.startDate, end: r.endDate })), { startUtc, endUtc   });
   const keys = new Set<string>();
   for (const h of rows) {
     const from = attendanceDayKey(toDateStr(h.startDate));
     const to = h.endDate ? attendanceDayKey(toDateStr(h.endDate)) : from;
-    const stopUtc = utcMidnight(to) <= endUtc ? utcMidnight(to) : endUtc
+    const stopUtc = utcMidnight(to) <= endUtc ? utcMidnight(to) : endUtc;
     let cursor = utcMidnight(from);
     // Bounded walk; holidays are short so no infinite-loop risk with sane data.
     let guard = 0;
-    while (cursor && utcMidnight(cursor) <= stopUtc && guard < 400) {
-      if (utcMidnight(cursor) >= startUtc) keys.add(cursor);
-      const next = new Date(utcMidnight(cursor));
+    while (cursor <= stopUtc && guard < 400) {
+      if (cursor >= startUtc) keys.add(toDateStr(cursor));
+      const next = new Date(cursor);
       next.setUTCDate(next.getUTCDate() + 1);
-      cursor = localDayKey(new Date(next.toISOString()));
+      cursor = next;
       guard += 1;
     }
   }
@@ -123,7 +122,7 @@ export async function calendarDaysBetween(startKey: string, endKey: string): Pro
   let cursor = utcMidnight(startKey);
   const end = utcMidnight(endKey);
   while (cursor <= end && out.length < 400) {
-    const key = localDayKey(new Date(cursor.toISOString()));
+    const key = toDateStr(cursor);
     const weekday = DAY_NAMES[cursor.getUTCDay()]; // utcMidnight keeps UTC parts aligned
     const weeklyOff = weeklySet.has(weekday.toLowerCase());
     const holiday = holidayKeys.has(key);
