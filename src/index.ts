@@ -10486,22 +10486,26 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
 
     const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; fullMarks: number; percentage: number; grade: string; gpa: number; rank: number; passed: boolean } }> = [];
     for (const [examId, list] of byExam.entries()) {
-      const rows = list.map((r) => ({
-        id: r.id,
-        subject: subjectName(r.subjectId),
-        written: r.written,
-        mcq: r.mcq,
-        total: r.totalMarks,
-        grade: r.grade || '—',
-        gpa: r.gp ?? 0,
-      }));
+      const examSchedules = schedules.filter((s) => s.examId === examId);
+      const rows = list.map((r) => {
+        const sc = examSchedules.find((s) => s.subjectId === r.subjectId && s.class?.name === student.class);
+        const hasMcq = Number(sc?.mcqFullMarks ?? 0) > 0 || Number(r.mcq) > 0;
+        return {
+          id: r.id,
+          subject: subjectName(r.subjectId),
+          written: r.written,
+          mcq: hasMcq ? r.mcq : null,
+          total: r.totalMarks,
+          grade: r.grade || '—',
+          gpa: r.gp ?? 0,
+        };
+      });
 
       const examTypeId = list[0].exam.typeId;
       const grading = allGrading
         .filter((g) => g.examTypeId === examTypeId)
         .sort((a, b) => Number(b.minPercent) - Number(a.minPercent));
       const failGrades = new Set<string>(grading.filter((g) => g.status === 'FAIL').map((g) => g.grade));
-      const examSchedules = schedules.filter((s) => s.examId === examId);
 
       const totalMarks = list.reduce((s, r) => s + (r.totalMarks || 0), 0);
       let fullMarks = 0;
