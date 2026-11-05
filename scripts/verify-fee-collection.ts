@@ -129,7 +129,11 @@ async function main() {
   // GET /invoices is the only thing that page reads, so presence here *is* visibility.
   const invoices = await call('GET', `/invoices?limit=100`);
   const rows: any[] = Array.isArray(invoices.data) ? invoices.data : (invoices.data?.data ?? []);
-  const mine = rows.filter((r) => studentsInClass.some((s) => s.id === r.studentId));
+  const mine = rows.filter(
+    (r) =>
+      studentsInClass.some((s) => s.id === r.studentId) &&
+      r.items?.[0]?.name === 'ZZ Bridge Category',
+  );
   check('bridged invoices are listed', mine.length === studentsInClass.length, `found ${mine.length}`);
 
   const sample = mine[0];

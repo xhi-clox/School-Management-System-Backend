@@ -1,3 +1,4 @@
+import 'express-async-errors';
 import 'dotenv/config';
 import crypto from 'crypto';
 import express, { Request, Response, NextFunction } from 'express';
@@ -5,6 +6,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { prisma } from './prisma';
 import { z } from 'zod';
 import { addMonths, differenceInCalendarDays, startOfDay } from 'date-fns';
 import jwt from 'jsonwebtoken';
@@ -28,12 +30,12 @@ import {
   nextInvoiceNumber,
   academicYearForDate,
   academicYearForMonth,
+  normalizeAcademicYear,
   billingMonthStr,
   isVoided,
   PAYMENT_METHODS,
   roundMoney as feeRoundMoney,
 } from './fees/shared';
-import { buildMonthlyBlueprint, runMonthlyTuitionGeneration } from './fees/monthly-generation';
 import { refreshRecordStatus } from './fees/records';
 import feesRouter from './fees/routes';
 import leavesRouter from './leaves/routes';
@@ -46,7 +48,6 @@ class HttpError extends Error {
 }
 
 
-const prisma = new PrismaClient();
 const app = express();
 
 // Email transporter for password reset and other notifications
@@ -147,7 +148,7 @@ const extraOrigins = (process.env.CORS_ORIGINS || '')
 
 const allowedOrigins = new Set([...DEFAULT_CORS_ORIGINS, ...extraOrigins]);
 
-// ✅ Better Vercel matcher (handles ALL preview URLs)
+// âœ… Better Vercel matcher (handles ALL preview URLs)
 const isVercelPreviewOrigin = (origin: string) =>
   /^https:\/\/.*\.vercel\.app$/i.test(origin);
 
@@ -967,7 +968,7 @@ app.get('/dashboard/attendance/absentees', authMiddleware, authMiddleware, check
     res.status(500).json({ error: 'Failed to fetch absentees' });
   }
 });
-app.get('/dashboard/financial-details', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/dashboard/financial-details', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     type: z.enum(['income', 'expense', 'profit']),
     month: z.coerce.number().int().min(1).max(12).optional(),
@@ -1087,7 +1088,7 @@ app.get('/students/rolls/used', authMiddleware, authMiddleware, checkRole(['Admi
  * `dob` is a full timestamp on the Student row, but only the month/day matter
  * here, so the year is recomputed onto the current (or next) year.
  *
- * NOTE: must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` — Express matches in
+ * NOTE: must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` â€” Express matches in
  * registration order, so `/students/birthdays` would be swallowed as an id.
  */
 app.get('/students/birthdays', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
@@ -1186,7 +1187,7 @@ function startOfTodayISO(): string {
 }
 
 // Student Logins
-// NOTE: these must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` below — Express matches
+// NOTE: these must stay ABOVE `app.get('/students/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']))` below â€” Express matches
 // routes in registration order, so a later `/students/:id` would swallow
 // `/students/logins` and answer 404 "Student not found".
 app.get('/students/logins', authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
@@ -1491,28 +1492,6 @@ function academicYearRange(label?: string | null): { start: Date | null; end: Da
   const startYear = Number(match[1]);
   // July-to-June academic year convention (matches the promotion default)
   return { start: new Date(startYear, 6, 1), end: new Date(startYear + 1, 6, 1) };
-}
-
-// Validate and canonicalize an academic-year label to "YYYY-YYYY".
-// Accepts "2026-2027", "2026-27", or "2026"; rejects typos like "2024-25" that
-// would silently mismatch stored values. (#18)
-function normalizeAcademicYear(label?: string | null): string | null {
-  if (!label) return null;
-  const s = String(label).trim();
-  const m = s.match(/^(\d{4})\s*[-/–]\s*(\d{2,4})$/);
-  if (m) {
-    const start = Number(m[1]);
-    let end = Number(m[2]);
-    if (String(m[2]).length === 2) end = Math.floor(start / 100) * 100 + end;
-    if (end === start + 1) return `${start}-${end}`;
-    return null;
-  }
-  const just = s.match(/^(\d{4})$/);
-  if (just) {
-    const start = Number(just[1]);
-    return `${start}-${start + 1}`;
-  }
-  return null;
 }
 
 app.post('/students/promote', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
@@ -1912,7 +1891,7 @@ app.post('/exams', authMiddleware, checkRole(['Admin']), async (req: Request, re
     // don't break on typos. (#18)
     const canonicalYear = normalizeAcademicYear(academicYear);
     if (!canonicalYear) {
-      return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+      return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-27" or "2026".` });
     }
     const start = new Date(startDate);
     const end = new Date(endDate);
@@ -1957,7 +1936,7 @@ app.put('/exams/:id', authMiddleware, checkRole(['Admin']), async (req: Request,
     if (academicYear) {
       const normalized = normalizeAcademicYear(academicYear);
       if (!normalized) {
-        return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-2027" or "2026".` });
+        return res.status(400).json({ error: `Invalid academicYear "${academicYear}". Use format like "2026-27" or "2026".` });
       }
       canonicalYear = normalized;
     }
@@ -2276,49 +2255,75 @@ app.post('/exams/:examId/attendance/save', authMiddleware, checkRole(['Admin']),
       });
     }
 
-    // Attendance can only be taken on the day the exam is actually scheduled.
-    // Non-admins may only record attendance for *today*; admins may edit any
-    // (past or future) date later if corrections are needed.
-    const actorRole = (req as any).user?.role;
-    const todayKey = localDayKey(new Date());
-    if (actorRole !== 'Admin') {
-      const notToday = activeRecords.filter((r) => localDayKey(new Date(r.date)) !== todayKey);
-      if (notToday.length > 0) {
-        return res.status(403).json({
-          error: 'Attendance can only be taken on the day the exam is scheduled (today). Admin can make later corrections.',
-          invalid: notToday.map((r) => ({ studentId: r.studentId, subjectId: r.subjectId, date: r.date })),
-        });
-      }
-    }
+    // Attendance may be recorded for any date that belongs to this exam's
+    // timetable (past or future), so missed days can be filled in and later
+    // corrections are always possible.
 
-    // Use upsert for each record
-    await Promise.all(activeRecords.map(record => {
-      const day = new Date(`${localDayKey(new Date(record.date))}T00:00:00.000Z`);
-      return prisma.examAttendance.upsert({
-        where: {
-          examId_studentId_subjectId_date: {
+    // Use upsert for each record, and keep the matching Result row in sync so
+    // absence is visible as ABSENT in results, tabulation and analytics even
+    // when no marks were ever entered for that subject.
+    await prisma.$transaction(async (tx) => {
+      for (const record of activeRecords) {
+        const day = new Date(`${localDayKey(new Date(record.date))}T00:00:00.000Z`);
+        await tx.examAttendance.upsert({
+          where: {
+            examId_studentId_subjectId_date: {
+              examId,
+              studentId: record.studentId,
+              subjectId: record.subjectId,
+              date: day,
+            },
+          },
+          create: {
             examId,
             studentId: record.studentId,
             subjectId: record.subjectId,
             date: day,
+            status: record.status,
+            reason: record.reason,
+            notes: record.notes,
           },
-        },
-        create: {
-          examId,
-          studentId: record.studentId,
-          subjectId: record.subjectId,
-          date: day,
-          status: record.status,
-          reason: record.reason,
-          notes: record.notes,
-        },
-        update: {
-          status: record.status,
-          reason: record.reason,
-          notes: record.notes,
-        },
-      });
-    }));
+          update: {
+            status: record.status,
+            reason: record.reason,
+            notes: record.notes,
+          },
+        });
+
+        if (record.status === 'ABSENT') {
+          await tx.result.upsert({
+            where: {
+              studentId_examId_subjectId: {
+                studentId: record.studentId,
+                examId,
+                subjectId: record.subjectId,
+              },
+            },
+            update: {
+              isAbsent: true,
+              written: 0,
+              mcq: 0,
+              practical: 0,
+              totalMarks: 0,
+              grade: 'ABSENT',
+              gp: 0,
+            },
+            create: {
+              studentId: record.studentId,
+              examId,
+              subjectId: record.subjectId,
+              isAbsent: true,
+              written: 0,
+              mcq: 0,
+              practical: 0,
+              totalMarks: 0,
+              grade: 'ABSENT',
+              gp: 0,
+            },
+          });
+        }
+      }
+    });
 
     res.json({ success: true, count: activeRecords.length, skippedInactive: rejectedInactive.length });
   } catch (error: any) {
@@ -2484,7 +2489,15 @@ app.get('/results', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher
     where.studentId = { in: studentIds.split(',') };
   }
 
-  const results = await prisma.result.findMany({ where });
+  // Merge exam-attendance absence so absent subjects render as ABSENT/ABS
+  // instead of zero marks everywhere results are consumed.
+  const report = await buildExamReport(examId);
+  let results = report.results;
+  if (subjectId) results = results.filter((r: any) => r.subjectId === subjectId);
+  if (studentIds) {
+    const ids = studentIds.split(',');
+    results = results.filter((r: any) => ids.includes(r.studentId));
+  }
   res.json(results);
 });
 
@@ -2632,7 +2645,7 @@ app.post('/results/bulk', authMiddleware, checkRole(['Admin', 'Teacher']), async
     }
   }
 
-  // Default pass config (when schedule has no override) — used as fallback for template config
+  // Default pass config (when schedule has no override) â€” used as fallback for template config
   const passConfig = defaultGrading.length > 0 ? defaultGrading[0] : null;
 
   const classKey = (cls?: string | null, section?: string | null) => `${cls || ''}||${section || ''}`;
@@ -2899,6 +2912,13 @@ function resultIsAbsent(result: any) {
   return !!result?.isAbsent || result?.grade === 'ABSENT';
 }
 
+/** A student summary is absent when every/any relevant subject is marked absent. */
+function studentSummaryIsAbsent(summary: any) {
+  return !!summary?.isAbsent || !!summary?.hasAbsence
+    || String(summary?.grade || '').toUpperCase() === 'ABSENT'
+    || String(summary?.status || '').toUpperCase() === 'ABSENT';
+}
+
 function findResultSchedule(schedules: any[], result: any) {
   const student = result?.student;
   if (!student) return null;
@@ -2924,14 +2944,58 @@ async function buildExamReport(examId: string) {
   const exam = await prisma.exam.findUnique({ where: { id: examId }, include: { type: true } });
   if (!exam) throw new Error('Exam not found');
 
-  const [grading, schedules, results] = await Promise.all([
+  const [grading, schedules, rawResults, absentAttendances] = await Promise.all([
     prisma.gradingSystem.findMany({ where: { examTypeId: exam.typeId }, orderBy: { minPercent: 'desc' } }),
     prisma.examSchedule.findMany({ where: { examId }, include: { subject: true, class: true } }),
     prisma.result.findMany({
       where: { examId },
       include: { student: true }
-    })
+    }),
+    prisma.examAttendance.findMany({
+      where: { examId, status: 'ABSENT' },
+      include: { student: true },
+    }),
   ]);
+
+  // Exam attendance is authoritative for absence. Merge it into the result set
+  // so students marked absent appear with an ABSENT result even if marks were
+  // never saved for that subject.
+  const results: any[] = rawResults;
+  const resultKeys = new Set(results.map((r: any) => `${r.studentId}|${r.subjectId}`));
+  const absentKeys = new Set<string>();
+  for (const attendance of absentAttendances) {
+    const key = `${attendance.studentId}|${attendance.subjectId}`;
+    absentKeys.add(key);
+    if (!resultKeys.has(key)) {
+      results.push({
+        id: `absent-${attendance.id}`,
+        examId,
+        studentId: attendance.studentId,
+        subjectId: attendance.subjectId,
+        written: 0,
+        mcq: 0,
+        practical: 0,
+        totalMarks: 0,
+        grade: 'ABSENT',
+        gp: 0,
+        isAbsent: true,
+        highestMarks: 0,
+        student: attendance.student,
+      });
+      resultKeys.add(key);
+    }
+  }
+  for (const r of results) {
+    if (absentKeys.has(`${r.studentId}|${r.subjectId}`)) {
+      r.isAbsent = true;
+      r.grade = 'ABSENT';
+      r.written = 0;
+      r.mcq = 0;
+      r.practical = 0;
+      r.totalMarks = 0;
+      r.gp = 0;
+    }
+  }
 
   const failGrades = new Set<string>();
   grading.forEach((g) => { if (g.status === 'FAIL') failGrades.add(g.grade); });
@@ -2985,12 +3049,12 @@ async function buildExamReport(examId: string) {
         class: student.class,
         section: student.section,
         roll: student.roll,
-        status: 'ABSENT',
+        status: 'FAIL',
         totalMarks: 0,
         fullMarks: 0,
         percentage: 0,
         gpa: 0,
-        grade: 'ABSENT',
+        grade: 'F',
         passed: false,
         failed: true,
         hasAbsence: true,
@@ -3000,12 +3064,12 @@ async function buildExamReport(examId: string) {
       continue;
     }
     
-    // Calculate marks only for non-absent subjects
+    // Calculate marks only for non-absent subjects. Absence is tracked
+    // separately and must never be counted as an academic failure.
     let totalMarks = 0, fullMarks = 0, gpSum = 0, gpCount = 0, creditSum = 0, failed = false, hasAbsence = false;
     for (const r of subjects) {
       if (resultIsAbsent(r)) {
         hasAbsence = true;
-        failed = true;
         continue;
       }
       totalMarks += r.totalMarks || 0;
@@ -3017,10 +3081,12 @@ async function buildExamReport(examId: string) {
       if (r.gp != null) { gpSum += r.gp * ch; gpCount++; creditSum += ch; }
       if (resultIsFailed(schedules, failGrades, r)) failed = true;
     }
-    // Credit-weighted GPA: Σ(GP × creditHours) / Σ(creditHours). (#11)
+    // Credit-weighted GPA: Î£(GP Ã— creditHours) / Î£(creditHours). (#11)
     const gpa = creditSum > 0 ? round2(gpSum / creditSum) : (gpCount ? round2(gpSum / gpCount) : 0);
     const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
-    const grade = failed ? (hasAbsence ? 'ABSENT' : 'F') : gradeForPercentage(percentage);
+    if (hasAbsence) failed = true;
+    const grade = failed ? 'F' : gradeForPercentage(percentage);
+    const passed = !failed;
     students.push({
       studentId: student.id,
       name: student.name,
@@ -3034,9 +3100,10 @@ async function buildExamReport(examId: string) {
       percentage,
       gpa,
       grade,
-      passed: !failed,
+      passed,
       failed,
       hasAbsence,
+      status: failed ? 'FAIL' : 'PASS',
       subjectCount: subjects.length
     });
   }
@@ -3045,11 +3112,14 @@ async function buildExamReport(examId: string) {
 }
 
 function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport>>, studentFilter?: Set<string>) {
-  const map = new Map<string, { subject: string; totals: number[]; passCount: number }>();
+  const map = new Map<string, { subject: string; totals: number[]; passCount: number; absent: number }>();
   for (const r of report.results) {
     if (studentFilter && !studentFilter.has(r.studentId)) continue;
-    if (!map.has(r.subjectId)) map.set(r.subjectId, { subject: report.subjectName.get(r.subjectId) || r.subjectId, totals: [], passCount: 0 });
+    if (!map.has(r.subjectId)) map.set(r.subjectId, { subject: report.subjectName.get(r.subjectId) || r.subjectId, totals: [], passCount: 0, absent: 0 });
     const rec = map.get(r.subjectId)!;
+    // Absentees did not sit the paper, so they are excluded from the subject
+    // average and the subject pass-rate denominator.
+    if (resultIsAbsent(r)) { rec.absent++; continue; }
     const fm = report.subjectFullMarksByClass.get(r.subjectId)?.get(classSectionKey(r.student?.class, r.student?.section))
       ?? report.subjectDefaultFullMarks.get(r.subjectId)
       ?? 100;
@@ -3057,11 +3127,16 @@ function subjectStatsForReport(report: Awaited<ReturnType<typeof buildExamReport
     if (!resultIsFailed(report.schedules, report.failGrades, r)) rec.passCount++;
   }
   return [...map.values()]
-    .map((x) => ({
-      subject: x.subject,
-      average: round2(x.totals.reduce((a, b) => a + b, 0) / (x.totals.length || 1)),
-      passRate: round2((x.passCount / (x.totals.length || 1)) * 100)
-    }))
+    .map((x) => {
+      const gradedTotal = x.totals.length + x.absent;
+      return {
+        subject: x.subject,
+        average: round2(x.totals.reduce((a, b) => a + b, 0) / (x.totals.length || 1)),
+        passRate: round2((x.passCount / (gradedTotal || 1)) * 100),
+        appeared: x.totals.length,
+        absent: x.absent,
+      };
+    })
     .sort((a, b) => a.subject.localeCompare(b.subject));
 }
 
@@ -3094,10 +3169,15 @@ app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: R
     const report = await buildExamReport(examId);
     const { students } = report;
     const total = students.length;
+    const absent = students.filter(studentSummaryIsAbsent).length;
+    const appeared = total - absent;
     const passed = students.filter((s) => s.passed).length;
-    const failed = total - passed;
+    const failed = students.filter((s) => !s.passed).length;
+    // Absentees are failed, so they stay in the pass-rate denominator.
     const passRate = total ? round2((passed / total) * 100) : 0;
-    const average = total ? round2(students.reduce((a, s) => a + s.percentage, 0) / total) : 0;
+    const average = appeared
+      ? round2(students.filter((s) => !studentSummaryIsAbsent(s)).reduce((a, s) => a + s.percentage, 0) / appeared)
+      : 0;
 
     const classMap = new Map<string, any[]>();
     for (const s of students) {
@@ -3107,23 +3187,26 @@ app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: R
     }
     const classPerformance = [...classMap.entries()]
       .map(([cls, arr]) => {
-        const p = arr.filter((s) => s.passed).length;
+        const appearedArr = arr.filter((s) => !studentSummaryIsAbsent(s));
+        const p = appearedArr.filter((s) => s.passed).length;
         return {
           class: cls,
           students: arr.length,
+          appeared: appearedArr.length,
+          absent: arr.length - appearedArr.length,
           passed: p,
-          failed: arr.length - p,
-          passRate: round2((p / arr.length) * 100),
-          average: round2(arr.reduce((a, s) => a + s.percentage, 0) / arr.length)
+          failed: arr.filter((s) => !s.passed).length,
+          passRate: arr.length ? round2((p / arr.length) * 100) : 0,
+          average: appearedArr.length ? round2(appearedArr.reduce((a, s) => a + s.percentage, 0) / appearedArr.length) : 0
         };
       })
       .sort((a, b) => a.class.localeCompare(b.class));
 
     const subjectPerformance = subjectStatsForReport(report);
-    const ranked = rankStudents(students);
+    const ranked = rankStudents(students.filter((s) => !studentSummaryIsAbsent(s)));
     const topStudents = ranked.slice(0, 10).map((s) => ({ rank: s.rank, studentId: s.studentId, name: s.name, admissionNo: s.admissionNo, avatar: s.avatar, class: s.class, section: s.section, roll: s.roll, gpa: s.gpa, percentage: s.percentage, grade: s.grade, totalMarks: s.totalMarks }));
     const atRiskStudents = students
-      .filter((s) => s.failed || s.gpa < 2.0)
+      .filter((s) => !studentSummaryIsAbsent(s) && (s.failed || s.gpa < 2.0))
       .sort((a, b) => a.gpa - b.gpa || b.percentage - a.percentage)
       .slice(0, 10)
       .map((s) => ({ studentId: s.studentId, name: s.name, admissionNo: s.admissionNo, avatar: s.avatar, class: s.class, section: s.section, roll: s.roll, gpa: s.gpa, percentage: s.percentage, grade: s.grade }));
@@ -3139,8 +3222,9 @@ app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: R
     if (prev) {
       try {
         const prevReport = await buildExamReport(prev.id);
-        const prevAvg = prevReport.students.length
-          ? round2(prevReport.students.reduce((a, s) => a + s.percentage, 0) / prevReport.students.length)
+        const prevAppeared = prevReport.students.filter((s) => !studentSummaryIsAbsent(s));
+        const prevAvg = prevAppeared.length
+          ? round2(prevAppeared.reduce((a, s) => a + s.percentage, 0) / prevAppeared.length)
           : 0;
         previousExam = { id: prev.id, name: prev.name, average: prevAvg, avgChange: round2(average - prevAvg) };
       } catch (e) {
@@ -3150,7 +3234,7 @@ app.get('/results/overview', authMiddleware, checkRole(['Admin']), async (req: R
 
     res.json({
       exam: { id: report.exam.id, name: report.exam.name, academicYear: report.exam.academicYear, type: report.exam.type?.name || '' },
-      stats: { students: total, passed, failed, passRate, average },
+      stats: { students: total, appeared, absent, passed, failed, passRate, average },
       classPerformance,
       subjectPerformance,
       analytics: { highestClass, lowestClass, topStudents, atRiskStudents, weakestSubjects },
@@ -3172,8 +3256,13 @@ app.get('/results/class', authMiddleware, checkRole(['Admin']), async (req: Requ
     if (section) students = students.filter((s) => s.section === section);
 
     const total = students.length;
+    const absent = students.filter(studentSummaryIsAbsent).length;
+    const appeared = total - absent;
     const passed = students.filter((s) => s.passed).length;
-    const average = total ? round2(students.reduce((a, s) => a + s.percentage, 0) / total) : 0;
+    const failed = students.filter((s) => !s.passed).length;
+    const average = appeared
+      ? round2(students.filter((s) => !studentSummaryIsAbsent(s)).reduce((a, s) => a + s.percentage, 0) / appeared)
+      : 0;
     const rankList = rankStudents(students);
 
     const subjectPerformance = subjectStatsForReport(report, new Set(students.map((s) => s.studentId)));
@@ -3182,7 +3271,7 @@ app.get('/results/class', authMiddleware, checkRole(['Admin']), async (req: Requ
       exam: { id: report.exam.id, name: report.exam.name },
       class: cls,
       section: section || null,
-      stats: { students: total, passed, failed: total - passed, passRate: total ? round2((passed / total) * 100) : 0, average },
+      stats: { students: total, appeared, absent, passed, failed, passRate: total ? round2((passed / total) * 100) : 0, average },
       subjectPerformance,
       rankList
     });
@@ -3212,7 +3301,8 @@ app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Re
         total: r.totalMarks,
         grade: r.grade || '',
         gp: r.gp ?? 0,
-        highestMarks: r.highestMarks
+        highestMarks: r.highestMarks,
+        isAbsent: resultIsAbsent(r),
       }))
       .sort((a, b) => a.subject.localeCompare(b.subject));
 
@@ -3224,7 +3314,17 @@ app.get('/results/student', authMiddleware, checkRole(['Admin']), async (req: Re
       student: { id: student?.id, name: student?.name, admissionNo: student?.admissionNo, avatar: student?.avatar, class: student?.class, section: student?.section, roll: student?.roll },
       exam: { id: report.exam.id, name: report.exam.name },
       rows,
-      totals: { totalMarks: agg.totalMarks, fullMarks: agg.fullMarks, percentage: agg.percentage, gpa: agg.gpa, grade: agg.grade },
+      totals: {
+        totalMarks: agg.totalMarks,
+        fullMarks: agg.fullMarks,
+        percentage: agg.percentage,
+        gpa: agg.gpa,
+        grade: agg.grade,
+        passed: agg.passed,
+        isAbsent: !!agg.isAbsent,
+        hasAbsence: !!agg.hasAbsence,
+        status: agg.status,
+      },
       position
     });
   } catch (error: any) {
@@ -3266,7 +3366,7 @@ async function weightedAcademicScoreMap(academicYear: string): Promise<Map<strin
     try {
       students = (await buildExamReport(exam.id)).students;
     } catch (e) {
-      // Don't silently skip exams that fail to build — log why. (#12)
+      // Don't silently skip exams that fail to build â€” log why. (#12)
       console.warn(`weightedAcademicScoreMap: skipping weight for exam ${exam.id} ("${exam.name}")`, (e as Error)?.message);
       continue;
     }
@@ -3539,14 +3639,14 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
       new Set(
         schedules.filter((s) => !s.class || keyOf(s.class!.name, s.class!.section) === keyOf(cl, sec)).map((s) => s.subjectId)
       );
-    // Applicable (student, subject) pairs for this exam — only these count in the criteria.
+    // Applicable (student, subject) pairs for this exam â€” only these count in the criteria.
     const applicableKeys = new Set<string>();
     for (const st of enrolled) {
       for (const sid of subjectsForClass(st.class, st.section)) applicableKeys.add(`${st.id}|${sid}`);
     }
 
     // Missing marks: students without a result for a scheduled subject applicable to their class.
-    // Counts unique (student, subject) pairs — duplicate schedule rows (e.g. same-named
+    // Counts unique (student, subject) pairs â€” duplicate schedule rows (e.g. same-named
     // class records) must not inflate the tally.
     const resultKey = new Set(results.map((r) => `${r.studentId}|${r.subjectId}`));
     let missingMarks = 0;
@@ -3589,7 +3689,7 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
     }
     const studentById = new Map(students.map((s) => [s.id, s]));
 
-    // Missing practical marks — only for pairs whose subject really has a
+    // Missing practical marks â€” only for pairs whose subject really has a
     // practical component in this exam.
     let missingPractical = 0;
     for (const r of results) {
@@ -3933,7 +4033,10 @@ async function buildStudentReportCard(examId: string, studentId: string, userEma
       percentage: agg.percentage,
       gpa: agg.gpa,
       grade: agg.grade,
-      passed: agg.passed
+      passed: agg.passed,
+      isAbsent: !!agg.isAbsent,
+      hasAbsence: !!agg.hasAbsence,
+      status: agg.status,
     },
     position,
     attendance: { present, total: attendance.length, percentage: attendancePct }
@@ -3999,9 +4102,10 @@ app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (re
         });
         const results = await prisma.result.findMany({
           where: { studentId: { in: students.map((s) => s.id) }, subjectId: p.subjectId },
-          select: { totalMarks: true }
+          select: { totalMarks: true, isAbsent: true, grade: true }
         });
-        const totals = results.map((r) => r.totalMarks);
+        const absentResults = results.filter((r) => resultIsAbsent(r));
+        const presentTotals = results.filter((r) => !resultIsAbsent(r)).map((r) => r.totalMarks);
         out.push({
           classId: p.classId,
           className: p.className,
@@ -4009,10 +4113,11 @@ app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (re
           subjectId: p.subjectId,
           subject: p.subjectName,
           studentCount: students.length,
-          average: totals.length ? round2(totals.reduce((a, b) => a + b, 0) / totals.length) : 0,
-          highest: totals.length ? Math.max(...totals) : 0,
-          lowest: totals.length ? Math.min(...totals) : 0,
-          marksEntered: totals.length
+          average: presentTotals.length ? round2(presentTotals.reduce((a, b) => a + b, 0) / presentTotals.length) : 0,
+          highest: presentTotals.length ? Math.max(...presentTotals) : 0,
+          lowest: presentTotals.length ? Math.min(...presentTotals) : 0,
+          marksEntered: presentTotals.length,
+          absent: absentResults.length,
         });
       }
       return res.json({ subjectGroups: out });
@@ -4028,10 +4133,17 @@ app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (re
         orderBy: { roll: 'asc' },
         select: { id: true, name: true, roll: true, avatar: true, admissionNo: true }
       });
-      const results = await prisma.result.findMany({
-        where: { examId, subjectId: p.subjectId, studentId: { in: students.map((s) => s.id) } }
-      });
+      const [results, absentAttendances] = await Promise.all([
+        prisma.result.findMany({
+          where: { examId, subjectId: p.subjectId, studentId: { in: students.map((s) => s.id) } }
+        }),
+        prisma.examAttendance.findMany({
+          where: { examId, subjectId: p.subjectId, studentId: { in: students.map((s) => s.id) }, status: 'ABSENT' },
+          select: { studentId: true }
+        })
+      ]);
       const resultMap = new Map(results.map((r) => [r.studentId, r]));
+      const absentIds = new Set(absentAttendances.map((a) => a.studentId));
       out.push({
         classId: p.classId,
         className: p.className,
@@ -4040,18 +4152,20 @@ app.get('/teacher/results/my', authMiddleware, checkRole(['Teacher']), async (re
         subject: subjectName.get(p.subjectId) || p.subjectName,
         students: students.map((s) => {
           const r = resultMap.get(s.id);
+          const absent = absentIds.has(s.id) || resultIsAbsent(r);
           return {
             studentId: s.id,
             name: s.name,
             roll: s.roll,
             avatar: s.avatar,
             admissionNo: s.admissionNo,
-            written: r?.written ?? null,
-            mcq: r?.mcq ?? null,
-            practical: r?.practical ?? null,
-            total: r?.totalMarks ?? null,
-            grade: r?.grade ?? null,
-            gpa: r?.gp ?? null
+            isAbsent: absent,
+            written: absent ? null : (r?.written ?? null),
+            mcq: absent ? null : (r?.mcq ?? null),
+            practical: absent ? null : (r?.practical ?? null),
+            total: absent ? null : (r?.totalMarks ?? null),
+            grade: absent ? 'ABSENT' : (r?.grade ?? null),
+            gpa: absent ? null : (r?.gp ?? null)
           };
         })
       });
@@ -4146,7 +4260,7 @@ app.post('/schedules', authMiddleware, checkRole(['Admin']), async (req: Request
 
   // The grading template defines the mark scale for marks entry and grading.
   // When a template resolves, its totalFull (e.g. 50 for "50 Marks") is the
-  // authoritative full marks — it overrides any client-supplied fullMarks that
+  // authoritative full marks â€” it overrides any client-supplied fullMarks that
   // assumed the wrong scale. Component full marks are re-derived to match.
   const tplTotalFull = await fetchTemplateTotalFull(resolvedGradingTypeId);
   const {
@@ -4315,7 +4429,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
       .map((item) => {
         if (item.fullMarks === undefined || item.writtenFullMarks === undefined) return null;
         const componentSum = (item.writtenFullMarks || 0) + (item.mcqFullMarks || 0) + (item.practicalFullMarks || 0);
-        return componentSum > 0 && componentSum !== item.fullMarks ? `subject ${item.subjectId} (${componentSum} ≠ ${item.fullMarks})` : null;
+        return componentSum > 0 && componentSum !== item.fullMarks ? `subject ${item.subjectId} (${componentSum} â‰  ${item.fullMarks})` : null;
       })
       .filter((v): v is string => !!v);
     if (mismatched.length) {
@@ -4443,7 +4557,7 @@ app.post('/schedules/bulk', authMiddleware, checkRole(['Admin']), async (req: Re
             saved.push(row);
             continue;
           } catch (e: any) {
-            // Stale/deleted id — fall back to the idempotent upsert below.
+            // Stale/deleted id â€” fall back to the idempotent upsert below.
             if (e?.code !== 'P2025') throw e;
           }
         }
@@ -4708,7 +4822,7 @@ app.delete('/exam-presets/:id', authMiddleware, checkRole(['Admin']), async (req
     res.status(204).send();
   } catch (error: any) {
     if (error?.code === 'P2025') {
-      return res.status(404).json({ error: 'Preset not found — it may have already been deleted.' });
+      return res.status(404).json({ error: 'Preset not found â€” it may have already been deleted.' });
     }
     console.error('Error deleting preset:', error);
     res.status(500).json({ error: 'Failed to delete preset', details: error.message });
@@ -5007,7 +5121,8 @@ app.post('/institute', authMiddleware, checkRole(['Admin']), async (req: Request
     website: z.string().optional(),
     address: z.string().optional(),
     country: z.string().optional(),
-    currency: z.string().optional()
+    currency: z.string().optional(),
+    dueDay: z.number().int().min(1).max(31).optional()
   });
 
   const parsed = schema.safeParse(req.body);
@@ -5105,12 +5220,12 @@ app.delete('/teachers/:id', authMiddleware, checkRole(['Admin']), async (req: Re
 });
 
 // Fees
-app.get('/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/fees', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const fees = await prisma.studentFee.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(fees);
 });
 
-app.post('/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/fees', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().min(1),
     feeType: z.string(),
@@ -5124,7 +5239,7 @@ app.post('/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']
   res.status(201).json(fee);
 });
 
-app.put('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.put('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     studentId: z.string().optional(),
@@ -5139,36 +5254,16 @@ app.put('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teache
   res.json(fee);
 });
 
-app.post('/fees/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const result = await prisma.$transaction(async (tx) => {
-    // Check if payment ledger entry already exists to prevent double-counting
-    const existingLedger = await tx.ledgerEntry.findFirst({
-      where: {
-        ...ACTIVE_LEDGER,
-        referenceInvoice: id,
-        type: 'income'
-      }
-    });
-    if (existingLedger) {
-      throw new HttpError(400, 'Payment has already been recorded');
-    }
-    
-    const fee = await tx.studentFee.update({ where: { id }, data: { status: 'Paid' } });
-    await tx.ledgerEntry.create({
-      data: {
-        type: 'income',
-        category: (fee.feeType && fee.feeType.toLowerCase()) + '_fee',
-        amount: fee.amount.minus(fee.discount),
-        referenceInvoice: fee.id
-      }
-    });
-    return fee;
+// Retired: legacy StudentFee payments bypassed invoices and produced ledger income
+// with no Payment row. All collection now goes through /payments against the
+// Invoice bridge created for every category FeeRecord.
+app.post('/fees/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
+  res.status(410).json({
+    error: 'Legacy fee payments are retired. Collect this fee against its invoice via POST /payments.',
   });
-  res.json(result);
 });
 
-app.delete('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.delete('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.studentFee.delete({ where: { id } });
@@ -5183,7 +5278,7 @@ app.delete('/fees/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Tea
 });
 
 // Salaries
-app.get('/salaries', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/salaries', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const salaries = await prisma.teacherSalary.findMany({ orderBy: { paymentDate: 'desc' } });
   res.json(salaries);
 });
@@ -5234,17 +5329,35 @@ app.post('/salaries/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin'
     if (existingLedger) {
       throw new HttpError(400, 'Payment has already been recorded');
     }
-    
-    const salary = await tx.teacherSalary.update({ where: { id }, data: { status: 'Paid' } });
+
+    const salary = await tx.teacherSalary.findUnique({ where: { id } });
+    if (!salary) throw new HttpError(404, 'Salary record not found');
+
+    // Conditional claim: concurrent pay requests can only create one ledger row.
+    const claimed = await tx.teacherSalary.updateMany({
+      where: { id, status: { not: 'Paid' } },
+      data: { status: 'Paid' },
+    });
+    if (claimed.count === 0) throw new HttpError(400, 'Salary has already been paid');
+
     await tx.ledgerEntry.create({
       data: {
         type: 'expense',
         category: 'teacher_salary',
         amount: salary.netSalary,
-        referenceInvoice: salary.id
+        referenceInvoice: salary.id,
+        date: salary.paymentDate
       }
     });
-    return salary;
+    await logAudit(tx, {
+      action: 'salary.pay',
+      entity: 'TeacherSalary',
+      entityId: salary.id,
+      actor: (req as any).user?.email ?? (req as any).user?.name,
+      reason: `Teacher salary paid for ${salary.paymentDate.toISOString().slice(0, 10)}`,
+      meta: { teacherId: salary.teacherId, amount: Number(salary.netSalary) },
+    });
+    return { ...salary, status: 'Paid' };
   });
   res.json(result);
 });
@@ -5264,12 +5377,12 @@ app.delete('/salaries/:id', authMiddleware, checkRole(['Admin']), async (req: Re
 });
 
 // Expenses
-app.get('/expenses', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/expenses', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const expenses = await prisma.schoolExpense.findMany({ orderBy: { date: 'desc' } });
   res.json(expenses);
 });
 
-app.post('/expenses', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/expenses', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     category: z.string(),
     amount: z.number().positive(),
@@ -5289,15 +5402,24 @@ app.post('/expenses', authMiddleware, authMiddleware, checkRole(['Admin', 'Teach
         category: expense.category || '',
         amount: expense.amount,
         referenceInvoice: expense.id,
+        date: expense.date,
         createdAt: expense.date
       }
+    });
+    await logAudit(tx, {
+      action: 'expense.create',
+      entity: 'SchoolExpense',
+      entityId: expense.id,
+      actor: (req as any).user?.email ?? (req as any).user?.name,
+      reason: `Expense ${expense.category} of ${expense.amount}`,
+      meta: { category: expense.category, amount: Number(expense.amount) },
     });
     return expense;
   });
   res.status(201).json(result);
 });
 
-app.put('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.put('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     category: z.string().optional(),
@@ -5316,16 +5438,26 @@ app.put('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Te
     const ledgerUpdate: any = {};
     if (parsed.data.amount !== undefined) ledgerUpdate.amount = parsed.data.amount;
     if (parsed.data.category !== undefined) ledgerUpdate.category = parsed.data.category;
+    if (parsed.data.date !== undefined) ledgerUpdate.date = parsed.data.date;
     if (Object.keys(ledgerUpdate).length) {
       await tx.ledgerEntry.updateMany({ where: { referenceInvoice: id }, data: ledgerUpdate });
     }
+
+    await logAudit(tx, {
+      action: 'expense.update',
+      entity: 'SchoolExpense',
+      entityId: expense.id,
+      actor: (req as any).user?.email ?? (req as any).user?.name,
+      reason: 'Expense updated',
+      meta: parsed.data as any,
+    });
 
     return expense;
   });
   res.json(result);
 });
 
-app.delete('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.delete('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   await prisma.$transaction(async (tx) => {
     // Find and delete the associated ledger entry
@@ -5333,6 +5465,13 @@ app.delete('/expenses/:id', authMiddleware, authMiddleware, checkRole(['Admin', 
       where: { referenceInvoice: id }
     });
     await tx.schoolExpense.delete({ where: { id } });
+    await logAudit(tx, {
+      action: 'expense.delete',
+      entity: 'SchoolExpense',
+      entityId: id,
+      actor: (req as any).user?.email ?? (req as any).user?.name,
+      reason: 'Expense deleted',
+    });
   });
   res.status(204).send();
 });
@@ -5821,13 +5960,13 @@ app.get('/attendance', authMiddleware, authMiddleware, checkRole(['Admin', 'Teac
 });
 
 // Tuition Fee Structures
-app.get('/tuition/structures', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/tuition/structures', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const items = await prisma.feeStructure.findMany({ where: { isActive: true }, include: { class: true } });
   res.json(items);
 });
 
 // Class -> assigned monthly tuition view (used by the fee assignment menu)
-app.get('/tuition/class-fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/tuition/class-fees', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const classes = await prisma.schoolClass.findMany({ orderBy: [{ name: 'asc' }, { section: 'asc' }] });
   const structures = await prisma.feeStructure.findMany({
     where: { isActive: true },
@@ -5893,7 +6032,7 @@ app.delete('/tuition/structures/:id', authMiddleware, checkRole(['Admin']), asyn
 });
 
 // Student Fee Assignments
-app.get('/tuition/assignments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/tuition/assignments', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { studentId } = req.query as any;
   const where: any = {};
   if (studentId) where.studentId = String(studentId);
@@ -5942,43 +6081,13 @@ app.delete('/tuition/assignments/:id', authMiddleware, checkRole(['Admin']), asy
   res.status(204).send();
 });
 
-// Tuition Invoice Generation (preview first, then idempotent generate)
-app.post('/tuition/generate-monthly', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
-  const schema = z.object({
-    month: z.number().int().min(1).max(12),
-    year: z.number().int(),
-    dueDay: z.number().int().min(1).max(28).optional().default(10),
-    prorate: z.boolean().optional().default(false),
-    classId: z.string().optional(),
-    academicYear: z.string().optional(),
-    preview: z.boolean().optional().default(false),
+// Retired: monthly tuition is generated as a TUITION FeeRecord through
+// POST /fees/generate. Keeping this route active would create a second billing
+// system for the same student/month.
+app.post('/tuition/generate-monthly', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
+  res.status(410).json({
+    error: 'Legacy tuition invoicing is retired. Generate the TUITION fee category via POST /fees/generate instead.',
   });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { preview, ...input } = parsed.data;
-
-  try {
-    if (preview) {
-      const { rows, summary } = await buildMonthlyBlueprint(prisma, input);
-      return res.json({ preview: true, rows, summary });
-    }
-
-    const result = await runMonthlyTuitionGeneration(prisma, input, {
-      actor: (req as any).user?.email ?? (req as any).user?.name,
-    });
-
-    res.json({
-      ...result,
-      checked: result.totalStudents,
-      message: result.message,
-    });
-  } catch (error: any) {
-    console.error('Tuition generation error:', error);
-    if (error?.message === 'Class not found') {
-      return res.status(404).json({ error: 'Class not found' });
-    }
-    res.status(500).json({ error: 'Failed to generate monthly tuition', details: error.message });
-  }
 });
 // Monthly Attendance Matrix
 app.get('/attendance/matrix', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
@@ -6277,12 +6386,12 @@ app.get('/attendance/teachers', authMiddleware, authMiddleware, checkRole(['Admi
   res.json(result);
 });
 
-app.get('/store/products', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/store/products', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const items = await prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
   res.json(items);
 });
 
-app.post('/store/products', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/store/products', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     category: z.string().optional(),
@@ -6301,7 +6410,7 @@ app.post('/store/products', authMiddleware, authMiddleware, checkRole(['Admin', 
   res.status(201).json(item);
 });
 
-app.put('/store/suppliers/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.put('/store/suppliers/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().min(1).optional(),
@@ -6314,7 +6423,7 @@ app.put('/store/suppliers/:id', authMiddleware, authMiddleware, checkRole(['Admi
   res.json(item);
 });
 
-app.put('/store/products/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.put('/store/products/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -6328,12 +6437,12 @@ app.put('/store/products/:id', authMiddleware, authMiddleware, checkRole(['Admin
   res.json(item);
 });
 
-app.get('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const items = await prisma.supplier.findMany({ orderBy: { name: 'asc' } });
   res.json(items);
 });
 
-app.post('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string().min(1),
     phone: z.string().optional(),
@@ -6345,7 +6454,7 @@ app.post('/store/suppliers', authMiddleware, authMiddleware, checkRole(['Admin',
   res.status(201).json(item);
 });
 
-app.get('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const items = await prisma.purchase.findMany({
     include: { items: true, supplier: true },
     orderBy: { purchaseDate: 'desc' }
@@ -6353,7 +6462,7 @@ app.get('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin', 
   res.json(items);
 });
 
-app.post('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     supplierId: z.string().optional(),
     items: z.array(z.object({
@@ -6397,7 +6506,7 @@ app.post('/store/purchases', authMiddleware, authMiddleware, checkRole(['Admin',
   res.status(201).json(result);
 });
 
-app.get('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const items = await prisma.sale.findMany({
     include: { items: true, student: true },
     orderBy: { saleDate: 'desc' }
@@ -6405,7 +6514,7 @@ app.get('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Tea
   res.json(items);
 });
 
-app.post('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string().optional(),
     items: z.array(z.object({
@@ -6452,7 +6561,7 @@ app.post('/store/sales', authMiddleware, authMiddleware, checkRole(['Admin', 'Te
   res.status(201).json(result);
 });
 
-app.get('/store/inventory', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/store/inventory', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   try {
     const products = await prisma.product.findMany({ orderBy: { name: 'asc' } });
     res.json(products.map((p: any) => ({ id: p.id, name: p.name, stock: p.currentStock })));
@@ -6462,7 +6571,7 @@ app.get('/store/inventory', authMiddleware, authMiddleware, checkRole(['Admin', 
   }
 });
 
-app.get('/store/reports/profit', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/store/reports/profit', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const from = req.query.from ? new Date(String(req.query.from)) : null;
   const to = req.query.to ? new Date(String(req.query.to)) : null;
 
@@ -6520,7 +6629,7 @@ app.post('/attendance/teachers/save', authMiddleware, authMiddleware, checkRole(
 /**
  * Attendance leave guard. Protects attendance records an APPROVED full-day
  * leave has synchronized: teachers marking a student Present/Absent/Late on a
- * day that leave covers must pass `override: true` (deliberate override) —
+ * day that leave covers must pass `override: true` (deliberate override) â€”
  * accidentally marking an on-leave student Absent is the error this prevents.
  * Explicitly marking 'Leave' never needs the override.
  */
@@ -6646,7 +6755,7 @@ app.delete('/attendance/date', authMiddleware, checkRole(['Admin']), async (req:
   }
 });
 // Admission Packages
-app.get('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { classId, session } = req.query;
   const where: any = { isActive: true };
   if (classId) where.classId = String(classId);
@@ -6660,7 +6769,7 @@ app.get('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin
   res.json(packages);
 });
 
-app.post('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     name: z.string(),
     session: z.string(),
@@ -6693,7 +6802,7 @@ app.post('/admission-packages', authMiddleware, authMiddleware, checkRole(['Admi
   res.json(pkg);
 });
 
-app.put('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.put('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const schema = z.object({
     name: z.string().optional(),
@@ -6745,7 +6854,7 @@ app.put('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['A
   }
 });
 
-app.delete('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.delete('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
     await prisma.admissionPackage.delete({ where: { id } });
@@ -6756,7 +6865,7 @@ app.delete('/admission-packages/:id', authMiddleware, authMiddleware, checkRole(
   }
 });
 // Replace your existing app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), ...) with this:
-app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     student: z.object({
       name: z.string(),
@@ -6954,26 +7063,16 @@ app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admi
            studentId: newStudent.id,
            categoryId: admissionCategory.id,
            billingPeriod: `${new Date().getFullYear()}-ADM`,
-           amount: totalAmount,
-           assignmentAmount: totalAmount,
-           source: 'package',
-           status: fullyCovered ? 'paid' : 'due',
+            amount: totalAmount,
+            assignmentAmount: totalAmount,
+            source: 'package',
+            status: fullyCovered ? 'waived' : 'due',
            notes: `Admission fee for package: ${pkg.name}`
          }
        });
 
-// Create LedgerEntry for admission fee
-        await (tx as any).ledgerEntry.create({
-          data: {
-            type: 'income',
-            category: 'admission_fee',
-            amount: totalAmount,
-            feeRecordId: admissionFeeRecord.id,
-            feeCategoryId: admissionCategory.id,
-            billingPeriod: `${new Date().getFullYear()}-ADM`,
-            studentId: newStudent.id
-          }
-        });
+       // Income is booked by the payment flow, when money is actually received.
+       // Booking it here double-counted every admission that was later paid.
 
        // Update Student with admission FeeRecord link
        await (tx as any).student.update({
@@ -6984,25 +7083,40 @@ app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admi
          }
        });
 
-       // 4. Create Invoice (for backward compatibility)
-       const invoice = await tx.invoice.create({
-         data: {
-           studentId: newStudent.id,
-           type: 'admission',
-           totalAmount,
-           status: fullyCovered ? 'paid' : 'unpaid',
-           migrationFeeRecordId: admissionFeeRecord.id,
-           items: {
-             create: pkg.feeItems.map(item => ({
-               name: item.name,
-               amount: item.amount
-             }))
-           }
-         },
-         include: { items: true }
-       });
+        // 4. Create Invoice (for backward compatibility)
+        const admissionAcademicYear = academicYearForDate(new Date());
+        const { invoiceNo } = await nextInvoiceNumber(tx, admissionAcademicYear);
+        const invoice = await tx.invoice.create({
+          data: {
+            studentId: newStudent.id,
+            type: 'admission',
+            totalAmount,
+            status: fullyCovered ? 'paid' : 'unpaid',
+            billingMonth: `${new Date().getFullYear()}-ADM`,
+            academicYear: admissionAcademicYear,
+            invoiceNo,
+            dueDate: new Date(),
+            migrationFeeRecordId: admissionFeeRecord.id,
+            items: {
+              create: pkg.feeItems.map(item => ({
+                name: item.name,
+                amount: item.amount
+              }))
+            }
+          },
+          include: { items: true }
+        });
 
-       return { student: newStudent, admissionFeeRecord, invoice };
+        await logAudit(tx as any, {
+          action: 'admission.create',
+          entity: 'Student',
+          entityId: newStudent.id,
+          actor: (req as any).user?.email ?? (req as any).user?.name,
+          reason: `Admission created with package ${pkg.name}`,
+          meta: { invoiceId: invoice.id, invoiceNo, feeRecordId: admissionFeeRecord.id, amount: Number(totalAmount) },
+        });
+
+        return { student: newStudent, admissionFeeRecord, invoice };
     });
 
     res.json(result);
@@ -7016,7 +7130,7 @@ app.post('/students/admission', authMiddleware, authMiddleware, checkRole(['Admi
 });
 
 // Payments
-app.post('/payments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/payments', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     invoiceId: z.string(),
     amount: z.number().positive(),
@@ -7031,9 +7145,19 @@ app.post('/payments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teach
 
   const { invoiceId, amount, method, transactionRef, receivedBy, date } = parsed.data;
   const methodNormalized = (PAYMENT_METHODS as readonly string[]).includes(method) ? method : 'cash';
+  const rawIdempotencyKey = req.headers['idempotency-key'];
+  const idempotencyKey = typeof rawIdempotencyKey === 'string' ? rawIdempotencyKey.trim() : '';
+  if (idempotencyKey.length > 200) {
+    return res.status(400).json({ error: 'Idempotency-Key must be at most 200 characters.' });
+  }
 
   try {
     const result = await prisma.$transaction(async (tx) => {
+      if (idempotencyKey) {
+        const existing = await tx.payment.findUnique({ where: { idempotencyKey } });
+        if (existing) return existing;
+      }
+
       await lockInvoice(tx, invoiceId);
       const invoice = await tx.invoice.findUnique({
         where: { id: invoiceId },
@@ -7070,6 +7194,7 @@ app.post('/payments', authMiddleware, authMiddleware, checkRole(['Admin', 'Teach
           transactionRef,
           receivedBy,
           paymentNo,
+          idempotencyKey: idempotencyKey || null,
           date: paymentDate,
           // Link back to the category fee record so its status can be derived.
           feeRecordId: invoice.migrationFeeRecordId ?? null,
@@ -7104,7 +7229,7 @@ await recalcInvoiceTx(tx, invoiceId);
        }
 
 // A bridged invoice is a category fee, so tag the income row the same way the
-        // admission flow does — otherwise category fee reports cannot attribute it.
+        // admission flow does â€” otherwise category fee reports cannot attribute it.
         const bridgedRecord = invoice.migrationFeeRecord ?? null;
 
         await tx.ledgerEntry.create({
@@ -7139,6 +7264,10 @@ await recalcInvoiceTx(tx, invoiceId);
     if (error instanceof HttpError) {
       return res.status(error.status).json({ error: error.message });
     }
+    if (error?.code === 'P2002' && idempotencyKey) {
+      const existing = await prisma.payment.findUnique({ where: { idempotencyKey } });
+      if (existing) return res.json(existing);
+    }
     console.error('Payment error:', error);
     res.status(500).json({ error: 'Payment failed' });
   }
@@ -7152,19 +7281,40 @@ await recalcInvoiceTx(tx, invoiceId);
 const MONEY_TX_OPTIONS = { timeout: 30000, maxWait: 15000 };
 const PAYMENT_TX_OPTIONS = MONEY_TX_OPTIONS;
 
-// Void / refund — payments are immutable. Voiding keeps the row (status='voided')
-// + audit trail, recalculates the invoice, and writes a reversing ledger entry.
-const reversePayment = async (paymentId: string, opts: { reason: string; actor?: string }) => {
+// Void / refund — payments are immutable. Reversing keeps the row and its audit
+// trail, recalculates the invoice, and reverses the linked income entry. A void
+// means "this receipt should never have existed"; a refund means the money was
+// returned to the payer after being collected. They share the money movement but
+// keep distinct statuses and reasons.
+const reversePayment = async (
+  paymentId: string,
+  opts: { reason: string; actor?: string; mode: 'void' | 'refund' },
+) => {
   return prisma.$transaction(async (tx) => {
     const payment = await tx.payment.findUnique({ where: { id: paymentId } });
     if (!payment) throw new HttpError(404, 'Payment not found');
-    if (isVoided(payment)) throw new HttpError(400, 'Payment already voided');
+    if (isVoided(payment)) {
+      throw new HttpError(400, `Payment already ${payment.status === 'refunded' ? 'refunded' : 'voided'}`);
+    }
 
     await lockInvoice(tx, payment.invoiceId);
 
+    const reversedAt = new Date();
     const updatedPayment = await tx.payment.update({
       where: { id: payment.id },
-      data: { status: 'voided', voidedAt: new Date(), voidedBy: opts.actor ?? null, voidReason: opts.reason },
+      data:
+        opts.mode === 'refund'
+          ? {
+              status: 'refunded',
+              refundedAt: reversedAt,
+              refundReason: opts.reason,
+            }
+          : {
+              status: 'voided',
+              voidedAt: reversedAt,
+              voidedBy: opts.actor ?? null,
+              voidReason: opts.reason,
+            },
     });
 
     await recalcInvoiceTx(tx, payment.invoiceId);
@@ -7186,7 +7336,7 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
         paymentId: payment.id,
         reversedAt: null,
       },
-      data: { reversedAt: new Date() },
+      data: { reversedAt },
     });
 
     if (reversed.count === 0) {
@@ -7194,12 +7344,12 @@ const reversePayment = async (paymentId: string, opts: { reason: string; actor?:
       // the shortfall so the gap is visible instead of silently skewing totals.
       console.warn(
         `[reversePayment] payment ${payment.id} (${payment.paymentNo ?? 'no paymentNo'}) ` +
-          `voided but no income ledger row was found to reverse`,
+          `${opts.mode === 'refund' ? 'refunded' : 'voided'} but no income ledger row was found to reverse`,
       );
     }
 
     await logAudit(tx, {
-      action: 'payment.void',
+      action: opts.mode === 'refund' ? 'payment.refund' : 'payment.void',
       entity: 'Payment',
       entityId: payment.paymentNo ?? payment.id,
       actor: opts.actor,
@@ -7217,7 +7367,11 @@ app.post('/payments/:id/void', authMiddleware, authMiddleware, checkRole(['Admin
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Voided';
   const actor = parsed.success ? parsed.data.actor : undefined;
   try {
-    const result = await reversePayment(req.params.id, { reason, actor: actor ?? (req as any).user?.email ?? (req as any).user?.name });
+    const result = await reversePayment(req.params.id, {
+      reason,
+      actor: actor ?? (req as any).user?.email ?? (req as any).user?.name,
+      mode: 'void',
+    });
     res.json(result);
   } catch (error: any) {
     if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
@@ -7232,7 +7386,11 @@ app.post('/payments/:id/refund', authMiddleware, authMiddleware, checkRole(['Adm
   const reason = parsed.success && parsed.data.reason ? parsed.data.reason : 'Refund';
   const actor = parsed.success ? parsed.data.actor : undefined;
   try {
-    const result = await reversePayment(req.params.id, { reason, actor: actor ?? (req as any).user?.email ?? (req as any).user?.name });
+    const result = await reversePayment(req.params.id, {
+      reason,
+      actor: actor ?? (req as any).user?.email ?? (req as any).user?.name,
+      mode: 'refund',
+    });
     res.json(result);
   } catch (error: any) {
     if (error instanceof HttpError) return res.status(error.status).json({ error: error.message });
@@ -7241,7 +7399,7 @@ app.post('/payments/:id/refund', authMiddleware, authMiddleware, checkRole(['Adm
   }
 });
 
-app.get('/invoices', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/invoices', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { studentId, page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7275,7 +7433,7 @@ app.get('/invoices', authMiddleware, authMiddleware, checkRole(['Admin', 'Teache
   });
 });
 
-app.post('/invoices/from-package', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/invoices/from-package', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string(),
     packageId: z.string()
@@ -7315,7 +7473,7 @@ app.post('/invoices/from-package', authMiddleware, authMiddleware, checkRole(['A
 });
 
 // Create simple invoice (generic fee record) with optional immediate payment
-app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     studentId: z.string(),
     type: z.string().default('fee'),
@@ -7333,13 +7491,24 @@ app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin',
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { studentId, type, items, initialPayment, method, billingMonth, academicYear, date, dueDate, receivedBy } = parsed.data;
 
+  if (String(type).toLowerCase() === 'tuition') {
+    return res.status(410).json({
+      error: 'Legacy tuition invoices are retired. Add a TUITION fee record or generate the TUITION category via /fees instead.',
+    });
+  }
+
   try {
+    const explicitAcademicYear = normalizeAcademicYear(academicYear);
+    if (academicYear && !explicitAcademicYear) {
+      throw new HttpError(400, `Invalid academicYear "${academicYear}". Use format like "2026-27" or "2026".`);
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       // totalAmount is ALWAYS derived from items server-side — never trusted from the client.
       const computedTotal = items.reduce((s, i) => s.plus(money(i.amount)), money(0));
       if (computedTotal.lte(0)) throw new HttpError(400, 'Invoice total must be positive');
 
-      const acYear = academicYear ?? (billingMonth ? academicYearForMonth(Number(billingMonth.substring(0, 4)), Number(billingMonth.substring(5))) : academicYearForDate(date ? new Date(date) : new Date()));
+      const acYear = explicitAcademicYear ?? (billingMonth ? academicYearForMonth(Number(billingMonth.substring(0, 4)), Number(billingMonth.substring(5))) : academicYearForDate(date ? new Date(date) : new Date()));
 
       const invoiceDate = date ? new Date(date) : new Date();
       const { invoiceNo } = await nextInvoiceNumber(tx, acYear);
@@ -7390,15 +7559,18 @@ app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin',
             date: invoiceDate,
           }
         });
-        await logAudit(tx, {
-          action: 'invoice.create',
-          entity: 'Invoice',
-          entityId: invoiceNo,
-          actor: receivedBy ?? undefined,
-          reason: `Invoice created with initial payment ${capped}`,
-          meta: { studentId, type, amount: capped },
-        });
       }
+
+      await logAudit(tx, {
+        action: 'invoice.create',
+        entity: 'Invoice',
+        entityId: invoiceNo,
+        actor: receivedBy ?? (req as any).user?.email ?? (req as any).user?.name,
+        reason: capped > 0
+          ? `Invoice created with initial payment ${capped}`
+          : 'Invoice created',
+        meta: { studentId, type, amount: Number(computedTotal), initialPayment: capped },
+      });
 
       return await tx.invoice.findUnique({ where: { id: invoice.id }, include: { items: true, payments: true } });
     }, MONEY_TX_OPTIONS);
@@ -7410,7 +7582,7 @@ app.post('/invoices/simple', authMiddleware, authMiddleware, checkRole(['Admin',
   }
 });
 
-app.get('/invoices/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/invoices/:id', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   console.log(`[GET /invoices/:id] Fetching invoice with id: ${id}`);
   const invoice = await prisma.invoice.findUnique({
@@ -7459,7 +7631,7 @@ app.delete('/staff/:id', authMiddleware, authMiddleware, checkRole(['Admin', 'Te
 });
 
 // Staff Salaries
-app.get('/salaries/staff', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+app.get('/salaries/staff', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   const salaries = await prisma.staffSalary.findMany({
     include: { staff: true },
     orderBy: { paymentDate: 'desc' }
@@ -7471,7 +7643,7 @@ app.get('/salaries/staff', authMiddleware, authMiddleware, checkRole(['Admin', '
   })));
 });
 
-app.post('/salaries/staff/process', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/salaries/staff/process', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     staffIds: z.array(z.string()).min(1),
     month: z.number().min(1).max(12),
@@ -7504,7 +7676,7 @@ app.post('/salaries/staff/process', authMiddleware, authMiddleware, checkRole(['
   res.json(results);
 });
 
-app.post('/salaries/staff/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/salaries/staff/:id/pay', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { id } = req.params;
   const result = await prisma.$transaction(async (tx) => {
     // Check if payment ledger entry already exists to prevent double-counting
@@ -7518,23 +7690,41 @@ app.post('/salaries/staff/:id/pay', authMiddleware, authMiddleware, checkRole(['
     if (existingLedger) {
       throw new HttpError(400, 'Payment has already been recorded');
     }
-    
-    const salary = await tx.staffSalary.update({ where: { id }, data: { status: 'Paid' } });
+
+    const salary = await tx.staffSalary.findUnique({ where: { id } });
+    if (!salary) throw new HttpError(404, 'Salary record not found');
+
+    // Conditional claim: concurrent pay requests can only create one ledger row.
+    const claimed = await tx.staffSalary.updateMany({
+      where: { id, status: { not: 'Paid' } },
+      data: { status: 'Paid' },
+    });
+    if (claimed.count === 0) throw new HttpError(400, 'Salary has already been paid');
+
     await tx.ledgerEntry.create({
       data: {
         type: 'expense',
         category: 'staff_salary',
         amount: salary.netSalary,
-        referenceInvoice: salary.id
+        referenceInvoice: salary.id,
+        date: salary.paymentDate
       }
     });
-    return salary;
+    await logAudit(tx, {
+      action: 'salary.pay',
+      entity: 'StaffSalary',
+      entityId: salary.id,
+      actor: (req as any).user?.email ?? (req as any).user?.name,
+      reason: `Staff salary paid for ${salary.paymentDate.toISOString().slice(0, 10)}`,
+      meta: { staffId: salary.staffId, amount: Number(salary.netSalary) },
+    });
+    return { ...salary, status: 'Paid' };
   });
   res.json(result);
 });
 
 // Ledger & Transactions
-app.get('/finance/transactions', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/finance/transactions', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { type, category, page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7561,7 +7751,7 @@ app.get('/finance/transactions', authMiddleware, authMiddleware, checkRole(['Adm
   });
 });
 
-app.get('/finance/income', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/finance/income', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { page = '1', limit = '20' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 20));
@@ -7703,7 +7893,7 @@ app.delete('/finance/categories/:id', authMiddleware, checkRole(['Admin']), asyn
     res.status(204).send();
   } catch (error: any) {
     if (error?.code === 'P2025') {
-      return res.status(404).json({ error: 'Category not found — it may already have been deleted.' });
+      return res.status(404).json({ error: 'Category not found â€” it may already have been deleted.' });
     }
     console.error('Error deleting finance category:', error);
     res.status(500).json({ error: 'Failed to delete category', details: error.message });
@@ -7801,13 +7991,15 @@ app.get('/finance/expenses', authMiddleware, authMiddleware, checkRole(['Admin']
 });
 
 // Financial Reports
-app.get('/finance/reports/summary', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/finance/reports/summary', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { from, to } = req.query;
   const where: any = {};
-  if (from && to) {
-    // Use half-open range [from, to) to exclude the day after 'to'
-    where.date = { gte: new Date(String(from)), lt: new Date(String(to)) };
-  }
+  const dateFilter: { gte?: Date; lt?: Date } = {};
+  // Use half-open range [from, to) to exclude the day after 'to'. A one-sided
+  // filter must still narrow the result; it must never silently return all time.
+  if (from) dateFilter.gte = new Date(String(from));
+  if (to) dateFilter.lt = new Date(String(to));
+  if (Object.keys(dateFilter).length) where.date = dateFilter;
 
   const entries = await prisma.ledgerEntry.findMany({ where: { ...where, ...ACTIVE_LEDGER } });
   const income = entries.filter(e => e.type === 'income').reduce((s, e) => s.plus(e.amount), money(0));
@@ -7835,7 +8027,7 @@ app.get('/finance/reports/summary', authMiddleware, authMiddleware, checkRole(['
 });
 
 // Fee Reports
-app.get('/finance/reports/fees', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/finance/reports/fees', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { page = '1', limit = '50' } = req.query;
   const pageNum = Math.max(1, parseInt(String(page)) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(String(limit)) || 50));
@@ -7879,8 +8071,8 @@ app.get('/finance/reports/fees', authMiddleware, authMiddleware, checkRole(['Adm
   });
 });
 
-// Fee summary (derived from invoices — never a parallel source of truth)
-app.get('/finance/fees/summary', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (_req: Request, res: Response) => {
+// Fee summary (derived from invoices â€” never a parallel source of truth)
+app.get('/finance/fees/summary', authMiddleware, authMiddleware, checkRole(['Admin']), async (_req: Request, res: Response) => {
   try {
     const today = new Date();
     const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -7889,7 +8081,7 @@ app.get('/finance/fees/summary', authMiddleware, authMiddleware, checkRole(['Adm
 
     const [invoices, payments] = await Promise.all([
       prisma.invoice.findMany({ include: { payments: true } }),
-      prisma.payment.findMany({ where: { date: { gte: startToday, lt: endMonth } } }),
+      prisma.payment.findMany({ where: { date: { gte: startMonth, lt: endMonth } } }),
     ]);
 
     let totalOutstanding = money(0);
@@ -7910,7 +8102,7 @@ app.get('/finance/fees/summary', authMiddleware, authMiddleware, checkRole(['Adm
     for (const p of payments) {
       if (isVoided(p)) continue;
       const endOfToday = new Date(startToday.getTime() + 24 * 60 * 60 * 1000);
-      if (p.date >= startToday && p.date < endMonth) collectedThisMonth = collectedThisMonth.plus(p.amount);
+      if (p.date >= startMonth && p.date < endMonth) collectedThisMonth = collectedThisMonth.plus(p.amount);
       if (p.date >= startToday && p.date < endOfToday) collectedToday = collectedToday.plus(p.amount);
     }
 
@@ -8026,7 +8218,7 @@ app.get('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), asyn
 });
 
 // Save grading bands for a single grading template (atomic replace) with strict
-// server-side validation. CRITICAL: changes apply ONLY to new schedules — existing
+// server-side validation. CRITICAL: changes apply ONLY to new schedules â€” existing
 // schedules keep their frozen gradingSnapshot.
 app.post('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
@@ -8129,7 +8321,7 @@ app.post('/grading/:examTypeId/bands', authMiddleware, checkRole(['Admin']), asy
 });
 
 // Fee Particulars
-app.get('/fee-particulars', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.get('/fee-particulars', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const { target } = req.query;
   const where: any = {};
   if (target) where.target = String(target);
@@ -8141,7 +8333,7 @@ app.get('/fee-particulars', authMiddleware, authMiddleware, checkRole(['Admin', 
   res.json(particulars);
 });
 
-app.post('/fee-particulars/bulk', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
+app.post('/fee-particulars/bulk', authMiddleware, authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   const schema = z.object({
     target: z.string(),
     particulars: z.array(z.object({
@@ -8353,7 +8545,7 @@ app.post('/class-subject-teachers', authMiddleware, checkRole(['Admin']), async 
     if (!cls) return res.status(404).json({ error: 'Class not found' });
     if (!subject) return res.status(404).json({ error: 'Subject not found' });
 
-    // One teacher per (class, subject) — upsert so reassigning just updates the teacher.
+    // One teacher per (class, subject) â€” upsert so reassigning just updates the teacher.
     const assignment = await prisma.classSubjectTeacher.upsert({
       where: { classId_subjectId: { classId, subjectId } },
       update: { teacherId },
@@ -8416,8 +8608,9 @@ app.post('/auth/login', async (req: Request, res: Response) => {
     let user = null;
 
     // Check different user types based on role
-    if (role && role.toLowerCase() === 'admin') {
-      // Look for admin user in the users table
+    const isFinanceRole = role && (role.toLowerCase() === 'admin' || role.toLowerCase() === 'accountant');
+    if (isFinanceRole) {
+      // Look for admin/accountant user in the users table
       user = await prisma.user.findFirst({
         where: {
           OR: [
@@ -8427,9 +8620,12 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         }
       });
 
-      // For admin, verify password against stored hash
+      // Verify password against stored hash. An accountant login requires an
+      // Accountant user row; an admin login accepts an Admin row.
       if (user && user.email === email && await bcrypt.compare(password, user.password)) {
-        // Admin found
+        if (role.toLowerCase() === 'accountant' && user.role !== 'Accountant') {
+          user = null;
+        }
       } else {
         user = null;
       }
@@ -8527,8 +8723,10 @@ app.post('/auth/login', async (req: Request, res: Response) => {
         { expiresIn: '7d' }
       );
 
+      // Never echo the password hash back to the client.
+      const { password: _password, ...safeUser } = user as { password?: string; [key: string]: any };
       return res.json({
-        user: user,
+        user: safeUser,
         token: token
       });
     }
@@ -9141,7 +9339,7 @@ async function teacherRelevantExams(teacher: any): Promise<Array<any>> {
     orderBy: { startDate: 'asc' }
   });
 
-  // Only advertise the classes this teacher may actually open — an exam card
+  // Only advertise the classes this teacher may actually open â€” an exam card
   // listing every scheduled class sent them to entries that 403'd.
   const allowedClassIds = await teacherAllowedClassIdsAll(teacher);
 
@@ -9811,7 +10009,7 @@ app.post('/class-routine/update-entry', authMiddleware, authMiddleware, checkRol
 // Teacher Marks Entry
 //
 // Subject scope for a marks write. Class access on its own used to be enough to
-// save marks for any subject in that class — including another teacher's. When
+// save marks for any subject in that class â€” including another teacher's. When
 // recorded (class, subject) assignments exist only those pairs are writable,
 // otherwise the teacher's own subject is the limit. Marks mode 'all'/'specific'
 // is a deliberate admin grant of every subject, so it stays unrestricted.
@@ -10264,24 +10462,17 @@ function utcDayKeyOf(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-// Find a student by the email / id / admissionNo provided by the frontend.
-function findStudent(email: unknown, studentId: unknown) {
-  return prisma.student.findFirst({
-    where: {
-      OR: [
-        ...(email ? [{ email: email as string }] : []),
-        ...(studentId ? [{ id: studentId as string }] : []),
-        ...(email ? [{ admissionNo: email as string }] : []),
-      ],
-    },
-  });
+// Student routes must never trust email / studentId from the query string:
+// the verified JWT is the only source of the caller's identity.
+function findStudentForRequest(req: Request) {
+  const user = (req as any).user;
+  if (!user || user.role !== 'Student') return Promise.resolve(null);
+  return prisma.student.findUnique({ where: { id: user.id } });
 }
 
 app.get('/student/dashboard', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -10311,7 +10502,7 @@ app.get('/student/dashboard', authMiddleware, authMiddleware, checkRole(['Studen
     const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
 
     const currencySymbol = (code?: string | null) => {
-      const map: Record<string, string> = { USD: '$', BDT: 'Tk.', GBP: '£', EUR: '€', INR: '₹', PKR: 'Rs.', USD2: '$ ' };
+      const map: Record<string, string> = { USD: '$', BDT: 'Tk.', GBP: 'Â£', EUR: 'â‚¬', INR: 'â‚¹', PKR: 'Rs.', USD2: '$ ' };
       if (code && map[code.toUpperCase()]) return map[code.toUpperCase()];
       return code ? `${code} ` : '$';
     };
@@ -10364,7 +10555,7 @@ app.get('/student/dashboard', authMiddleware, authMiddleware, checkRole(['Studen
     const recentResults = results.map((r) => ({
       subject: subjectName(r.subjectId),
       marks: r.totalMarks,
-      grade: r.grade || '—',
+      grade: r.grade || 'â€”',
       gpa: r.gp ?? 0,
     }));
 
@@ -10412,16 +10603,8 @@ app.get('/student/dashboard', authMiddleware, authMiddleware, checkRole(['Studen
 
 app.get('/student/profile', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await prisma.student.findFirst({
-      where: {
-        OR: [
-          ...(email ? [{ email: email as string }] : []),
-          ...(studentId ? [{ id: studentId as string }] : []),
-          ...(email ? [{ admissionNo: email as string }] : []),
-        ],
-      },
+    const student = await prisma.student.findUnique({
+      where: { id: (req as any).user.id },
       include: { guardian: true },
     });
 
@@ -10450,14 +10633,12 @@ app.get('/student/profile', authMiddleware, authMiddleware, checkRole(['Student'
 
 app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
-    const [results, subjects, schedules, allGrading] = await Promise.all([
+    const [results, subjects, schedules, allGrading, absentAttendances] = await Promise.all([
       prisma.result.findMany({
         where: { studentId: student.id, exam: { status: 'Published' } },
         include: { exam: true },
@@ -10466,14 +10647,51 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
       prisma.subject.findMany(),
       prisma.examSchedule.findMany({ include: { exam: true, subject: true, class: true } }),
       prisma.gradingSystem.findMany(),
+      prisma.examAttendance.findMany({
+        where: { studentId: student.id, status: 'ABSENT', exam: { status: 'Published' } },
+        include: { exam: true },
+      }),
     ]);
     const subjectName = (id: string) => subjects.find((s) => s.id === id)?.name || 'Subject';
 
     // Group results by exam so the portal shows only real exams.
-    const byExam = new Map<string, typeof results>();
+    const byExam = new Map<string, any[]>();
     for (const r of results) {
       if (!byExam.has(r.examId)) byExam.set(r.examId, []);
       byExam.get(r.examId)!.push(r);
+    }
+
+    // Attendance is authoritative: surface absent subjects even when no Result
+    // row was ever written for them (e.g. marks were never saved).
+    for (const attendance of absentAttendances) {
+      if (!byExam.has(attendance.examId)) byExam.set(attendance.examId, []);
+      const list = byExam.get(attendance.examId)!;
+      let existing = list.find((r) => r.subjectId === attendance.subjectId);
+      if (!existing) {
+        existing = {
+          id: `absent-${attendance.id}`,
+          studentId: student.id,
+          examId: attendance.examId,
+          subjectId: attendance.subjectId,
+          written: 0,
+          mcq: 0,
+          practical: 0,
+          totalMarks: 0,
+          grade: 'ABSENT',
+          gp: 0,
+          isAbsent: true,
+          exam: attendance.exam,
+        };
+        list.push(existing);
+      } else {
+        existing.isAbsent = true;
+        existing.grade = 'ABSENT';
+        existing.written = 0;
+        existing.mcq = 0;
+        existing.practical = 0;
+        existing.totalMarks = 0;
+        existing.gp = 0;
+      }
     }
 
     const classmates = await prisma.student.findMany({
@@ -10484,9 +10702,10 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
 
     const round2 = (n: number) => Math.round(n * 100) / 100;
 
-    const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; fullMarks: number; percentage: number; grade: string; gpa: number; rank: number; passed: boolean } }> = [];
+    const exams: Array<{ id: string; name: string; resultData: any[]; overall: { totalMarks: number; fullMarks: number; percentage: number; grade: string; gpa: number; rank: number; passed: boolean; isAbsent: boolean; hasAbsence: boolean } }> = [];
     for (const [examId, list] of byExam.entries()) {
       const examSchedules = schedules.filter((s) => s.examId === examId);
+      const rowIsAbsent = (r: any) => !!r.isAbsent || r.grade === 'ABSENT';
       const rows = list.map((r) => {
         const sc = examSchedules.find((s) => s.subjectId === r.subjectId && s.class?.name === student.class);
         const hasMcq = Number(sc?.mcqFullMarks ?? 0) > 0 || Number(r.mcq) > 0;
@@ -10496,8 +10715,9 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
           written: r.written,
           mcq: hasMcq ? r.mcq : null,
           total: r.totalMarks,
-          grade: r.grade || '—',
+          grade: r.grade || 'â€”',
           gpa: r.gp ?? 0,
+          isAbsent: rowIsAbsent(r),
         };
       });
 
@@ -10507,25 +10727,27 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
         .sort((a, b) => Number(b.minPercent) - Number(a.minPercent));
       const failGrades = new Set<string>(grading.filter((g) => g.status === 'FAIL').map((g) => g.grade));
 
-      const totalMarks = list.reduce((s, r) => s + (r.totalMarks || 0), 0);
+      const totalMarks = list.reduce((s, r) => s + (rowIsAbsent(r) ? 0 : (r.totalMarks || 0)), 0);
       let fullMarks = 0;
-      let gpSum = 0, gpCount = 0, creditSum = 0, failed = false;
+      let gpSum = 0, gpCount = 0, creditSum = 0, failed = false, hasAbsence = false;
       for (const r of list) {
+        if (rowIsAbsent(r)) { hasAbsence = true; continue; }
         const sc = examSchedules.find((s) => s.subjectId === r.subjectId && s.class?.name === student.class);
         fullMarks += Number(sc?.fullMarks ?? 100);
         const ch = Number(sc?.subject?.creditHours ?? 1) || 1;
         if (r.gp != null) { gpSum += r.gp * ch; gpCount++; creditSum += ch; }
         if (r.grade && failGrades.has(r.grade)) failed = true;
       }
-      // Credit-weighted GPA: Σ(GP × creditHours) / Σ(creditHours). (#11)
+      // Credit-weighted GPA: Î£(GP Ã— creditHours) / Î£(creditHours). (#11)
       const avgGpa = creditSum > 0 ? round2(gpSum / creditSum) : (gpCount ? round2(gpSum / gpCount) : 0);
       const percentage = fullMarks > 0 ? round2((totalMarks / fullMarks) * 100) : 0;
-      let grade = '—';
+      if (hasAbsence) failed = true;
+      let grade = 'â€”';
       if (failed) {
         grade = 'F';
       } else if (grading.length) {
         const g = grading.find((x) => percentage >= Number(x.minPercent) && percentage <= Number(x.maxPercent));
-        grade = g ? g.grade : (grading[grading.length - 1]?.grade || '—');
+        grade = g ? g.grade : (grading[grading.length - 1]?.grade || 'â€”');
       }
 
       // Rank within this exam across classmates.
@@ -10556,7 +10778,9 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
           grade,
           gpa: avgGpa,
           rank,
-          passed: !failed,
+          passed: !failed && !hasAbsence,
+          isAbsent: list.every(rowIsAbsent),
+          hasAbsence,
         },
       });
     }
@@ -10564,7 +10788,7 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
     res.json({
       exams,
       resultData: exams.length ? exams[0].resultData : [],
-      overall: exams.length ? exams[0].overall : { totalMarks: 0, fullMarks: 0, percentage: 0, grade: '—', gpa: 0, rank: 1, passed: false },
+      overall: exams.length ? exams[0].overall : { totalMarks: 0, fullMarks: 0, percentage: 0, grade: 'â€”', gpa: 0, rank: 1, passed: false },
     });
   } catch (error) {
     console.error('Error fetching student results:', error);
@@ -10574,9 +10798,7 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
 
 app.get('/student/fees', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -10646,9 +10868,7 @@ app.get('/student/fees', authMiddleware, authMiddleware, checkRole(['Student']),
 
 app.get('/student/attendance', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -10684,9 +10904,7 @@ app.get('/student/attendance', authMiddleware, authMiddleware, checkRole(['Stude
 
 app.get('/student/exam-schedule', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId } = req.query;
-
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -10723,9 +10941,9 @@ app.get('/student/exam-schedule', authMiddleware, authMiddleware, checkRole(['St
 // Student's own printable report card (same data as the admin report card).
 app.get('/student/report-card', authMiddleware, authMiddleware, checkRole(['Student']), async (req: Request, res: Response) => {
   try {
-    const { email, studentId, examId } = req.query as any;
+    const { examId } = req.query as any;
     if (!examId) return res.status(400).json({ error: 'examId is required' });
-    const student = await findStudent(email, studentId);
+    const student = await findStudentForRequest(req);
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -10791,7 +11009,7 @@ async function ensureStudentAcademicRecordTable() {
     await prisma.$queryRaw`SELECT 1 FROM "StudentAcademicRecord" LIMIT 1`;
     return;
   } catch {
-    // Table does not exist yet — create it below
+    // Table does not exist yet â€” create it below
   }
 
   await prisma.$executeRaw`

@@ -1,5 +1,12 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import { academicYearForMonth, money, nextInvoiceNumber, roundMoney } from './shared';
+import {
+  academicYearForMonth,
+  dueDateForBillingPeriod,
+  DEFAULT_FEE_DUE_DAY,
+  money,
+  nextInvoiceNumber,
+  roundMoney,
+} from './shared';
 import type { Tx } from './shared';
 
 /**
@@ -49,6 +56,7 @@ export interface AmountInput {
     overrideAmount: Prisma.Decimal | null;
     overrideDiscount: Prisma.Decimal | null;
     discountType: DiscountType;
+    isWaiver: boolean;
     overrideReason: string;
   } | null;
   /** Proration is explicit and traceable, never implicit. */
@@ -93,7 +101,7 @@ function computeDiscount(
 
 /**
  * Resolve the chargeable amount. Precedence:
- *   1. StudentFeeOverride (explicit, audited) — overrideAmount null means waived
+ *   1. StudentFeeOverride (explicit, audited) — only isWaiver waives the fee
  *   2. Manual per-record override/percentage discount
  *   3. Class assignment amount
  * Proration is applied to the assignment/override base first, then discounts.
@@ -105,7 +113,7 @@ export function resolveFeeAmount(input: AmountInput): AmountResolution {
   let wasOverridden = false;
   let overrideReason: string | null = null;
 
-  if (input.override && input.override.overrideAmount === null) {
+  if (input.override?.isWaiver) {
     // Explicit waiver: keep the assignment identifiable but charge nothing.
     return {
       assignmentAmount,
@@ -151,6 +159,13 @@ export function resolveFeeAmount(input: AmountInput): AmountResolution {
     input.override?.overrideDiscount != null ? input.override.overrideDiscount : (input.manualDiscountValue ?? null);
   const discountAmount = computeDiscount(subtotal, discountType, discountValue);
   const finalAmount = roundMoney(subtotal.minus(discountAmount));
+
+  // A discount-only override still changed the charge, so it must be traceable
+  // on the record (not only on the mutable override row).
+  if (input.override && (input.override.overrideAmount != null || input.override.overrideDiscount != null)) {
+    wasOverridden = true;
+    overrideReason = overrideReason ?? (input.override.overrideReason || 'Student override');
+  }
 
   return {
     assignmentAmount,
@@ -266,22 +281,51 @@ export interface CreateFeeRecordResult {
   duplicate: DuplicateCheck;
 }
 
+const FEE_TX_OPTIONS = { timeout: 30000, maxWait: 15000 };
+
 /**
  * The one and only place a FeeRecord is created.
  * Manual creation and bulk generation both go through here so the duplicate rule,
  * amount resolution and ledger integration are identical.
+ *
+ * The record and its bridge Invoice are written in one transaction: a crash between
+ * the two used to leave an uncollectable FeeRecord that no payment flow could reach.
  */
 export async function createFeeRecord(db: Db, input: CreateFeeRecordInput): Promise<CreateFeeRecordResult> {
+  if (typeof (db as any).$transaction === 'function') {
+    return (db as PrismaClient).$transaction(
+      (tx) => createFeeRecordCore(tx, input),
+      FEE_TX_OPTIONS,
+    );
+  }
+  return createFeeRecordCore(db, input);
+}
+
+async function createFeeRecordCore(db: Db, input: CreateFeeRecordInput): Promise<CreateFeeRecordResult> {
   const billingPeriod = assertBillingPeriod(input.billingPeriod);
 
-  const [category, student] = await Promise.all([
+  const [category, student, institute] = await Promise.all([
     db.feeCategory.findUnique({ where: { id: input.categoryId } }),
     db.student.findUnique({ where: { id: input.studentId } }),
+    db.institute.findFirst({ select: { dueDay: true } }),
   ]);
 
   if (!category) throw new FeeError(404, 'Fee category not found.');
   if (!student) throw new FeeError(404, 'Student not found.');
   if (!category.isActive) throw new FeeError(400, `Fee category "${category.name}" is inactive.`);
+
+  if (category.code.toUpperCase() === 'TUITION' && BILLING_PERIOD_RE.test(billingPeriod)) {
+    const legacyInvoice = await db.invoice.findFirst({
+      where: { studentId: input.studentId, type: 'tuition', billingMonth: billingPeriod },
+      select: { id: true, invoiceNo: true },
+    });
+    if (legacyInvoice) {
+      throw new FeeError(
+        409,
+        `A legacy tuition invoice${legacyInvoice.invoiceNo ? ` (${legacyInvoice.invoiceNo})` : ''} already exists for ${billingPeriod}. Collect or void it before generating a category tuition fee.`,
+      );
+    }
+  }
 
   const duplicate = await checkDuplicate(db, input.studentId, input.categoryId, billingPeriod);
   if (duplicate.isDuplicate) {
@@ -323,6 +367,7 @@ export async function createFeeRecord(db: Db, input: CreateFeeRecordInput): Prom
           overrideAmount: override.overrideAmount,
           overrideDiscount: override.overrideDiscount,
           discountType: (override.discountType as DiscountType) ?? null,
+          isWaiver: override.isWaiver,
           overrideReason: override.overrideReason,
         }
       : null,
@@ -338,6 +383,7 @@ export async function createFeeRecord(db: Db, input: CreateFeeRecordInput): Prom
       overrideId: override?.id ?? null,
       assignmentAmount: assignment?.amount ?? null,
       amount: resolution.finalAmount,
+      overrideReason: resolution.overrideReason,
       discountType: resolution.discountType,
       discountValue: resolution.discountValue,
       discountAmount: resolution.discountAmount,
@@ -358,6 +404,7 @@ export async function createFeeRecord(db: Db, input: CreateFeeRecordInput): Prom
     billingPeriod,
     categoryName: category.name,
     invoiceNo: input.invoiceNo ?? null,
+    dueDate: dueDateForBillingPeriod(billingPeriod, institute?.dueDay ?? DEFAULT_FEE_DUE_DAY),
   });
 
   return {
@@ -398,6 +445,7 @@ export async function ensureInvoiceForRecord(
     categoryName: string;
     /** Pre-allocated by the caller for bulk runs; otherwise one is allocated here. */
     invoiceNo?: string | null;
+    dueDate?: Date | null;
   },
 ) {
   const total = roundMoney(money(args.amount));
@@ -424,6 +472,7 @@ export async function ensureInvoiceForRecord(
       // admission keeps YYYY-ADM, which the UI renders as "Admission".
       billingMonth: args.billingPeriod,
       academicYear,
+      dueDate: args.dueDate ?? null,
       invoiceNo: args.invoiceNo ?? (await nextInvoiceNumber(db as Tx, academicYear)).invoiceNo,
       migrationFeeRecordId: args.feeRecordId,
       items: { create: [{ name: args.categoryName, amount: total }] },
@@ -453,7 +502,8 @@ export function deriveRecordStatus(
 }
 
 function isVoidedPayment(p: { status?: string | null }): boolean {
-  return p.status != null && String(p.status).toLowerCase() === 'voided';
+  const status = p.status == null ? '' : String(p.status).toLowerCase();
+  return status === 'voided' || status === 'refunded';
 }
 
 /** Recompute a record's status from its payments. Call after any payment/void change. */

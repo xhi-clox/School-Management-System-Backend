@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { authMiddleware } from '../auth';
 import { checkRole } from '../checkRole';
+import { prisma } from '../prisma';
 import { money } from './shared';
 import { buildGenerationPreview, runGeneration } from './generation';
 import {
@@ -14,7 +15,6 @@ import {
 } from './records';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 const billingPeriodSchema = z
   .string()
@@ -145,7 +145,7 @@ router.post('/categories', authMiddleware, checkRole(['Admin']), async (req: Req
  * GET /fees/categories
  * List all fee categories
  */
-router.get('/categories', authMiddleware, async (req: Request, res: Response) => {
+router.get('/categories', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const categories = await prisma.feeCategory.findMany({
       orderBy: { name: 'asc' },
@@ -167,7 +167,7 @@ router.get('/categories', authMiddleware, async (req: Request, res: Response) =>
  * GET /fees/categories/:id
  * Get a specific fee category
  */
-router.get('/categories/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/categories/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const category = await prisma.feeCategory.findUnique({
       where: { id: req.params.id },
@@ -179,7 +179,11 @@ router.get('/categories/:id', authMiddleware, async (req: Request, res: Response
         records: {
           take: 10,
           orderBy: { createdAt: 'desc' },
-          include: { student: true },
+          include: {
+            student: {
+              select: { id: true, name: true, admissionNo: true, class: true, section: true },
+            },
+          },
         },
       },
     });
@@ -278,7 +282,7 @@ router.post('/assignments', authMiddleware, checkRole(['Admin']), async (req: Re
  * GET /fees/assignments
  * List all fee assignments with filtering
  */
-router.get('/assignments', authMiddleware, async (req: Request, res: Response) => {
+router.get('/assignments', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { categoryId, classId, isActive } = req.query;
 
@@ -456,7 +460,7 @@ router.post('/records/bulk', authMiddleware, checkRole(['Admin']), async (req: R
  * GET /fees/records
  * List fee records with filtering
  */
-router.get('/records', authMiddleware, async (req: Request, res: Response) => {
+router.get('/records', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const {
       studentId,
@@ -515,12 +519,14 @@ router.get('/records', authMiddleware, async (req: Request, res: Response) => {
  * GET /fees/records/:id
  * Get a specific fee record with details
  */
-router.get('/records/:id', authMiddleware, async (req: Request, res: Response) => {
+router.get('/records/:id', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const record = await prisma.feeRecord.findUnique({
       where: { id: req.params.id },
       include: {
-        student: true,
+        student: {
+          select: { id: true, name: true, admissionNo: true, class: true, section: true },
+        },
         category: true,
         assignment: {
           include: { class: true },
@@ -601,6 +607,7 @@ router.post(
         validFrom,
         validTo,
       } = req.body;
+      const isWaiver = req.body.isWaiver === true || req.body.isWaiver === 'true';
 
       // Verify student and category exist
       const [student, category] = await Promise.all([
@@ -621,6 +628,42 @@ const period = billingPeriod ? String(billingPeriod) : null;
         return res.status(400).json({ error: 'An override reason is required for audit purposes.' });
       }
 
+      const hasAmount = overrideAmount !== undefined && overrideAmount !== null && overrideAmount !== '';
+      const hasDiscount = overrideDiscount !== undefined && overrideDiscount !== null && overrideDiscount !== '';
+      const discountKind = discountType ? String(discountType) : null;
+
+      if (!hasAmount && !hasDiscount && !isWaiver) {
+        return res.status(400).json({
+          error: 'An override needs an amount, a discount, or an explicit waiver (isWaiver: true).',
+        });
+      }
+      if (isWaiver && (hasAmount || hasDiscount)) {
+        return res.status(400).json({
+          error: 'A waiver cannot also set an amount or a discount. Remove them or clear isWaiver.',
+        });
+      }
+      if (discountKind && !['percentage', 'fixed'].includes(discountKind)) {
+        return res.status(400).json({ error: 'discountType must be "percentage" or "fixed".' });
+      }
+      if (hasDiscount && !discountKind) {
+        return res.status(400).json({ error: 'discountType is required when overrideDiscount is set.' });
+      }
+
+      let amountValue: Prisma.Decimal | null = null;
+      let discountValue: Prisma.Decimal | null = null;
+      try {
+        if (hasAmount) amountValue = money(overrideAmount);
+        if (hasDiscount) discountValue = money(overrideDiscount);
+      } catch {
+        return res.status(400).json({ error: 'overrideAmount and overrideDiscount must be numeric.' });
+      }
+      if ((amountValue && amountValue.lt(0)) || (discountValue && discountValue.lt(0))) {
+        return res.status(400).json({ error: 'Override amounts and discounts cannot be negative.' });
+      }
+      if (discountKind === 'percentage' && discountValue && discountValue.gt(100)) {
+        return res.status(400).json({ error: 'A percentage discount cannot exceed 100.' });
+      }
+
       // NULL billingPeriod rows are standing overrides; PostgreSQL composite unique
       // indexes treat NULLs as distinct, so dedupe them here in the service layer.
       const existing = await prisma.studentFeeOverride.findFirst({
@@ -633,9 +676,10 @@ const period = billingPeriod ? String(billingPeriod) : null;
       });
 
       const payload = {
-        overrideAmount: overrideAmount ? money(overrideAmount) : null,
-        overrideDiscount: overrideDiscount ? money(overrideDiscount) : null,
-        discountType: discountType || null,
+        overrideAmount: amountValue,
+        overrideDiscount: discountValue,
+        discountType: discountKind,
+        isWaiver,
         overrideReason: String(overrideReason),
         validFrom: validFrom ? new Date(validFrom) : new Date(),
         validTo: validTo ? new Date(validTo) : null,
@@ -669,7 +713,7 @@ const period = billingPeriod ? String(billingPeriod) : null;
  * GET /fees/students/:studentId/overrides
  * Get all fee overrides for a student
  */
-router.get('/students/:studentId/overrides', authMiddleware, async (req: Request, res: Response) => {
+router.get('/students/:studentId/overrides', authMiddleware, checkRole(['Admin']), async (req: Request, res: Response) => {
   try {
     const { studentId } = req.params;
 

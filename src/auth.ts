@@ -1,8 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from './prisma';
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
@@ -32,9 +30,19 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     // decoded already obtained
     let user = null;
 
-    // Find user based on role
-    if (decoded.role === 'Admin') {
-      user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    // Find user based on role. Accountant is an Admin-scoped finance role: they
+    // authenticate against the same users table and are authorised per route by
+    // checkRole() below, not given blanket Admin access.
+    if (decoded.role === 'Admin' || decoded.role === 'Accountant') {
+      const userRecord = await prisma.user.findUnique({ where: { id: decoded.userId } });
+      if (userRecord) {
+        user = {
+          id: userRecord.id,
+          email: userRecord.email,
+          role: userRecord.role,
+          name: userRecord.name,
+        };
+      }
     } else if (decoded.role === 'Teacher') {
       const teacher = await prisma.teacher.findUnique({ where: { id: decoded.userId } });
       if (teacher) {

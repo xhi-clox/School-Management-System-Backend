@@ -112,11 +112,15 @@ async function loadEligibleStudents(db: Db) {
  * classId in the request may be a SchoolClass id or a plain class name. The UI works
  * in class names, so match whichever the caller supplied.
  */
-async function filterByClass<T extends { class: string }>(db: Db, students: T[], classId?: string | null): Promise<T[]> {
+async function filterByClass<T extends { class: string; section?: string | null }>(db: Db, students: T[], classId?: string | null): Promise<T[]> {
   if (!classId) return students;
   const classRow = await db.schoolClass.findFirst({ where: { id: classId } });
-  const wanted = classRow ? classRow.name : classId;
-  return students.filter((s) => s.class === wanted);
+  if (!classRow) return students.filter((s) => s.class === classId);
+  // A SchoolClass row is a specific class + section, so selecting "Class 1 - A"
+  // must not also bill Class 1 - B.
+  return students.filter(
+    (s) => s.class === classRow.name && (s.section ?? '') === (classRow.section ?? ''),
+  );
 }
 
 export async function buildGenerationPreview(db: Db, request: GenerationRequest): Promise<GenerationPreview> {
@@ -244,6 +248,7 @@ export async function buildGenerationPreview(db: Db, request: GenerationRequest)
             overrideAmount: override.overrideAmount,
             overrideDiscount: override.overrideDiscount,
             discountType: (override.discountType as 'percentage' | 'fixed' | null) ?? null,
+            isWaiver: override.isWaiver,
             overrideReason: override.overrideReason,
           }
         : null,

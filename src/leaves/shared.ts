@@ -29,9 +29,8 @@
  *    Cancellation restores the pre-sync state recorded in syncSummary
  *    (prior status back, created rows deleted) — never inventing absent marks.
  */
-import { PrismaClient, Prisma, Attendance } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { Prisma, Attendance } from '@prisma/client';
+import { prisma } from '../prisma';
 
 export const ACTIVE_STUDENT_STATUS = 'Active';
 export const ATTENDANCE_STATUSES = ['Present', 'Absent', 'Late', 'Leave'] as const;

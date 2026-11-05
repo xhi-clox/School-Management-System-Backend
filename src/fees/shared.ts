@@ -8,10 +8,37 @@ export const toNumber = (v: any): number => money(v).toNumber();
 
 export const PAYMENT_METHODS = ['cash', 'bank_transfer', 'bkash', 'nagad', 'card', 'cheque'] as const;
 
-const startOfDay = (d: Date): Date => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+export const DHAKA_TIME_ZONE = 'Asia/Dhaka';
 
-export const isVoided = (p: { status?: string | null }): boolean =>
-  p.status != null && String(p.status).toLowerCase() === 'voided';
+/**
+ * Calendar day in Asia/Dhaka as 'YYYY-MM-DD'. The server may run in UTC or any
+ * other zone, so date-only decisions (due/overdue, academic year, "today") must
+ * be made in the school's timezone instead of the host's local zone.
+ */
+export const dhakaDateKey = (d: Date = new Date()): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: DHAKA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+
+export const dhakaDateParts = (d: Date = new Date()): { year: number; month: number; day: number } => {
+  const [year, month, day] = dhakaDateKey(d).split('-').map(Number);
+  return { year, month, day };
+};
+
+/** Date-only values are persisted as UTC midnight so they do not drift. */
+export const utcMidnight = (d: Date = new Date()): Date => {
+  const { year, month, day } = dhakaDateParts(d);
+  return new Date(Date.UTC(year, month - 1, day));
+};
+
+/** A void and a refund both remove money from the active total, but keep history. */
+export const isVoided = (p: { status?: string | null }): boolean => {
+  const status = p.status == null ? '' : String(p.status).toLowerCase();
+  return status === 'voided' || status === 'refunded';
+};
 
 export const netPaid = (payments?: Array<{ amount: any }>): Prisma.Decimal =>
   (payments ?? []).filter((p: any) => !isVoided(p)).reduce((s, p) => s.plus(money(p.amount)), money(0));
@@ -30,20 +57,68 @@ export const getFeeState = (
   if (money(balance).lte(0)) return 'PAID';
   if (!dueDate) return 'DUE';
   const due = dueDate instanceof Date ? dueDate : new Date(dueDate);
-  return startOfDay(due) < startOfDay(today) ? 'OVERDUE' : 'DUE';
+  return dhakaDateKey(due) < dhakaDateKey(today) ? 'OVERDUE' : 'DUE';
 };
 
 /** BD academic year starts in July: Aug 2026 -> '2026-27', Jan 2026 -> '2025-26'. */
-export const academicYearForMonth = (year: number, month: number): string =>
-  month >= 7
-    ? `${year}-${String((year + 1) % 100).padStart(2, '0')}`
-    : `${String((year - 1) % 100).padStart(2, '0')}-${String(year % 100).padStart(2, '0')}`;
+export const academicYearForMonth = (year: number, month: number): string => {
+  const start = month >= 7 ? year : year - 1;
+  return `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
+};
 
-export const academicYearForDate = (d: Date): string =>
-  academicYearForMonth(d.getFullYear(), d.getMonth() + 1);
+export const academicYearForDate = (d: Date): string => {
+  const { year, month } = dhakaDateParts(d);
+  return academicYearForMonth(year, month);
+};
+
+/**
+ * Canonicalise any accepted academic-year label to the stored 'YYYY-YY' form.
+ * Accepts '2026-2027', '2026-27' and '2026'; rejects inconsistent ranges.
+ */
+export const normalizeAcademicYear = (label?: string | null): string | null => {
+  if (!label) return null;
+  const s = String(label).trim();
+  const m = s.match(/^(\d{4})\s*[-/–]\s*(\d{2,4})$/);
+  if (m) {
+    const start = Number(m[1]);
+    let end = Number(m[2]);
+    if (String(m[2]).length === 2) end = Math.floor(start / 100) * 100 + end;
+    if (end === start + 1) return `${start}-${String(end % 100).padStart(2, '0')}`;
+    return null;
+  }
+  const just = s.match(/^(\d{4})$/);
+  if (just) {
+    const start = Number(just[1]);
+    return `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
+  }
+  return null;
+};
 
 export const billingMonthStr = (year: number, month: number): string =>
   `${year}-${String(month).padStart(2, '0')}`;
+
+export const DEFAULT_FEE_DUE_DAY = 10;
+
+/**
+ * Due date for a billing period. Monthly fees fall due on the configured day of
+ * that month (clamped to its last day); admission fees are due immediately.
+ */
+export const dueDateForBillingPeriod = (
+  billingPeriod: string,
+  dueDay: number = DEFAULT_FEE_DUE_DAY,
+  now: Date = new Date(),
+): Date | null => {
+  if (/^\d{4}-ADM$/.test(billingPeriod)) {
+    return utcMidnight(now);
+  }
+  const m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(billingPeriod);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const day = Math.min(Math.max(1, Math.trunc(dueDay || DEFAULT_FEE_DUE_DAY)), lastDay);
+  return new Date(Date.UTC(year, month - 1, day));
+};
 
 export const parseBillingMonth = (value: string): { year: number; month: number } | null => {
   const m = /^(\d{4})-(\d{2})$/.exec(value);

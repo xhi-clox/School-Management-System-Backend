@@ -64,7 +64,7 @@ async function main() {
 
   const classes = await prisma.schoolClass.findMany({ select: { id: true, name: true, section: true } });
   const students = await prisma.student.findMany({
-    select: { id: true, name: true, class: true, section: true, roll: true },
+    select: { id: true, name: true, class: true, section: true, roll: true, status: true },
     orderBy: [{ class: 'asc' }, { roll: 'asc' }],
   });
   console.log(`classes=${classes.length} students=${students.length}\n`);
@@ -214,6 +214,7 @@ async function main() {
       categoryId: recurring.id,
       billingPeriod: WAIVED_PERIOD,
       overrideAmount: null,
+      isWaiver: true,
       overrideReason: 'Scholarship waiver',
     },
   });
@@ -282,9 +283,14 @@ async function main() {
     billingPeriod: '2099-06',
     classId: targetClass.id,
   });
-  const scopedStudents = students.filter((s) => s.class === targetClass.name).length;
+  const scopedStudents = students.filter(
+    (s) =>
+      s.class === targetClass.name &&
+      (s.section ?? '') === (targetClass.section ?? '') &&
+      s.status === 'Active',
+  ).length;
+  console.log(`        ${targetClass.name} -> created=${scoped.created} skipped=${scoped.skipped} failed=${scoped.failed} expected=${scopedStudents}`);
   ok('only the selected class was billed', scoped.created === scopedStudents);
-  console.log(`        ${targetClass.name} -> ${scoped.created} students`);
 
   console.log(`\n${passed} checks passed.`);
 }

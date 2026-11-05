@@ -216,7 +216,7 @@ model Invoice {
   dueDate      DateTime?
   billingMonth String? // 'YYYY-MM', or 'YYYY-ADM' for an admission fee
   academicYear String? // '2026-27'
-  invoiceNo    String?
+  invoiceNo    String?   @unique
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   
@@ -253,10 +253,14 @@ model Payment {
   transactionRef String?
   receivedBy     String?
   status         String    @default("active") // 'active' | 'voided'
-  paymentNo      String?
+  paymentNo      String?   @unique
   voidedAt       DateTime?
   voidedBy       String?
   voidReason     String?
+  refundedAt     DateTime?
+  refundReason   String?
+  // Supplied by the client so a retried POST /payments cannot create a second receipt.
+  idempotencyKey String?   @unique
   date           DateTime  @default(now())
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -978,6 +982,8 @@ model Institute {
   country    String?
   email      String   @unique
   currency   String   @default("USD")
+  // Day of the month monthly invoices fall due (clamped to the month's last day).
+  dueDay     Int      @default(10)
   // Weekly closure days used when computing school working days (leave system).
   // Configurable from Settings; empty array means every day is a working day.
   weeklyOffDays String[] @default(["Friday", "Saturday"])
@@ -1126,7 +1132,9 @@ model FeeRecord {
   ledgerEntries   LedgerEntry[]
   invoice         Invoice?
   override        StudentFeeOverride? @relation("FeeRecordOverride", fields: [overrideId], references: [id], onDelete: SetNull)
-  overrideId      String?   @unique
+  overrideId      String?
+  // Immutable snapshot of why this record's amount differs from the assignment.
+  overrideReason  String?
   
   @@unique([studentId, categoryId, billingPeriod]) // CRITICAL: Prevent duplicates
   @@index([studentId])
@@ -1144,9 +1152,10 @@ model StudentFeeOverride {
   billingPeriod   String?  // "2026-10" or null = "applies to all periods for this category"
   
   // Override Values
-  overrideAmount  Decimal? // Override the assignment amount; null = waive fee
+  overrideAmount  Decimal? // Override the assignment amount; null = no amount override
   overrideDiscount Decimal? // Override the discount
   discountType    String?   // "percentage" | "fixed"
+  isWaiver        Boolean  @default(false) // Explicit waiver; null amount alone no longer waives
   overrideReason  String   // "Scholarship", "Hardship", "Sibling discount", etc.
   
   // Audit
@@ -1160,8 +1169,7 @@ model StudentFeeOverride {
   // Relations
   student         Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
   category        FeeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  usedByRecord    FeeRecord? @relation("FeeRecordOverride")
-  feeRecordId     String?   @unique
+  records         FeeRecord[] @relation("FeeRecordOverride")
 
   @@index([studentId])
   @@index([categoryId])

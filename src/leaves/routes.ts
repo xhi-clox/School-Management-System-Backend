@@ -21,7 +21,7 @@
 import { Request, Response } from 'express';
 import express from 'express';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../prisma';
 import {
   ACTIVE_STUDENT_STATUS,
   LEAVE_CATEGORIES,
@@ -40,7 +40,6 @@ import { authMiddleware } from '../auth';
 import { checkRole } from '../checkRole';
 import { isBase64Image } from '../cloudinary';
 
-const prisma = new PrismaClient();
 const router = express.Router();
 
 function fail(res: Response, status: number, message: string, extra?: any) {
