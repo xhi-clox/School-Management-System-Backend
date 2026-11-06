@@ -10746,8 +10746,19 @@ app.get('/student/results', authMiddleware, authMiddleware, checkRole(['Student'
       if (failed) {
         grade = 'F';
       } else if (grading.length) {
-        const g = grading.find((x) => percentage >= Number(x.minPercent) && percentage <= Number(x.maxPercent));
-        grade = g ? g.grade : (grading[grading.length - 1]?.grade || 'â€”');
+        // Rebase band bounds onto the same percentage scale as the overall
+        // percentage. Bands may be stored on a marks scale (e.g. a "50 Marks"
+        // template stores A+ as 40-50), so comparing the 0-100 percentage
+        // directly against raw bounds misgrades every subject. (#grade-scale)
+        const bandMax = Math.max(...grading.map((x) => Number(x.maxPercent) || 0));
+        const asPctRef = bandMax > 0 ? bandMax : 100;
+        const asPct = (v: number) => ((Number(v) || 0) / asPctRef) * 100;
+        const sorted = [...grading].sort((a, b) => asPct(Number(b.minPercent)) - asPct(Number(a.minPercent)));
+        let matched: any = null;
+        for (const x of sorted) {
+          if (asPct(Number(x.minPercent)) <= percentage + 0.0001) matched = x;
+        }
+        grade = (matched || sorted[sorted.length - 1])?.grade || '—';
       }
 
       // Rank within this exam across classmates.
