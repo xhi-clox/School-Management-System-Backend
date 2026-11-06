@@ -2478,6 +2478,54 @@ function resolveGradingTypeId(
   return scheduleGradingTypeId || examTypeId || null;
 }
 
+// Percentage-style templates (totalFull >= 100) rebase any schedule scale and
+// grade correctly (a 40/50 paper is a 40/50 = 80% paper). Mark-based templates
+// (e.g. a 50-mark template whose bands are expressed as marks out of 50) only
+// line up when the schedule's full marks equal the template scale — otherwise
+// 40/50 is compared as 40/100 and the grade is one band too low. Used by result
+// validation and the publish gate so a new exam cannot be graded on the wrong
+// denominator.
+type ScheduleScaleMismatch = {
+  scheduleId: string;
+  subject: string;
+  classLabel: string | null;
+  fullMarks: number;
+  expected: number;
+};
+async function findScheduleScaleMismatches(examId: string): Promise<ScheduleScaleMismatch[]> {
+  const exam = await prisma.exam.findUnique({ where: { id: examId }, select: { typeId: true } });
+  if (!exam) return [];
+  const schedules = await prisma.examSchedule.findMany({
+    where: { examId },
+    include: { subject: true, class: true },
+  });
+  const templateFullCache = new Map<string, number | null>();
+  const mismatches: ScheduleScaleMismatch[] = [];
+  for (const s of schedules) {
+    const tplId = resolveGradingTypeId(s.gradingTypeId, exam.typeId);
+    if (!tplId) continue;
+    if (!templateFullCache.has(tplId)) {
+      templateFullCache.set(tplId, await fetchTemplateTotalFull(tplId));
+    }
+    let expected = templateFullCache.get(tplId) ?? null;
+    // A frozen snapshot is authoritative for schedules already created.
+    const snapshot = parseGradingSnapshot(s.gradingSnapshot);
+    if (snapshot && Number(snapshot.totalFull) > 0) expected = Number(snapshot.totalFull);
+    if (!expected || expected >= 100) continue; // percentage-style template: scale-agnostic
+    const full = Number(s.fullMarks) || 0;
+    if (full > 0 && full !== expected) {
+      mismatches.push({
+        scheduleId: s.id,
+        subject: s.subject?.name || s.subjectId,
+        classLabel: s.class ? `${s.class.name}${s.class.section ? `-${s.class.section}` : ''}` : null,
+        fullMarks: full,
+        expected,
+      });
+    }
+  }
+  return mismatches;
+}
+
 // Results
 app.get('/results', authMiddleware, authMiddleware, checkRole(['Admin', 'Teacher']), async (req: Request, res: Response) => {
   const { examId, subjectId, studentIds } = req.query as any;
@@ -3498,6 +3546,19 @@ app.post('/results/:examId/publish', authMiddleware, checkRole(['Admin']), async
       });
     }
 
+    // Grade-scale gate: a mark-based grading template (e.g. 50 marks) must be
+    // paired with schedules using the same scale, otherwise identical marks are
+    // graded against the wrong denominator.
+    const scaleMismatches = await findScheduleScaleMismatches(examId);
+    if (scaleMismatches.length > 0) {
+      const sample = scaleMismatches.slice(0, 5)
+        .map((m) => `${m.subject}${m.classLabel ? ` (${m.classLabel})` : ''}: ${m.fullMarks}/${m.expected}`)
+        .join('; ');
+      return res.status(409).json({
+        error: `Cannot publish: ${scaleMismatches.length} schedule(s) use a different mark scale than the grading template (${sample}). Fix the schedule full marks or the grading template first.`,
+      });
+    }
+
     const rankBy = (req.body?.rankBy || 'GPA') as string;
     if (!RANK_MODES.includes(rankBy as any)) {
       return res.status(400).json({ error: `Invalid rankBy. Allowed: ${RANK_MODES.join(', ')}` });
@@ -3757,6 +3818,18 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
       }
     }
 
+    // Grade-scale consistency: mark-based templates (e.g. 50 marks) must match
+    // the schedule's full marks. Surfaced here so the admin sees it BEFORE
+    // publishing instead of discovering a wrong grade later.
+    const scaleMismatches = await findScheduleScaleMismatches(examId);
+    for (const m of scaleMismatches.slice(0, 20)) {
+      issues.push({
+        type: 'scale_mismatch',
+        message: `${m.subject}${m.classLabel ? ` (${m.classLabel})` : ''} uses ${m.fullMarks} marks but the grading template expects ${m.expected}`,
+        scheduleId: m.scheduleId,
+      });
+    }
+
     const expectedMarks = enrolled.reduce((sum, st) => sum + subjectsForClass(st.class, st.section).size, 0);
     const totalChecks = Math.max(1, subjectIds.length > 0 ? expectedMarks : 1);
     const penaltyScore = missingMarks * 2 + missingPractical + overMax + duplicateCount * 3;
@@ -3829,9 +3902,10 @@ app.get('/results/:examId/validation', authMiddleware, checkRole(['Admin']), asy
         noMarksExceedMax: overMax === 0,
         noDuplicateResults: duplicateCount === 0,
         practicalMarksEntered: missingPractical === 0,
-        attendanceAvailable: attCount > 0
+        attendanceAvailable: attCount > 0,
+        scaleMatchesTemplate: scaleMismatches.length === 0
       },
-      counts: { missingMarks, missingPractical, overMax, duplicateCount },
+      counts: { missingMarks, missingPractical, overMax, duplicateCount, scaleMismatches: scaleMismatches.length },
       // extended for inline verification panel
       remainingMarks,
       classBreakdown,
@@ -4866,6 +4940,26 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
     const exam = await prisma.exam.findUnique({ where: { id: d.examId } });
     if (!exam) return res.status(404).json({ error: 'Exam not found' });
 
+    // A preset may have been authored on a different mark scale than this exam's
+    // grading template. Resolve the template once and normalise below so a
+    // 50-mark exam never inherits 100-mark schedules (which would grade 40/50 as
+    // 40/100 and drop the letter grade). Percentage-style templates
+    // (totalFull >= 100) are scale-agnostic and keep the preset's own scale.
+    const presetTemplateFull = await fetchTemplateTotalFull(exam.typeId);
+    const presetGradingSnapshot = presetTemplateFull
+      ? await buildGradingSnapshot(exam.typeId, presetTemplateFull)
+      : null;
+    const normalisePresetSubject = (subj: any) => {
+      const oldFull = Number(subj.fullMarks) || 0;
+      const newFull = presetTemplateFull && presetTemplateFull > 0 && presetTemplateFull < 100
+        ? presetTemplateFull
+        : oldFull;
+      const scale = oldFull > 0 && newFull > 0 ? newFull / oldFull : 1;
+      const oldPass = Number(subj.passMarks) || 0;
+      const newPass = oldPass > 0 ? Math.round(oldPass * scale) : null;
+      return { fullMarks: newFull || null, passMarks: newPass };
+    };
+
     // resolve selected classes -> concrete SchoolClass ids (grade name + optional section)
     const targets = d.selectedClasses && d.selectedClasses.length
       ? d.selectedClasses
@@ -4916,8 +5010,7 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
             date: date.toISOString(),
             startTime: defaultStartTime,
             endTime: defaultEndTime || `${addMinutesLocal(defaultStartTime, (preset.durationHours || 3) * 60)}`,
-            fullMarks: subj.fullMarks,
-            passMarks: subj.passMarks,
+            ...normalisePresetSubject(subj),
             sortOrder: subj.position,
           });
           // advance cursor: one per day; after last subject or gap subject apply extra gap
@@ -4934,8 +5027,7 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
             date: null,
             startTime: defaultStartTime,
             endTime: defaultEndTime || '',
-            fullMarks: subj.fullMarks,
-            passMarks: subj.passMarks,
+            ...normalisePresetSubject(subj),
             sortOrder: subj.position,
           });
         }
@@ -4972,6 +5064,7 @@ app.post('/exam-presets/apply', authMiddleware, checkRole(['Admin']), async (req
             fullMarks: b.fullMarks,
             passMarks: b.passMarks,
             sortOrder: b.sortOrder,
+            ...(presetGradingSnapshot ? { gradingSnapshot: presetGradingSnapshot as any } : {}),
           };
           const existing = await tx.examSchedule.findFirst({ where });
           if (existing) saved.push(await tx.examSchedule.update({ where: { id: existing.id }, data }));
